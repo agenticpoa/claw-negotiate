@@ -142,7 +142,7 @@ The wrapper generates the executed PDF via `$NEGOTIATE_REPO_PATH/documents/gener
 SAFE document generated. Waiting for your co-sign.
 
 Approve from any terminal:
-  ssh -i $SSHSIGN_KEY_PATH sshsign.dev approve --id pnd_abc123
+  ssh sshsign.dev approve --id pnd_abc123
 
 I'll confirm once signed.
 ```
