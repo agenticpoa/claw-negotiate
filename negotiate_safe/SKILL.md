@@ -13,7 +13,7 @@ Confirm the environment is ready. Do not mint APOA tokens here. Tokens are per-n
 
 1. `$NEGOTIATE_REPO_PATH/negotiate.py` exists. If not, report "Negotiate repo not found at $NEGOTIATE_REPO_PATH" and stop.
 2. `$PRINCIPAL_KEY_PATH` exists and is readable. This is the founder's Ed25519 signing key used to sign APOA tokens. If missing, stop and ask the user to provision one (`python3 -c "from apoa import generate_key_pair; ..."`).
-3. `ssh -i $SSHSIGN_KEY_PATH $SSHSIGN_HOST echo ok` succeeds. If not, report the SSH error and stop. Do not negotiate without the audit trail.
+3. Verify sshsign is reachable: run `ssh -i $SSHSIGN_KEY_PATH ${SSHSIGN_HOST:-sshsign.dev} history --negotiation-id healthcheck`. Any JSON response (even an error like `{"error":"..."}`) proves connectivity. Only fail if the SSH connection itself is refused or times out.
 4. Generate a fresh `negotiation_id` (UUID v4). Hold it in memory for the rest of the flow.
 
 ## Step 1: Parse the user's requirements
