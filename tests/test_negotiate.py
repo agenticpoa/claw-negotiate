@@ -48,6 +48,38 @@ class TestBuildUpstreamCmd:
         cmd = ng.build_upstream_cmd(tmp_path, sample_founder_config, sample_investor_config, role="")
         assert "--role" not in cmd
 
+    def test_includes_founder_constraint_flags(self, sample_founder_config, sample_investor_config, tmp_path):
+        f_constraints = {"cap_min": 50_000_000, "cap_max": 100_000_000,
+                         "discount_min": 0.10, "discount_max": 0.25,
+                         "pro_rata_required": True, "mfn_required": False}
+        i_constraints = {"cap_min": 30_000_000, "cap_max": 80_000_000,
+                         "discount_min": 0.05, "discount_max": 0.15,
+                         "pro_rata_required": False, "mfn_required": False}
+        cmd = ng.build_upstream_cmd(tmp_path, sample_founder_config, sample_investor_config,
+                                    role="", founder_constraints=f_constraints,
+                                    investor_constraints=i_constraints)
+        # Founder constraints in CLI flags
+        idx = cmd.index("--founder-cap-min")
+        assert cmd[idx + 1] == "50000000"
+        idx = cmd.index("--founder-cap-max")
+        assert cmd[idx + 1] == "100000000"
+        idx = cmd.index("--founder-discount-min")
+        assert cmd[idx + 1] == "0.1"
+        idx = cmd.index("--founder-pro-rata-required")
+        assert cmd[idx + 1] == "true"
+        idx = cmd.index("--founder-mfn-required")
+        assert cmd[idx + 1] == "false"
+        # Investor constraints in CLI flags
+        idx = cmd.index("--investor-cap-min")
+        assert cmd[idx + 1] == "30000000"
+        idx = cmd.index("--investor-cap-max")
+        assert cmd[idx + 1] == "80000000"
+
+    def test_omits_constraint_flags_when_none(self, sample_founder_config, sample_investor_config, tmp_path):
+        cmd = ng.build_upstream_cmd(tmp_path, sample_founder_config, sample_investor_config, role="")
+        assert "--founder-cap-min" not in cmd
+        assert "--investor-cap-min" not in cmd
+
     def test_missing_signing_key_falls_back(self, sample_founder_config, sample_investor_config, tmp_path):
         # Drop the shared keys; fall back to per-config signing_key_id
         del sample_founder_config["founder_signing_key_id"]

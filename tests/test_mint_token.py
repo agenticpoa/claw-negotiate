@@ -183,6 +183,65 @@ class TestCli:
         # Documents the upstream gap: service in token is generic
         assert out["actual_service_in_token"] == "safe-agreement"
 
+    def test_output_includes_founder_constraints(self, sample_constraints, tmp_path, monkeypatch, capsys):
+        (tmp_path / "create_tokens.py").write_text("# stub")
+        monkeypatch.setenv("NEGOTIATE_REPO_PATH", str(tmp_path))
+        with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="", stderr="")):
+            argv = ["mint_token.py"] + self._base_args(json.dumps(sample_constraints)) + [
+                "--skip-sshsign-keys",
+            ]
+            with patch.object(sys, "argv", argv):
+                mt.main()
+
+        out = json.loads(capsys.readouterr().out)
+        fc = out["founder_constraints"]
+        assert fc["cap_min"] == 8_000_000
+        assert fc["cap_max"] == 12_000_000
+        assert fc["discount_min"] == 0.20
+        assert fc["pro_rata_required"] is True
+        assert fc["mfn_required"] is False
+
+    def test_output_includes_investor_constraints_from_env(self, sample_constraints, tmp_path, monkeypatch, capsys):
+        (tmp_path / "create_tokens.py").write_text("# stub")
+        monkeypatch.setenv("NEGOTIATE_REPO_PATH", str(tmp_path))
+        monkeypatch.setenv("INVESTOR_CAP_MIN", "30000000")
+        monkeypatch.setenv("INVESTOR_CAP_MAX", "80000000")
+        monkeypatch.setenv("INVESTOR_DISCOUNT_MIN", "0.05")
+        monkeypatch.setenv("INVESTOR_DISCOUNT_MAX", "0.15")
+        monkeypatch.setenv("INVESTOR_PRO_RATA_REQUIRED", "false")
+        monkeypatch.setenv("INVESTOR_MFN_REQUIRED", "false")
+        with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="", stderr="")):
+            argv = ["mint_token.py"] + self._base_args(json.dumps(sample_constraints)) + [
+                "--skip-sshsign-keys",
+            ]
+            with patch.object(sys, "argv", argv):
+                mt.main()
+
+        out = json.loads(capsys.readouterr().out)
+        ic = out["investor_constraints"]
+        assert ic["cap_min"] == 30_000_000
+        assert ic["cap_max"] == 80_000_000
+        assert ic["discount_min"] == 0.05
+        assert ic["discount_max"] == 0.15
+
+    def test_output_includes_investor_defaults_when_env_unset(self, sample_constraints, tmp_path, monkeypatch, capsys):
+        (tmp_path / "create_tokens.py").write_text("# stub")
+        monkeypatch.setenv("NEGOTIATE_REPO_PATH", str(tmp_path))
+        monkeypatch.delenv("INVESTOR_CAP_MIN", raising=False)
+        monkeypatch.delenv("INVESTOR_CAP_MAX", raising=False)
+        with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="", stderr="")):
+            argv = ["mint_token.py"] + self._base_args(json.dumps(sample_constraints)) + [
+                "--skip-sshsign-keys",
+            ]
+            with patch.object(sys, "argv", argv):
+                mt.main()
+
+        out = json.loads(capsys.readouterr().out)
+        ic = out["investor_constraints"]
+        # Should use create_tokens.py defaults
+        assert ic["cap_min"] == 6_000_000
+        assert ic["cap_max"] == 10_000_000
+
     def test_subprocess_failure_propagates(self, sample_constraints, tmp_path, monkeypatch, capsys):
         (tmp_path / "create_tokens.py").write_text("# stub")
         monkeypatch.setenv("NEGOTIATE_REPO_PATH", str(tmp_path))

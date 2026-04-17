@@ -45,7 +45,11 @@ def load_config(path: str) -> dict:
     return json.loads(Path(path).read_text())
 
 
-def build_upstream_cmd(repo: Path, f_cfg: dict, i_cfg: dict, role: str) -> list[str]:
+def build_upstream_cmd(
+    repo: Path, f_cfg: dict, i_cfg: dict, role: str,
+    founder_constraints: dict | None = None,
+    investor_constraints: dict | None = None,
+) -> list[str]:
     """Expand the per-negotiation config JSONs into upstream negotiate.py flags.
 
     Upstream does not accept a --config flag, despite create_tokens.py printing
@@ -68,6 +72,24 @@ def build_upstream_cmd(repo: Path, f_cfg: dict, i_cfg: dict, role: str) -> list[
         "--investor-signing-key-id", i_cfg.get("investor_signing_key_id") or i_cfg.get("signing_key_id", ""),
         "--poll",
     ]
+    if founder_constraints:
+        cmd.extend([
+            "--founder-cap-min", str(founder_constraints["cap_min"]),
+            "--founder-cap-max", str(founder_constraints["cap_max"]),
+            "--founder-discount-min", str(founder_constraints["discount_min"]),
+            "--founder-discount-max", str(founder_constraints["discount_max"]),
+            "--founder-pro-rata-required", "true" if founder_constraints["pro_rata_required"] else "false",
+            "--founder-mfn-required", "true" if founder_constraints["mfn_required"] else "false",
+        ])
+    if investor_constraints:
+        cmd.extend([
+            "--investor-cap-min", str(investor_constraints["cap_min"]),
+            "--investor-cap-max", str(investor_constraints["cap_max"]),
+            "--investor-discount-min", str(investor_constraints["discount_min"]),
+            "--investor-discount-max", str(investor_constraints["discount_max"]),
+            "--investor-pro-rata-required", "true" if investor_constraints["pro_rata_required"] else "false",
+            "--investor-mfn-required", "true" if investor_constraints["mfn_required"] else "false",
+        ])
     if role:
         cmd.extend(["--role", role])
     return cmd
@@ -145,7 +167,11 @@ def main() -> int:
     i_cfg = load_config(mint["investor_config_path"])
     host = f_cfg.get("sshsign_host") or os.environ.get("SSHSIGN_HOST", "sshsign.dev")
 
-    cmd = build_upstream_cmd(repo, f_cfg, i_cfg, args.role)
+    cmd = build_upstream_cmd(
+        repo, f_cfg, i_cfg, args.role,
+        founder_constraints=mint.get("founder_constraints"),
+        investor_constraints=mint.get("investor_constraints"),
+    )
 
     stop = threading.Event()
     get_history_fn = load_get_history(repo)

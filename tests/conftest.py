@@ -114,4 +114,20 @@ def sample_mint_output(tmp_path, sample_founder_config, sample_investor_config) 
         "expires_at": "2026-04-16T15:00:00Z",
         "intended_service": "safe:acme-corp:neg_abc123",
         "actual_service_in_token": "safe-agreement",
+        "founder_constraints": {
+            "cap_min": 8_000_000,
+            "cap_max": 12_000_000,
+            "discount_min": 0.20,
+            "discount_max": 0.25,
+            "pro_rata_required": True,
+            "mfn_required": False,
+        },
+        "investor_constraints": {
+            "cap_min": 6_000_000,
+            "cap_max": 10_000_000,
+            "discount_min": 0.15,
+            "discount_max": 0.25,
+            "pro_rata_required": False,
+            "mfn_required": False,
+        },
     }

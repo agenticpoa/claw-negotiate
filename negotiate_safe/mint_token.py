@@ -150,6 +150,22 @@ def main() -> int:
         # "safe-agreement" in the token. See open item in SKILL.md.
         "intended_service": f"safe:{slugify(args.company_name)}:{negotiation_id}",
         "actual_service_in_token": "safe-agreement",
+        "founder_constraints": {
+            "cap_min": constraints["valuation_cap_min"],
+            "cap_max": constraints["valuation_cap_max"],
+            "discount_min": float(constraints["discount_min"]),
+            "discount_max": discount_max,
+            "pro_rata_required": pro_rata_required,
+            "mfn_required": mfn_required,
+        },
+        "investor_constraints": {
+            "cap_min": int(os.environ.get("INVESTOR_CAP_MIN", "6000000")),
+            "cap_max": int(os.environ.get("INVESTOR_CAP_MAX", "10000000")),
+            "discount_min": float(os.environ.get("INVESTOR_DISCOUNT_MIN", "0.15")),
+            "discount_max": float(os.environ.get("INVESTOR_DISCOUNT_MAX", "0.25")),
+            "pro_rata_required": os.environ.get("INVESTOR_PRO_RATA_REQUIRED", "false").lower() in ("true", "1", "yes"),
+            "mfn_required": os.environ.get("INVESTOR_MFN_REQUIRED", "false").lower() in ("true", "1", "yes"),
+        },
     }
     json.dump(output, sys.stdout, indent=2)
     sys.stdout.write("\n")
