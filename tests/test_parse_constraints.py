@@ -16,7 +16,7 @@ import pytest
 
 import parse_constraints as pc
 
-SCRIPT = Path(__file__).parent.parent / "negotiate-safe" / "parse_constraints.py"
+SCRIPT = Path(__file__).parent.parent / "negotiate_safe" / "parse_constraints.py"
 
 
 def make_mock_client(response_text: str) -> MagicMock:

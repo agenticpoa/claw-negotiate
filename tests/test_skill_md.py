@@ -1,4 +1,4 @@
-"""Structural tests for negotiate-safe/SKILL.md.
+"""Structural tests for negotiate_safe/SKILL.md.
 
 These catch regressions like: dropped env var from requires.env, missing step,
 description drift from implementation, or Telegram template types that don't
@@ -14,7 +14,7 @@ import pytest
 
 import telegram_format as tf
 
-SKILL_MD = Path(__file__).parent.parent / "negotiate-safe" / "SKILL.md"
+SKILL_MD = Path(__file__).parent.parent / "negotiate_safe" / "SKILL.md"
 
 
 @pytest.fixture(scope="module")
@@ -31,7 +31,7 @@ def frontmatter(skill_content: str) -> str:
 
 class TestFrontmatter:
     def test_name(self, frontmatter):
-        assert re.search(r"^name:\s*negotiate-safe\s*$", frontmatter, re.M)
+        assert re.search(r"^name:\s*negotiate_safe\s*$", frontmatter, re.M)
 
     def test_user_invocable(self, frontmatter):
         assert re.search(r"^user-invocable:\s*true\s*$", frontmatter, re.M)

@@ -15,7 +15,7 @@ import pytest
 
 import mint_token as mt
 
-SCRIPT = Path(__file__).parent.parent / "negotiate-safe" / "mint_token.py"
+SCRIPT = Path(__file__).parent.parent / "negotiate_safe" / "mint_token.py"
 
 
 class TestValidateConstraints:

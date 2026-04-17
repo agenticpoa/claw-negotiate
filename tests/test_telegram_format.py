@@ -14,7 +14,7 @@ import pytest
 
 import telegram_format as tf
 
-SCRIPT = Path(__file__).parent.parent / "negotiate-safe" / "telegram_format.py"
+SCRIPT = Path(__file__).parent.parent / "negotiate_safe" / "telegram_format.py"
 
 
 class TestFormatters:

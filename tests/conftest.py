@@ -10,7 +10,7 @@ import pytest
 
 # Make skill scripts importable as modules
 REPO_ROOT = Path(__file__).parent.parent
-SKILL_DIR = REPO_ROOT / "negotiate-safe"
+SKILL_DIR = REPO_ROOT / "negotiate_safe"
 sys.path.insert(0, str(SKILL_DIR))
 
 

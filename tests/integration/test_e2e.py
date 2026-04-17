@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-SKILL_DIR = Path(__file__).parent.parent.parent / "negotiate-safe"
+SKILL_DIR = Path(__file__).parent.parent.parent / "negotiate_safe"
 
 
 pytestmark = pytest.mark.integration
