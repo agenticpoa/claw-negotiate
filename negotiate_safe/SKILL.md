@@ -86,38 +86,28 @@ Revoke anytime: apoa revoke tid_abc123
 
 ## Step 3: Run the negotiation
 
-Call `{baseDir}/negotiate.py` (the skill's wrapper). The wrapper shells out to `$NEGOTIATE_REPO_PATH/negotiate.py` with flags built from the parsed constraints. Required flags:
+Call `{baseDir}/negotiate.py` (the skill's wrapper) with `--mint-output` pointing to the mint JSON from Step 2.5.
 
-- `--founder-cap-min`, `--founder-cap-max`
-- `--founder-discount-min`, `--founder-discount-max`
-- `--founder-pro-rata-required`, `--founder-mfn-required`
-- `--founder-token`, `--founder-pubkey`, `--founder-signing-key-id` (from the `founder.json` minted in Step 2.5, not a repo-root default)
-- `--investor-token`, `--investor-pubkey`, `--investor-signing-key-id` (from the `investor.json` minted in Step 2.5)
-- `--company-name`, `--founder-name`, `--investor-name`, `--investment-amount`
-- `--poll` (enables sshsign logging and co-sign flow)
+The wrapper directly imports and calls the upstream `run_local()` function, bypassing `auto_setup()`. This means:
+- Our negotiation ID, tokens, and keys are used (no duplication)
+- Constraints from the APOA tokens drive agent behavior
+- PDFs are written to a per-negotiation output directory
 
-The wrapper adds `--json-events` to stream structured offer events on stdout (one JSON object per line). Parse each line and pipe to Step 4.
+The wrapper handles the full lifecycle: negotiation, offer logging to sshsign, PDF generation, co-sign submission, and approval polling. The upstream prints each offer to stdout as it happens. Relay these to the user as they appear.
 
-Both parties run as real Claude agents in the same process by default (when `--role` is omitted). The investor is not a stub.
+Both parties run as real Claude agents in the same process. The investor is not a stub.
 
-## Step 4: Stream offers to Telegram
+## Step 4: Relay offers to the user
 
-For each offer event from Step 3:
-
-1. Confirm it was logged to sshsign (the event includes `immudb_tx`). If `immudb_tx` is null, the offer was not logged. Stop and report.
-2. Call `{baseDir}/telegram_format.py` with the offer dict.
-3. Post to Telegram. Keep messages under 5 lines. Format:
+The upstream prints each offer with constraint validation status as it happens. Relay these to the user in real time. Summarize each round concisely:
 
 ```
 [Round 2 - Founder]
-"$6M is below our minimum. Counter at $10M with 20% discount."
-
-Cap: $10,000,000 ✓ (range: $8M-$12M)
-Discount: 20% ✓ (min: 20%)
-immudb tx: 48326
+Cap: $10,000,000 (range: $8M-$12M)
+Discount: 20% (min: 20%)
 ```
 
-Post order: log to sshsign first, Telegram second. Always.
+If sshsign is enabled, each offer is logged to the audit trail before display. The wrapper handles this ordering automatically.
 
 ## Step 5: Agreement and co-sign
 
@@ -136,29 +126,22 @@ All terms within your authorization ✓
 Generating SAFE document...
 ```
 
-The wrapper generates the executed PDF via `$NEGOTIATE_REPO_PATH/documents/generator.py` and submits it for co-sign. Surface the pending ID to the user:
+The wrapper handles PDF generation, co-sign submission, and approval polling automatically. It will:
+1. Generate the SAFE PDF in the per-negotiation output directory
+2. Submit it for co-sign via sshsign
+3. Print the approval URL (for handwritten signature) or the SSH approve command
+4. Poll for approval until signed or timeout (5 minutes)
+5. Generate the executed PDF with the full audit trail
+6. Emit a `{"type": "pdf", "path": "..."}` event with the executed PDF path
 
-```
-SAFE document generated. Waiting for your co-sign.
-
-Approve from any terminal:
-  ssh sshsign.dev approve --id pnd_abc123
-
-I'll confirm once signed.
-```
-
-Poll `sshsign_client.poll_for_approval(pending_id)` until signed or timeout. On success, send the executed PDF as a Telegram file attachment with:
+Surface the approval URL or SSH command to the user. The wrapper waits for approval automatically. Once signed, share the executed PDF with the user:
 
 ```
 Signed!
 
 Document: SAFE Agreement
 Terms: $9M cap, 20% discount, pro-rata
-Audit TX: 48329
-Verify: sshsign.dev/verify/48329
-
-Full negotiation: 6 offers in 24 seconds.
-All entries cryptographically verified.
+PDF: /path/to/neg_abc123_executed.pdf
 ```
 
 ## Invariants
@@ -187,6 +170,6 @@ These are not guidelines. They are hard guards enforced by the wrapper:
 - `{baseDir}` is the skill folder. `$NEGOTIATE_REPO_PATH` is the external repo (configured in env, not bundled).
 - Four scripts ship in `{baseDir}`: `parse_constraints.py`, `mint_token.py`, `negotiate.py` (wrapper), `telegram_format.py`.
 - `mint_token.py` wraps `apoa.create_client().create_token()` with negotiation-specific defaults: `accessMode: "api"`, `service: safe:<slug>:<negotiation_id>`, 1h TTL. It writes the token pair into `${NEGOTIATE_REPO_PATH}/negotiations/<negotiation_id>/` so concurrent negotiations don't collide.
-- The wrapper's `--json-events` flag requires a patch to upstream `negotiate.py`. Until that lands, fall back to polling `sshsign_client.get_history(negotiation_id)` after each round.
-- Telegram delivery is provided by the OpenClaw host. The skill emits formatted strings; it does not hold Telegram credentials.
+- The wrapper imports upstream's `run_local()` directly via `importlib.util`, bypassing `main()` and `auto_setup()`. It builds an `argparse.Namespace` from mint_token.py output with the correct negotiation ID, token paths, output directory, and constraint fallbacks.
+- Channel delivery is provided by the OpenClaw host. The skill emits structured events and text; it does not hold channel credentials.
 - APOA dependency is already in the negotiate repo's `requirements.txt` (`apoa>=0.1.0`). The skill's Python scripts import from it directly.

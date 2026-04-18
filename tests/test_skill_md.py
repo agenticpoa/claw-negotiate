@@ -120,7 +120,6 @@ class TestCrossFileConsistency:
         for script in ("parse_constraints.py", "mint_token.py", "telegram_format.py"):
             assert script in skill_content, f"SKILL.md never mentions {script}"
 
-    def test_skill_documents_upstream_json_events_gap(self, skill_content):
-        # If we stop documenting the gap, we probably added the upstream flag.
-        # Flip this assertion when that PR lands.
-        assert "--json-events" in skill_content
+    def test_skill_documents_direct_import(self, skill_content):
+        assert "run_local()" in skill_content or "importlib" in skill_content
+        assert "auto_setup" in skill_content

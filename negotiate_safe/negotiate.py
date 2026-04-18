@@ -79,7 +79,7 @@ def build_namespace(
         investor_firm=i_cfg.get("firm", ""),
         investment_amount=f_cfg["investment_amount"],
         date="",
-        signing_key_id="",
+        signing_key_id=f_cfg.get("founder_signing_key_id") or f_cfg.get("signing_key_id", ""),
         founder_signing_key_id=f_cfg.get("founder_signing_key_id") or f_cfg.get("signing_key_id", ""),
         investor_signing_key_id=i_cfg.get("investor_signing_key_id") or i_cfg.get("signing_key_id", ""),
         founder_require_signature=True,

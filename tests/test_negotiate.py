@@ -57,6 +57,8 @@ class TestBuildNamespace:
         ns = ng.build_namespace(sample_mint_output, tmp_path, sample_founder_config, sample_investor_config)
         assert ns.founder_signing_key_id == "key_founder_1"
         assert ns.investor_signing_key_id == "key_investor_1"
+        # signing_key_id (singular) must be set for handle_signing() to run
+        assert ns.signing_key_id == "key_founder_1"
 
     def test_sets_constraint_fallbacks(self, sample_mint_output, sample_founder_config, sample_investor_config, tmp_path):
         ns = ng.build_namespace(sample_mint_output, tmp_path, sample_founder_config, sample_investor_config)
