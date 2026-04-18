@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-import telegram_format as tf
+import format_event as tf
 
 SKILL_MD = Path(__file__).parent.parent / "negotiate_safe" / "SKILL.md"
 
@@ -114,10 +114,10 @@ class TestCrossFileConsistency:
         """
         critical = {"confirm", "authorized", "offer", "agreed", "cosign_requested", "signed"}
         assert critical <= set(tf.FORMATTERS.keys()), \
-            "telegram_format.py is missing a formatter the skill assumes"
+            "format_event.py is missing a formatter the skill assumes"
 
     def test_skill_references_script_names(self, skill_content):
-        for script in ("parse_constraints.py", "mint_token.py", "telegram_format.py"):
+        for script in ("parse_constraints.py", "mint_token.py", "format_event.py"):
             assert script in skill_content, f"SKILL.md never mentions {script}"
 
     def test_skill_documents_direct_import(self, skill_content):

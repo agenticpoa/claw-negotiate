@@ -41,6 +41,32 @@ def load_config(path: str) -> dict:
     return json.loads(Path(path).read_text())
 
 
+def check_token_expiry(jwt_str: str, buffer_seconds: int = 60) -> str | None:
+    """Check if a JWT token is expired or near expiry.
+
+    Returns 'expired', 'expiring_soon', or None (valid).
+    """
+    import base64
+    try:
+        _, payload_b64, _ = jwt_str.split(".")
+        payload_b64 += "=" * (-len(payload_b64) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_b64))
+    except Exception:
+        return None
+
+    exp = payload.get("exp")
+    if exp is None:
+        return None
+
+    import time
+    now = time.time()
+    if now >= exp:
+        return "expired"
+    if now >= exp - buffer_seconds:
+        return "expiring_soon"
+    return None
+
+
 def build_namespace(
     mint: dict,
     repo: Path,

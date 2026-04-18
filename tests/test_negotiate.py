@@ -79,6 +79,37 @@ class TestBuildNamespace:
         assert ns.role == ""
 
 
+class TestTokenExpiry:
+    def test_detects_expired_token(self):
+        import base64, json, time
+        # Build a JWT with exp in the past
+        header = base64.urlsafe_b64encode(json.dumps({"alg": "none"}).encode()).rstrip(b"=").decode()
+        payload = base64.urlsafe_b64encode(json.dumps({"exp": int(time.time()) - 60}).encode()).rstrip(b"=").decode()
+        jwt = f"{header}.{payload}.fakesig"
+        assert ng.check_token_expiry(jwt) == "expired"
+
+    def test_detects_near_expiry(self):
+        import base64, json, time
+        header = base64.urlsafe_b64encode(json.dumps({"alg": "none"}).encode()).rstrip(b"=").decode()
+        payload = base64.urlsafe_b64encode(json.dumps({"exp": int(time.time()) + 30}).encode()).rstrip(b"=").decode()
+        jwt = f"{header}.{payload}.fakesig"
+        assert ng.check_token_expiry(jwt) == "expiring_soon"
+
+    def test_valid_token(self):
+        import base64, json, time
+        header = base64.urlsafe_b64encode(json.dumps({"alg": "none"}).encode()).rstrip(b"=").decode()
+        payload = base64.urlsafe_b64encode(json.dumps({"exp": int(time.time()) + 3600}).encode()).rstrip(b"=").decode()
+        jwt = f"{header}.{payload}.fakesig"
+        assert ng.check_token_expiry(jwt) is None
+
+    def test_missing_exp_returns_none(self):
+        import base64, json
+        header = base64.urlsafe_b64encode(json.dumps({"alg": "none"}).encode()).rstrip(b"=").decode()
+        payload = base64.urlsafe_b64encode(json.dumps({"sub": "test"}).encode()).rstrip(b"=").decode()
+        jwt = f"{header}.{payload}.fakesig"
+        assert ng.check_token_expiry(jwt) is None
+
+
 class TestLoadRunLocal:
     def test_returns_callable_when_present(self, tmp_path):
         (tmp_path / "negotiate.py").write_text(

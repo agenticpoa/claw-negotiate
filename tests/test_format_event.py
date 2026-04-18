@@ -1,4 +1,4 @@
-"""Tests for telegram_format.py.
+"""Tests for format_event.py.
 
 The formatter is a pure function of the event dict. Covers every event type in
 FORMATTERS, common edge cases (None values, missing fields), and the CLI surface.
@@ -12,9 +12,9 @@ from pathlib import Path
 
 import pytest
 
-import telegram_format as tf
+import format_event as tf
 
-SCRIPT = Path(__file__).parent.parent / "negotiate_safe" / "telegram_format.py"
+SCRIPT = Path(__file__).parent.parent / "negotiate_safe" / "format_event.py"
 
 
 class TestFormatters:

@@ -168,7 +168,7 @@ These are not guidelines. They are hard guards enforced by the wrapper:
 ## Implementation notes
 
 - `{baseDir}` is the skill folder. `$NEGOTIATE_REPO_PATH` is the external repo (configured in env, not bundled).
-- Four scripts ship in `{baseDir}`: `parse_constraints.py`, `mint_token.py`, `negotiate.py` (wrapper), `telegram_format.py`.
+- Four scripts ship in `{baseDir}`: `parse_constraints.py`, `mint_token.py`, `negotiate.py` (wrapper), `format_event.py`.
 - `mint_token.py` wraps `apoa.create_client().create_token()` with negotiation-specific defaults: `accessMode: "api"`, `service: safe:<slug>:<negotiation_id>`, 1h TTL. It writes the token pair into `${NEGOTIATE_REPO_PATH}/negotiations/<negotiation_id>/` so concurrent negotiations don't collide.
 - The wrapper imports upstream's `run_local()` directly via `importlib.util`, bypassing `main()` and `auto_setup()`. It builds an `argparse.Namespace` from mint_token.py output with the correct negotiation ID, token paths, output directory, and constraint fallbacks.
 - Channel delivery is provided by the OpenClaw host. The skill emits structured events and text; it does not hold channel credentials.
