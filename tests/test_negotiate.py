@@ -1,93 +1,101 @@
 """Tests for the skill's negotiate.py wrapper.
 
-Mocks subprocess.run and the threading streamer. Focus: correct flag expansion
-from two configs, mint-output loading, upstream invocation cwd, exit code
-propagation. The sshsign polling thread is covered via a direct unit test.
+Phase 1.1 refactor: direct import of upstream's run_local() instead of
+subprocess. Tests cover namespace construction, module loading, main flow,
+and the sshsign history streaming thread.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 import threading
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 import negotiate as ng
 
 
-class TestBuildUpstreamCmd:
-    def test_expands_both_configs(self, sample_founder_config, sample_investor_config, tmp_path):
-        repo = tmp_path / "repo"
-        cmd = ng.build_upstream_cmd(repo, sample_founder_config, sample_investor_config, role="")
-        # Upstream executable
-        assert str(repo / "negotiate.py") in cmd
-        # Party-level fields from the right config
-        assert "--founder-name" in cmd
-        assert "Jane Doe" in cmd
-        assert "--investor-name" in cmd
-        assert "Angel Ventures" in cmd
-        # Tokens from each config
-        assert sample_founder_config["token"] in cmd
-        assert sample_investor_config["token"] in cmd
-        # Signing keys (shared across configs)
-        fsk_idx = cmd.index("--founder-signing-key-id")
-        isk_idx = cmd.index("--investor-signing-key-id")
-        assert cmd[fsk_idx + 1] == "key_founder_1"
-        assert cmd[isk_idx + 1] == "key_investor_1"
-        # Poll enabled
-        assert "--poll" in cmd
+class TestBuildNamespace:
+    def test_sets_negotiation_id(self, sample_mint_output, sample_founder_config, sample_investor_config, tmp_path):
+        ns = ng.build_namespace(sample_mint_output, tmp_path, sample_founder_config, sample_investor_config)
+        assert ns.negotiation_id == "neg_abc123"
 
-    def test_role_flag_passthrough(self, sample_founder_config, sample_investor_config, tmp_path):
-        cmd = ng.build_upstream_cmd(tmp_path, sample_founder_config, sample_investor_config, role="founder")
-        idx = cmd.index("--role")
-        assert cmd[idx + 1] == "founder"
+    def test_sets_session_id(self, sample_mint_output, sample_founder_config, sample_investor_config, tmp_path):
+        ns = ng.build_namespace(sample_mint_output, tmp_path, sample_founder_config, sample_investor_config)
+        assert ns.session_id == "session_neg_abc123"
 
-    def test_no_role_omits_flag(self, sample_founder_config, sample_investor_config, tmp_path):
-        cmd = ng.build_upstream_cmd(tmp_path, sample_founder_config, sample_investor_config, role="")
-        assert "--role" not in cmd
+    def test_sets_token_paths(self, sample_mint_output, sample_founder_config, sample_investor_config, tmp_path):
+        ns = ng.build_namespace(sample_mint_output, tmp_path, sample_founder_config, sample_investor_config)
+        assert ns.founder_token == sample_mint_output["founder_token_path"]
+        assert ns.investor_token == sample_mint_output["investor_token_path"]
 
-    def test_includes_founder_constraint_flags(self, sample_founder_config, sample_investor_config, tmp_path):
-        f_constraints = {"cap_min": 50_000_000, "cap_max": 100_000_000,
-                         "discount_min": 0.10, "discount_max": 0.25,
-                         "pro_rata_required": True, "mfn_required": False}
-        i_constraints = {"cap_min": 30_000_000, "cap_max": 80_000_000,
-                         "discount_min": 0.05, "discount_max": 0.15,
-                         "pro_rata_required": False, "mfn_required": False}
-        cmd = ng.build_upstream_cmd(tmp_path, sample_founder_config, sample_investor_config,
-                                    role="", founder_constraints=f_constraints,
-                                    investor_constraints=i_constraints)
-        # Founder constraints in CLI flags
-        idx = cmd.index("--founder-cap-min")
-        assert cmd[idx + 1] == "50000000"
-        idx = cmd.index("--founder-cap-max")
-        assert cmd[idx + 1] == "100000000"
-        idx = cmd.index("--founder-discount-min")
-        assert cmd[idx + 1] == "0.1"
-        idx = cmd.index("--founder-pro-rata-required")
-        assert cmd[idx + 1] == "true"
-        idx = cmd.index("--founder-mfn-required")
-        assert cmd[idx + 1] == "false"
-        # Investor constraints in CLI flags
-        idx = cmd.index("--investor-cap-min")
-        assert cmd[idx + 1] == "30000000"
-        idx = cmd.index("--investor-cap-max")
-        assert cmd[idx + 1] == "80000000"
+    def test_sets_pubkey_paths_from_configs(self, sample_mint_output, sample_founder_config, sample_investor_config, tmp_path):
+        ns = ng.build_namespace(sample_mint_output, tmp_path, sample_founder_config, sample_investor_config)
+        assert ns.founder_pubkey == sample_founder_config["pubkey"]
+        assert ns.investor_pubkey == sample_investor_config["pubkey"]
 
-    def test_omits_constraint_flags_when_none(self, sample_founder_config, sample_investor_config, tmp_path):
-        cmd = ng.build_upstream_cmd(tmp_path, sample_founder_config, sample_investor_config, role="")
-        assert "--founder-cap-min" not in cmd
-        assert "--investor-cap-min" not in cmd
+    def test_sets_schema_path(self, sample_mint_output, sample_founder_config, sample_investor_config, tmp_path):
+        ns = ng.build_namespace(sample_mint_output, tmp_path, sample_founder_config, sample_investor_config)
+        assert ns.schema == str(tmp_path / "schemas" / "safe.json")
 
-    def test_missing_signing_key_falls_back(self, sample_founder_config, sample_investor_config, tmp_path):
-        # Drop the shared keys; fall back to per-config signing_key_id
-        del sample_founder_config["founder_signing_key_id"]
-        del sample_investor_config["investor_signing_key_id"]
-        cmd = ng.build_upstream_cmd(tmp_path, sample_founder_config, sample_investor_config, role="")
-        # founder config has signing_key_id="key_founder_1"
-        assert "key_founder_1" in cmd
-        assert "key_investor_1" in cmd
+    def test_sets_output_dir_per_negotiation(self, sample_mint_output, sample_founder_config, sample_investor_config, tmp_path):
+        ns = ng.build_namespace(sample_mint_output, tmp_path, sample_founder_config, sample_investor_config)
+        assert "output" in ns.output_dir
+        assert str(Path(sample_mint_output["founder_config_path"]).parent) in ns.output_dir
+
+    def test_sets_party_info(self, sample_mint_output, sample_founder_config, sample_investor_config, tmp_path):
+        ns = ng.build_namespace(sample_mint_output, tmp_path, sample_founder_config, sample_investor_config)
+        assert ns.company_name == "Acme Corp"
+        assert ns.founder_name == "Jane Doe"
+        assert ns.investor_name == "Angel Ventures"
+        assert ns.investment_amount == 500_000.0
+
+    def test_sets_signing_key_ids(self, sample_mint_output, sample_founder_config, sample_investor_config, tmp_path):
+        ns = ng.build_namespace(sample_mint_output, tmp_path, sample_founder_config, sample_investor_config)
+        assert ns.founder_signing_key_id == "key_founder_1"
+        assert ns.investor_signing_key_id == "key_investor_1"
+
+    def test_sets_constraint_fallbacks(self, sample_mint_output, sample_founder_config, sample_investor_config, tmp_path):
+        ns = ng.build_namespace(sample_mint_output, tmp_path, sample_founder_config, sample_investor_config)
+        assert ns.founder_cap_min == 8_000_000
+        assert ns.founder_cap_max == 12_000_000
+        assert ns.investor_cap_min == 6_000_000
+
+    def test_no_sshsign_flag(self, sample_mint_output, sample_founder_config, sample_investor_config, tmp_path):
+        ns = ng.build_namespace(sample_mint_output, tmp_path, sample_founder_config, sample_investor_config, no_sshsign=True)
+        assert ns.no_sshsign is True
+
+    def test_defaults_to_sshsign_enabled(self, sample_mint_output, sample_founder_config, sample_investor_config, tmp_path):
+        ns = ng.build_namespace(sample_mint_output, tmp_path, sample_founder_config, sample_investor_config)
+        assert ns.no_sshsign is False
+
+    def test_role_is_empty_for_local_mode(self, sample_mint_output, sample_founder_config, sample_investor_config, tmp_path):
+        ns = ng.build_namespace(sample_mint_output, tmp_path, sample_founder_config, sample_investor_config)
+        assert ns.role == ""
+
+
+class TestLoadRunLocal:
+    def test_returns_callable_when_present(self, tmp_path):
+        (tmp_path / "negotiate.py").write_text(
+            "async def run_local(args): pass\n"
+        )
+        fn = ng.load_run_local(tmp_path)
+        assert fn is not None
+        assert callable(fn)
+
+    def test_returns_none_when_missing(self, tmp_path, capsys):
+        result = ng.load_run_local(tmp_path)
+        assert result is None
+        assert "not found" in capsys.readouterr().err
+
+    def test_returns_none_when_module_errors(self, tmp_path, capsys):
+        (tmp_path / "negotiate.py").write_text("raise RuntimeError('broken')\n")
+        result = ng.load_run_local(tmp_path)
+        assert result is None
+        assert "broken" in capsys.readouterr().err
 
 
 class TestLoadMint:
@@ -123,49 +131,89 @@ class TestMain:
         assert rc == 2
         assert "negotiate.py not found" in capsys.readouterr().err
 
-    def test_happy_path_launches_subprocess_and_joins_streamer(self, sample_mint_output, tmp_path, monkeypatch, capsys):
-        # Fake repo with negotiate.py and a sshsign_client stub
-        (tmp_path / "negotiate.py").write_text("# stub")
-        (tmp_path / "sshsign_client.py").write_text(
-            "def get_history(host, negotiation_id): return []"
-        )
+    def test_happy_path_calls_run_local(self, sample_mint_output, tmp_path, monkeypatch, capsys):
+        (tmp_path / "negotiate.py").write_text("async def run_local(args): pass\n")
         monkeypatch.setenv("NEGOTIATE_REPO_PATH", str(tmp_path))
 
         mint_path = tmp_path / "mint.json"
         mint_path.write_text(json.dumps(sample_mint_output))
 
-        fake_proc = MagicMock(returncode=0)
-        with patch("subprocess.run", return_value=fake_proc) as run, \
-             patch("time.sleep"):  # skip the pre-shutdown sleep
-            argv = ["negotiate.py", "--mint-output", str(mint_path), "--poll-interval", "0.01"]
+        mock_run_local = AsyncMock()
+        with patch.object(ng, "load_run_local", return_value=mock_run_local), \
+             patch.object(ng, "load_get_history", return_value=None):
+            argv = ["negotiate.py", "--mint-output", str(mint_path), "--no-sshsign"]
             with patch.object(sys, "argv", argv):
                 rc = ng.main()
 
         assert rc == 0
-        # subprocess invoked with cwd=repo
-        assert run.call_args.kwargs["cwd"] == tmp_path.resolve()
-        # Final exit marker on stdout
+        mock_run_local.assert_called_once()
+        ns = mock_run_local.call_args[0][0]
+        assert ns.negotiation_id == "neg_abc123"
+        assert ns.no_sshsign is True
+
         out_lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
         assert any('"type": "exit"' in l for l in out_lines)
 
-    def test_exit_code_propagates(self, sample_mint_output, tmp_path, monkeypatch):
-        (tmp_path / "negotiate.py").write_text("# stub")
-        (tmp_path / "sshsign_client.py").write_text("def get_history(host, negotiation_id): return []")
+    def test_run_local_failure_returns_1(self, sample_mint_output, tmp_path, monkeypatch, capsys):
+        (tmp_path / "negotiate.py").write_text("async def run_local(args): pass\n")
         monkeypatch.setenv("NEGOTIATE_REPO_PATH", str(tmp_path))
 
         mint_path = tmp_path / "mint.json"
         mint_path.write_text(json.dumps(sample_mint_output))
 
-        with patch("subprocess.run", return_value=MagicMock(returncode=42)), patch("time.sleep"):
-            argv = ["negotiate.py", "--mint-output", str(mint_path), "--poll-interval", "0.01"]
+        mock_run_local = AsyncMock(side_effect=RuntimeError("agent crashed"))
+        with patch.object(ng, "load_run_local", return_value=mock_run_local), \
+             patch.object(ng, "load_get_history", return_value=None):
+            argv = ["negotiate.py", "--mint-output", str(mint_path), "--no-sshsign"]
             with patch.object(sys, "argv", argv):
                 rc = ng.main()
-        assert rc == 42
+
+        assert rc == 1
+        assert "agent crashed" in capsys.readouterr().err
+
+    def test_emits_pdf_path_when_exists(self, sample_mint_output, tmp_path, monkeypatch, capsys):
+        (tmp_path / "negotiate.py").write_text("async def run_local(args): pass\n")
+        monkeypatch.setenv("NEGOTIATE_REPO_PATH", str(tmp_path))
+
+        mint_path = tmp_path / "mint.json"
+        mint_path.write_text(json.dumps(sample_mint_output))
+
+        # Create the PDF where build_namespace would point output_dir
+        neg_dir = Path(sample_mint_output["founder_config_path"]).parent
+        out_dir = neg_dir / "output"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "neg_abc123_executed.pdf").write_text("fake pdf")
+
+        mock_run_local = AsyncMock()
+        with patch.object(ng, "load_run_local", return_value=mock_run_local), \
+             patch.object(ng, "load_get_history", return_value=None):
+            argv = ["negotiate.py", "--mint-output", str(mint_path), "--no-sshsign"]
+            with patch.object(sys, "argv", argv):
+                rc = ng.main()
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert '"type": "pdf"' in out
+        assert "neg_abc123_executed.pdf" in out
+
+    def test_load_run_local_failure(self, sample_mint_output, tmp_path, monkeypatch, capsys):
+        (tmp_path / "negotiate.py").write_text("# stub")
+        monkeypatch.setenv("NEGOTIATE_REPO_PATH", str(tmp_path))
+
+        mint_path = tmp_path / "mint.json"
+        mint_path.write_text(json.dumps(sample_mint_output))
+
+        with patch.object(ng, "load_run_local", return_value=None):
+            argv = ["negotiate.py", "--mint-output", str(mint_path), "--no-sshsign"]
+            with patch.object(sys, "argv", argv):
+                rc = ng.main()
+
+        assert rc == 2
+        assert "Failed to load" in capsys.readouterr().err
 
 
 class TestStreamOffers:
     def test_emits_new_offers_as_ndjson(self, capsys):
-        # Growing history: [], [offer1], [offer1, offer2]
         histories = [
             [],
             [{"round": 1, "party": "Founder"}],
@@ -186,7 +234,7 @@ class TestStreamOffers:
         )
         thread.start()
         import time
-        time.sleep(0.1)  # let it poll a few times
+        time.sleep(0.1)
         stop.set()
         thread.join(timeout=1)
         assert not thread.is_alive()
@@ -199,7 +247,6 @@ class TestStreamOffers:
         assert parsed[1]["round"] == 2
 
     def test_tolerates_transient_get_history_errors(self, capsys):
-        """A one-off sshsign failure should log to stderr and keep polling."""
         calls = {"n": 0}
 
         def flaky(host, negotiation_id):
@@ -236,8 +283,6 @@ class TestLoadGetHistory:
         assert fn(host="h", negotiation_id="n") == [{"tag": "ok"}]
 
     def test_returns_none_when_module_missing(self, tmp_path, capsys):
-        # tmp_path has no sshsign_client.py. importlib.util should report
-        # the file as missing without falling through to a cached module.
         result = ng.load_get_history(tmp_path)
         assert result is None
         assert "cannot import sshsign_client" in capsys.readouterr().err

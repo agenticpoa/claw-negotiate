@@ -1,22 +1,18 @@
 #!/usr/bin/env python3
 """Skill wrapper around $NEGOTIATE_REPO_PATH/negotiate.py.
 
-Takes mint_token.py's output (JSON with per-negotiation config paths), expands
-the founder config into CLI flags, execs the upstream negotiator, and in
-parallel polls sshsign history to emit NDJSON offer events on stdout as they
-land. Final exit code mirrors the upstream process.
-
-Streaming strategy: upstream doesn't emit structured events on stdout yet.
-Until a --json-events flag lands in agenticpoa/negotiate, we tail the sshsign
-history instead. Offers are logged to sshsign before they are displayed, so
-history-polling is the authoritative stream (and cheap: ~2s poll interval).
+Directly imports and calls upstream's run_local() function, bypassing
+main() and auto_setup(). This ensures:
+- Our mint_token.py's negotiation ID, tokens, and keys are used (not duplicated)
+- Constraints from APOA tokens drive agent behavior (not .env defaults)
+- PDFs land in a per-negotiation output directory we control
 """
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
-import subprocess
 import sys
 import threading
 import time
@@ -29,8 +25,8 @@ def parse_args() -> argparse.Namespace:
                         help="JSON output from mint_token.py (path, or - for stdin)")
     parser.add_argument("--negotiate-repo",
                         default=os.environ.get("NEGOTIATE_REPO_PATH", ""))
-    parser.add_argument("--role", default="", choices=["", "founder", "investor"],
-                        help="Pass through to upstream when running distributed")
+    parser.add_argument("--no-sshsign", action="store_true",
+                        help="Skip sshsign audit trail (dry run)")
     parser.add_argument("--poll-interval", type=float, default=2.0,
                         help="Seconds between sshsign history polls")
     return parser.parse_args()
@@ -45,54 +41,96 @@ def load_config(path: str) -> dict:
     return json.loads(Path(path).read_text())
 
 
-def build_upstream_cmd(
-    repo: Path, f_cfg: dict, i_cfg: dict, role: str,
-    founder_constraints: dict | None = None,
-    investor_constraints: dict | None = None,
-) -> list[str]:
-    """Expand the per-negotiation config JSONs into upstream negotiate.py flags.
+def build_namespace(
+    mint: dict,
+    repo: Path,
+    f_cfg: dict,
+    i_cfg: dict,
+    no_sshsign: bool = False,
+) -> argparse.Namespace:
+    """Build an argparse.Namespace matching upstream's parse_args() output.
 
-    Upstream does not accept a --config flag, despite create_tokens.py printing
-    a hint that suggests it does. Local mode needs both parties' token and
-    pubkey paths; role mode still benefits from passing both so the upstream
-    validator doesn't trip on missing counterparty info.
+    Populates every field run_local() reads, using values from mint_token.py
+    output and per-negotiation config files. Bypasses auto_setup() entirely.
     """
-    cmd = [
-        sys.executable, str(repo / "negotiate.py"),
-        "--company-name", f_cfg["company_name"],
-        "--founder-name", f_cfg["name"],
-        "--founder-title", f_cfg.get("title", ""),
-        "--investor-name", i_cfg["name"],
-        "--investment-amount", str(f_cfg["investment_amount"]),
-        "--founder-token", f_cfg["token"],
-        "--founder-pubkey", f_cfg["pubkey"],
-        "--founder-signing-key-id", f_cfg.get("founder_signing_key_id") or f_cfg.get("signing_key_id", ""),
-        "--investor-token", i_cfg["token"],
-        "--investor-pubkey", i_cfg["pubkey"],
-        "--investor-signing-key-id", i_cfg.get("investor_signing_key_id") or i_cfg.get("signing_key_id", ""),
-        "--poll",
-    ]
-    if founder_constraints:
-        cmd.extend([
-            "--founder-cap-min", str(founder_constraints["cap_min"]),
-            "--founder-cap-max", str(founder_constraints["cap_max"]),
-            "--founder-discount-min", str(founder_constraints["discount_min"]),
-            "--founder-discount-max", str(founder_constraints["discount_max"]),
-            "--founder-pro-rata-required", "true" if founder_constraints["pro_rata_required"] else "false",
-            "--founder-mfn-required", "true" if founder_constraints["mfn_required"] else "false",
-        ])
-    if investor_constraints:
-        cmd.extend([
-            "--investor-cap-min", str(investor_constraints["cap_min"]),
-            "--investor-cap-max", str(investor_constraints["cap_max"]),
-            "--investor-discount-min", str(investor_constraints["discount_min"]),
-            "--investor-discount-max", str(investor_constraints["discount_max"]),
-            "--investor-pro-rata-required", "true" if investor_constraints["pro_rata_required"] else "false",
-            "--investor-mfn-required", "true" if investor_constraints["mfn_required"] else "false",
-        ])
-    if role:
-        cmd.extend(["--role", role])
-    return cmd
+    neg_id = mint["negotiation_id"]
+    neg_dir = Path(mint["founder_config_path"]).parent
+    output_dir = str(neg_dir / "output")
+
+    fc = mint.get("founder_constraints", {})
+    ic = mint.get("investor_constraints", {})
+
+    return argparse.Namespace(
+        schema=str(repo / "schemas" / "safe.json"),
+        role="",
+        negotiation_id=neg_id,
+        session_id=f"session_{neg_id}",
+        founder_token=mint["founder_token_path"],
+        investor_token=mint["investor_token_path"],
+        founder_pubkey=f_cfg["pubkey"],
+        investor_pubkey=i_cfg["pubkey"],
+        no_sshsign=no_sshsign,
+        sshsign_host=f_cfg.get("sshsign_host") or os.environ.get("SSHSIGN_HOST", "sshsign.dev"),
+        output_dir=output_dir,
+        company_name=f_cfg["company_name"],
+        founder_name=f_cfg["name"],
+        founder_title=f_cfg.get("title", ""),
+        investor_name=i_cfg["name"],
+        investor_firm=i_cfg.get("firm", ""),
+        investment_amount=f_cfg["investment_amount"],
+        date="",
+        signing_key_id="",
+        founder_signing_key_id=f_cfg.get("founder_signing_key_id") or f_cfg.get("signing_key_id", ""),
+        investor_signing_key_id=i_cfg.get("investor_signing_key_id") or i_cfg.get("signing_key_id", ""),
+        founder_require_signature=True,
+        investor_require_signature=True,
+        poll=True,
+        poll_timeout=300,
+        founder_cap_min=fc.get("cap_min", 8_000_000),
+        founder_cap_max=fc.get("cap_max", 12_000_000),
+        founder_discount_min=fc.get("discount_min", 0.20),
+        founder_discount_max=fc.get("discount_max", 0.25),
+        founder_pro_rata_required=fc.get("pro_rata_required", True),
+        founder_mfn_required=fc.get("mfn_required", False),
+        investor_cap_min=ic.get("cap_min", 6_000_000),
+        investor_cap_max=ic.get("cap_max", 10_000_000),
+        investor_discount_min=ic.get("discount_min", 0.15),
+        investor_discount_max=ic.get("discount_max", 0.25),
+        investor_pro_rata_required=ic.get("pro_rata_required", False),
+        investor_mfn_required=ic.get("mfn_required", False),
+        verbose=False,
+        finalize="",
+    )
+
+
+def load_run_local(repo: Path):
+    """Import run_local from the upstream negotiate module.
+
+    Uses importlib.util with a distinct module name ('negotiate_upstream')
+    to avoid collision with this wrapper module. Adds repo to sys.path
+    temporarily so upstream's internal imports (protocol, agents, etc.) resolve.
+    """
+    import importlib.util
+
+    path = repo / "negotiate.py"
+    if not path.exists():
+        sys.stderr.write(f"negotiate.py not found at {path}\n")
+        return None
+
+    spec = importlib.util.spec_from_file_location("negotiate_upstream", path)
+    if spec is None or spec.loader is None:
+        sys.stderr.write(f"cannot build import spec for {path}\n")
+        return None
+
+    sys.path.insert(0, str(repo))
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except Exception as e:
+        sys.stderr.write(f"cannot import negotiate: {e}\n")
+        return None
+
+    return getattr(module, "run_local", None)
 
 
 def load_get_history(repo: Path):
@@ -143,7 +181,6 @@ def stream_offers(
                     sys.stdout.flush()
                 seen = len(history)
         except Exception as e:
-            # Transient sshsign errors are tolerable. Log to stderr and retry.
             sys.stderr.write(f"[stream] {e}\n")
         stop.wait(interval)
 
@@ -165,38 +202,53 @@ def main() -> int:
 
     f_cfg = load_config(mint["founder_config_path"])
     i_cfg = load_config(mint["investor_config_path"])
-    host = f_cfg.get("sshsign_host") or os.environ.get("SSHSIGN_HOST", "sshsign.dev")
 
-    cmd = build_upstream_cmd(
-        repo, f_cfg, i_cfg, args.role,
-        founder_constraints=mint.get("founder_constraints"),
-        investor_constraints=mint.get("investor_constraints"),
-    )
+    ns = build_namespace(mint, repo, f_cfg, i_cfg, no_sshsign=args.no_sshsign)
 
+    run_local_fn = load_run_local(repo)
+    if run_local_fn is None:
+        sys.stderr.write("Failed to load run_local from upstream.\n")
+        return 2
+
+    # Start sshsign history streaming in background
+    host = ns.sshsign_host
     stop = threading.Event()
-    get_history_fn = load_get_history(repo)
     streamer = None
-    if get_history_fn is not None:
-        streamer = threading.Thread(
-            target=stream_offers,
-            args=(get_history_fn, host, negotiation_id, stop, args.poll_interval),
-            daemon=True,
-        )
-        streamer.start()
+    if not ns.no_sshsign:
+        get_history_fn = load_get_history(repo)
+        if get_history_fn is not None:
+            streamer = threading.Thread(
+                target=stream_offers,
+                args=(get_history_fn, host, negotiation_id, stop, args.poll_interval),
+                daemon=True,
+            )
+            streamer.start()
 
+    original_cwd = os.getcwd()
+    os.chdir(str(repo))
     try:
-        result = subprocess.run(cmd, cwd=repo)
+        asyncio.run(run_local_fn(ns))
+        rc = 0
+    except Exception as e:
+        sys.stderr.write(f"Negotiation error: {e}\n")
+        rc = 1
     finally:
+        os.chdir(original_cwd)
         if streamer is not None:
-            # Give the streamer one final poll before shutdown so we don't miss
-            # the last offer logged just before the subprocess exited.
             time.sleep(args.poll_interval + 0.5)
             stop.set()
             streamer.join(timeout=5)
 
-    # Final status marker so the skill host knows the run ended.
-    sys.stdout.write(json.dumps({"type": "exit", "code": result.returncode}) + "\n")
-    return result.returncode
+    # Emit PDF path if generated
+    output_dir = Path(ns.output_dir)
+    for suffix in ("_executed.pdf", ".pdf"):
+        pdf = output_dir / f"{negotiation_id}{suffix}"
+        if pdf.exists():
+            sys.stdout.write(json.dumps({"type": "pdf", "path": str(pdf)}) + "\n")
+            break
+
+    sys.stdout.write(json.dumps({"type": "exit", "code": rc}) + "\n")
+    return rc
 
 
 if __name__ == "__main__":
