@@ -242,6 +242,36 @@ class TestCli:
         assert ic["cap_min"] == 6_000_000
         assert ic["cap_max"] == 10_000_000
 
+    def test_investor_constraints_json_arg_overrides_env(self, sample_constraints, tmp_path, monkeypatch, capsys):
+        (tmp_path / "create_tokens.py").write_text("# stub")
+        monkeypatch.setenv("NEGOTIATE_REPO_PATH", str(tmp_path))
+        monkeypatch.setenv("INVESTOR_CAP_MIN", "1000000")  # env says $1M
+
+        inv_constraints = json.dumps({
+            "valuation_cap_min": 40_000_000,
+            "valuation_cap_max": 90_000_000,
+            "discount_min": 0.08,
+            "pro_rata": "preferred",
+            "mfn": "indifferent",
+        })
+        with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="", stderr="")) as run:
+            argv = ["mint_token.py"] + self._base_args(json.dumps(sample_constraints)) + [
+                "--investor-constraints-json", inv_constraints,
+                "--skip-sshsign-keys",
+            ]
+            with patch.object(sys, "argv", argv):
+                mt.main()
+
+        cmd = run.call_args.args[0]
+        assert "--investor-cap-min" in cmd and "40000000" in cmd
+        assert "--investor-cap-max" in cmd and "90000000" in cmd
+        assert "--investor-discount-min" in cmd and "0.08" in cmd
+
+        out = json.loads(capsys.readouterr().out)
+        ic = out["investor_constraints"]
+        assert ic["cap_min"] == 40_000_000
+        assert ic["cap_max"] == 90_000_000
+
     def test_subprocess_failure_propagates(self, sample_constraints, tmp_path, monkeypatch, capsys):
         (tmp_path / "create_tokens.py").write_text("# stub")
         monkeypatch.setenv("NEGOTIATE_REPO_PATH", str(tmp_path))

@@ -2,7 +2,7 @@
 name: negotiate_safe
 description: Negotiate a YC SAFE on behalf of a founder against an investor agent. Extracts constraints from natural language, mints a per-negotiation APOA token scoped to this deal, runs a formal alternating-offers negotiation with protocol-enforced bounds, logs every offer to sshsign, and produces an executed PDF with a cryptographic audit trail. Revokable at any time.
 user-invocable: true
-metadata: {"openclaw":{"emoji":"🤝","requires":{"bins":["python3","ssh"],"env":["ANTHROPIC_API_KEY","NEGOTIATE_REPO_PATH","SSHSIGN_KEY_PATH","PRINCIPAL_KEY_PATH","FOUNDER_DID"]},"homepage":"https://github.com/agenticpoa/negotiate"}}
+metadata: {"openclaw":{"emoji":"🤝","requires":{"bins":["python3","ssh"],"env":["ANTHROPIC_API_KEY","NEGOTIATE_REPO_PATH"]},"homepage":"https://github.com/agenticpoa/negotiate"}}
 ---
 
 You are negotiating a SAFE on behalf of a founder. This is a binding financial agreement. Follow these steps in order. Do not skip any.
@@ -12,9 +12,9 @@ You are negotiating a SAFE on behalf of a founder. This is a binding financial a
 Confirm the environment is ready. Do not mint APOA tokens here. Tokens are per-negotiation (Step 2.5).
 
 1. `$NEGOTIATE_REPO_PATH/negotiate.py` exists. If not, report "Negotiate repo not found at $NEGOTIATE_REPO_PATH" and stop.
-2. `$PRINCIPAL_KEY_PATH` exists and is readable. This is the founder's Ed25519 signing key used to sign APOA tokens. If missing, stop and ask the user to provision one (`python3 -c "from apoa import generate_key_pair; ..."`).
-3. Verify sshsign is reachable: run `ssh -i $SSHSIGN_KEY_PATH ${SSHSIGN_HOST:-sshsign.dev} history --negotiation-id healthcheck`. Any JSON response (even an error like `{"error":"..."}`) proves connectivity. Only fail if the SSH connection itself is refused or times out.
-4. Generate a fresh `negotiation_id` (UUID v4). Hold it in memory for the rest of the flow.
+2. Verify sshsign is reachable: run `ssh ${SSHSIGN_HOST:-sshsign.dev} history --negotiation-id healthcheck`. Any JSON response (even an error like `{"error":"..."}`) proves connectivity. Only fail if the SSH connection itself is refused or times out. If SSH is not configured for sshsign.dev, tell the user: "Run `ssh-keygen -t ed25519 -f ~/.ssh/sshsign_key` and add a Host entry for sshsign.dev in ~/.ssh/config."
+3. Generate a fresh `negotiation_id` (UUID v4). Hold it in memory for the rest of the flow.
+4. If `$FOUNDER_DID` is not set, default to `did:apoa:default`. If `$SSHSIGN_KEY_PATH` is not set, assume SSH config handles key selection.
 
 ## Step 1: Parse the user's requirements
 

@@ -47,19 +47,13 @@ class TestFrontmatter:
         assert "openclaw" in meta
         assert meta["openclaw"]["emoji"]
 
-    def test_requires_lists_all_needed_env(self, frontmatter):
+    def test_requires_only_essential_env(self, frontmatter):
         m = re.search(r"^metadata:\s*(\{.*\})\s*$", frontmatter, re.M)
         meta = json.loads(m.group(1))
         env = set(meta["openclaw"]["requires"]["env"])
-        required = {
-            "ANTHROPIC_API_KEY",
-            "NEGOTIATE_REPO_PATH",
-            "SSHSIGN_KEY_PATH",
-            "PRINCIPAL_KEY_PATH",
-            "FOUNDER_DID",
-        }
-        missing = required - env
-        assert not missing, f"SKILL.md requires.env missing: {missing}"
+        assert env == {"ANTHROPIC_API_KEY", "NEGOTIATE_REPO_PATH"}, (
+            f"requires.env should only list essential vars. Got: {env}"
+        )
 
     def test_requires_lists_bins(self, frontmatter):
         m = re.search(r"^metadata:\s*(\{.*\})\s*$", frontmatter, re.M)
