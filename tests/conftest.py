@@ -112,8 +112,7 @@ def sample_mint_output(tmp_path, sample_founder_config, sample_investor_config) 
         "founder_token_path": str(tmp_path / "tokens/founder.jwt"),
         "investor_token_path": str(tmp_path / "tokens/investor.jwt"),
         "expires_at": "2026-04-16T15:00:00Z",
-        "intended_service": "safe:acme-corp:neg_abc123",
-        "actual_service_in_token": "safe-agreement",
+        "service": "safe:acme-corp:neg_abc123",
         "founder_constraints": {
             "cap_min": 8_000_000,
             "cap_max": 12_000_000,

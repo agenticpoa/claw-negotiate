@@ -179,9 +179,7 @@ class TestCli:
         assert out["founder_token_path"].endswith("tokens/founder.jwt")
         assert out["investor_token_path"].endswith("tokens/investor.jwt")
         assert out["expires_at"].endswith("Z")
-        assert out["intended_service"] == "safe:acme-corp:neg_out"
-        # Documents the upstream gap: service in token is generic
-        assert out["actual_service_in_token"] == "safe-agreement"
+        assert out["service"] == "safe:acme-corp:neg_out"
 
     def test_output_includes_founder_constraints(self, sample_constraints, tmp_path, monkeypatch, capsys):
         (tmp_path / "create_tokens.py").write_text("# stub")

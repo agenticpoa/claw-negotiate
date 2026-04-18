@@ -118,6 +118,7 @@ def main() -> int:
 
     pro_rata_required = constraints["pro_rata"] == "required"
     mfn_required = constraints["mfn"] == "required"
+    service = f"safe:{slugify(args.company_name)}:{negotiation_id}"
     # Upstream requires a max discount. The user only specified a floor;
     # cap the ceiling at 25% or the floor, whichever is higher.
     discount_max = max(0.25, float(constraints["discount_min"]))
@@ -127,6 +128,7 @@ def main() -> int:
         "--negotiation-id", negotiation_id,
         "--principal-id", args.principal_id,
         "--expires", expires_str,
+        "--service", service,
         "--company-name", args.company_name,
         "--founder-name", args.founder_name,
         "--founder-title", args.founder_title,
@@ -191,10 +193,7 @@ def main() -> int:
         "founder_token_path": str(out_dir / "tokens" / "founder.jwt"),
         "investor_token_path": str(out_dir / "tokens" / "investor.jwt"),
         "expires_at": expires_str,
-        # Intended service string per SKILL.md. Upstream currently hardcodes
-        # "safe-agreement" in the token. See open item in SKILL.md.
-        "intended_service": f"safe:{slugify(args.company_name)}:{negotiation_id}",
-        "actual_service_in_token": "safe-agreement",
+        "service": service,
         "founder_constraints": {
             "cap_min": constraints["valuation_cap_min"],
             "cap_max": constraints["valuation_cap_max"],
