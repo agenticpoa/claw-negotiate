@@ -65,15 +65,49 @@ class TestCli:
     def test_missing_api_key(self, monkeypatch):
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         result = subprocess.run(
-            [sys.executable, str(SCRIPT)],
-            input="Negotiate my SAFE.",
+            [sys.executable, str(SCRIPT), "--message", "test"],
             capture_output=True,
             text=True,
         )
         assert result.returncode == 2
         assert "ANTHROPIC_API_KEY" in result.stderr
 
-    def test_empty_stdin(self, monkeypatch):
+    def test_message_arg(self, tmp_path, monkeypatch):
+        """--message flag should be accepted as an alternative to stdin."""
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--message", "test"],
+            capture_output=True,
+            text=True,
+        )
+        # Will fail on API call, but should NOT fail on "no message"
+        assert "No message" not in result.stderr
+
+    def test_message_file_arg(self, tmp_path, monkeypatch):
+        """--message-file should read from a file."""
+        msg_file = tmp_path / "request.txt"
+        msg_file.write_text("Negotiate my SAFE, cap $10M.")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--message-file", str(msg_file)],
+            capture_output=True,
+            text=True,
+        )
+        assert "No message" not in result.stderr
+
+    def test_output_file_arg(self, tmp_path, monkeypatch, sample_constraints):
+        """--output-file should write JSON to a file instead of stdout."""
+        out_file = tmp_path / "constraints.json"
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        with patch.object(pc, "extract_constraints", return_value=sample_constraints):
+            argv = ["parse_constraints.py", "--message", "test", "--output-file", str(out_file)]
+            with patch.object(sys, "argv", argv):
+                rc = pc.main()
+        assert rc == 0
+        assert out_file.exists()
+        assert json.loads(out_file.read_text()) == sample_constraints
+
+    def test_no_message_at_all(self, monkeypatch):
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
         result = subprocess.run(
             [sys.executable, str(SCRIPT)],
@@ -82,4 +116,4 @@ class TestCli:
             text=True,
         )
         assert result.returncode == 2
-        assert "No message on stdin" in result.stderr
+        assert "No message" in result.stderr

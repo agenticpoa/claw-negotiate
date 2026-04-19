@@ -31,8 +31,10 @@ REQUIRED_CONSTRAINTS = (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Mint APOA tokens for a SAFE negotiation")
-    parser.add_argument("--constraints-json", required=True,
+    parser.add_argument("--constraints-json", default="",
                         help="JSON string from parse_constraints.py")
+    parser.add_argument("--constraints-file", default="",
+                        help="Path to JSON file from parse_constraints.py (alternative to --constraints-json)")
     parser.add_argument("--company-name", required=True)
     parser.add_argument("--founder-name", required=True)
     parser.add_argument("--founder-title", default="CEO")
@@ -107,7 +109,13 @@ def main() -> int:
         sys.stderr.write(f"create_tokens.py not found under {repo}\n")
         return 2
 
-    constraints = validate_constraints(args.constraints_json)
+    constraints_raw = args.constraints_json
+    if not constraints_raw and args.constraints_file:
+        constraints_raw = Path(args.constraints_file).read_text().strip()
+    if not constraints_raw:
+        sys.stderr.write("Provide --constraints-json or --constraints-file.\n")
+        return 2
+    constraints = validate_constraints(constraints_raw)
 
     negotiation_id = args.negotiation_id or f"neg_{uuid.uuid4().hex[:12]}"
     out_dir = repo / "negotiations" / negotiation_id

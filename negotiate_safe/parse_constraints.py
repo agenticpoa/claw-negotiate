@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 SYSTEM_PROMPT = """You extract structured SAFE negotiation constraints from a founder's natural-language message.
@@ -63,13 +64,26 @@ def extract_constraints(message: str) -> dict[str, Any]:
 
 
 def main() -> int:
+    import argparse
+    parser = argparse.ArgumentParser(description="Parse NL SAFE terms into APOA constraints")
+    parser.add_argument("--message", default="", help="The negotiation request text")
+    parser.add_argument("--message-file", default="", help="Path to a file containing the request text")
+    parser.add_argument("--output-file", default="", help="Write JSON to this file instead of stdout")
+    args = parser.parse_args()
+
     if not os.environ.get("ANTHROPIC_API_KEY"):
         sys.stderr.write("ANTHROPIC_API_KEY not set.\n")
         return 2
 
-    message = sys.stdin.read().strip()
+    if args.message:
+        message = args.message
+    elif args.message_file:
+        message = Path(args.message_file).read_text().strip()
+    else:
+        message = sys.stdin.read().strip()
+
     if not message:
-        sys.stderr.write("No message on stdin. Pipe the user's request.\n")
+        sys.stderr.write("No message provided. Use --message, --message-file, or pipe to stdin.\n")
         return 2
 
     try:
@@ -78,8 +92,11 @@ def main() -> int:
         sys.stderr.write(f"{e}\n")
         return 1
 
-    json.dump(constraints, sys.stdout, indent=2)
-    sys.stdout.write("\n")
+    output = json.dumps(constraints, indent=2) + "\n"
+    if args.output_file:
+        Path(args.output_file).write_text(output)
+    else:
+        sys.stdout.write(output)
     return 0
 
 

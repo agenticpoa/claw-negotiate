@@ -240,6 +240,28 @@ class TestCli:
         assert ic["cap_min"] == 6_000_000
         assert ic["cap_max"] == 10_000_000
 
+    def test_constraints_file_arg(self, sample_constraints, tmp_path, monkeypatch, capsys):
+        (tmp_path / "create_tokens.py").write_text("# stub")
+        monkeypatch.setenv("NEGOTIATE_REPO_PATH", str(tmp_path))
+
+        constraints_file = tmp_path / "constraints.json"
+        constraints_file.write_text(json.dumps(sample_constraints))
+
+        with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="", stderr="")):
+            argv = ["mint_token.py",
+                    "--constraints-file", str(constraints_file),
+                    "--company-name", "Acme Corp",
+                    "--founder-name", "Jane",
+                    "--investor-name", "Bob",
+                    "--investment-amount", "500000",
+                    "--skip-sshsign-keys"]
+            with patch.object(sys, "argv", argv):
+                rc = mt.main()
+
+        assert rc == 0
+        out = json.loads(capsys.readouterr().out)
+        assert out["founder_constraints"]["cap_min"] == 8_000_000
+
     def test_investor_constraints_json_arg_overrides_env(self, sample_constraints, tmp_path, monkeypatch, capsys):
         (tmp_path / "create_tokens.py").write_text("# stub")
         monkeypatch.setenv("NEGOTIATE_REPO_PATH", str(tmp_path))
