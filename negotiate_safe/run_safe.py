@@ -319,10 +319,17 @@ def _build_results(events: list[dict], neg_id: str, config) -> str:
     if signing:
         lines.append("## Sign to approve")
         lines.append("")
-        if signing.get("approval_url"):
-            lines.append(f"Sign here: {signing['approval_url']}")
+        approval_url = signing.get("approval_url", "")
+        pid = signing.get("pending_id", "?")
+        if approval_url:
+            # Append Telegram callback so the user lands back in the chat after signing
+            bot_username = os.environ.get("TELEGRAM_BOT_USERNAME", "AgenticPOA_bot")
+            import urllib.parse
+            callback = urllib.parse.quote(f"https://t.me/{bot_username}?start=signed_{pid}")
+            sep = "&" if "?" in approval_url else "?"
+            url_with_callback = f"{approval_url}{sep}callback={callback}"
+            lines.append(f"Sign here: {url_with_callback}")
         else:
-            pid = signing.get("pending_id", "?")
             lines.append(f"Approve: `ssh sshsign.dev approve --id {pid}`")
         lines.append("")
 
