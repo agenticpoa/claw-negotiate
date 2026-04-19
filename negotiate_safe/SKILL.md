@@ -92,11 +92,16 @@ Call `{baseDir}/negotiate.py` with simple arguments:
 python3 {baseDir}/negotiate.py --mint-output /tmp/safe_mint.json
 ```
 
-Add `--no-sshsign` for dry runs without the audit trail.
+IMPORTANT exec parameters for this command:
+- Set `timeout` to at least 600 seconds (the negotiation makes ~10 Claude API calls plus sshsign logging, taking 90-180 seconds total)
+- Set `background` to true so you get notified on completion rather than blocking
+- Do NOT reduce the default timeout
 
-The wrapper directly imports the upstream `run_local()` function, bypassing `auto_setup()`. It uses `NegotiationConfig` and `--json-events` for structured output. The negotiation takes 30-60 seconds. Each offer is emitted as a JSON line on stdout.
+The wrapper directly imports the upstream `run_local()` function, bypassing `auto_setup()`. It uses `NegotiationConfig` and `--json-events` for structured output.
 
 After completion, the wrapper exits with a `{"type": "pdf", "path": "..."}` event and a `{"type": "exit", "code": 0}` event. The process does NOT wait for signature approval (that's handled separately in Step 5).
+
+When you receive the completion notification, relay the full negotiation results to the user: each offer round, the final agreement (or deadlock), and the PDF path.
 
 Both parties run as real Claude agents in the same process. The investor is not a stub.
 
