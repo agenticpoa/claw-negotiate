@@ -1,8 +1,6 @@
 """Structural tests for negotiate_safe/SKILL.md.
 
-These catch regressions like: dropped env var from requires.env, missing step,
-description drift from implementation, or Telegram template types that don't
-match telegram_format.py's FORMATTERS.
+Validates the two-command architecture (prepare + negotiate via run_safe.py).
 """
 from __future__ import annotations
 
@@ -51,9 +49,7 @@ class TestFrontmatter:
         m = re.search(r"^metadata:\s*(\{.*\})\s*$", frontmatter, re.M)
         meta = json.loads(m.group(1))
         env = set(meta["openclaw"]["requires"]["env"])
-        assert env == {"ANTHROPIC_API_KEY", "NEGOTIATE_REPO_PATH"}, (
-            f"requires.env should only list essential vars. Got: {env}"
-        )
+        assert env == {"ANTHROPIC_API_KEY", "NEGOTIATE_REPO_PATH"}
 
     def test_requires_lists_bins(self, frontmatter):
         m = re.search(r"^metadata:\s*(\{.*\})\s*$", frontmatter, re.M)
@@ -65,55 +61,45 @@ class TestFrontmatter:
 
 class TestSteps:
     @pytest.mark.parametrize("step", [
-        "## Step 0",    # Preflight
-        "## Step 1",    # Parse
-        "## Step 2",    # Confirm
-        "## Step 2.5",  # Mint APOA token (post-APOA update)
-        "## Step 3",    # Run
-        "## Step 4",    # Stream
-        "## Step 5",    # Co-sign
+        "## Step 1",
+        "## Step 2",
+        "## Step 3",
     ])
     def test_step_present(self, skill_content, step):
         assert step in skill_content, f"Missing: {step}"
 
-    def test_step_25_mentions_apoa_scoping(self, skill_content):
-        m = re.search(r"## Step 2\.5.*?## Step 3", skill_content, re.DOTALL)
-        assert m
-        body = m.group(0)
-        assert "APOA" in body
-        assert "expires" in body.lower()
-        assert "principal" in body.lower()
-
     def test_invariants_section_exists(self, skill_content):
         assert "## Invariants" in skill_content
-        # Six invariants enumerated
         invariants = re.findall(r"^\d+\.\s+\*\*", skill_content, re.M)
-        assert len(invariants) >= 6
+        assert len(invariants) >= 4
 
-    def test_troubleshooting_covers_revoke(self, skill_content):
-        ts_match = re.search(r"## Troubleshooting.*?(?=##|\Z)", skill_content, re.DOTALL)
-        assert ts_match
-        ts = ts_match.group(0)
-        assert "revoke" in ts.lower()
-        assert "tid" in ts.lower() or "token" in ts.lower()
+    def test_troubleshooting_exists(self, skill_content):
+        assert "## Troubleshooting" in skill_content
+
+
+class TestTwoCommandArchitecture:
+    def test_uses_run_safe_py(self, skill_content):
+        assert "run_safe.py" in skill_content
+
+    def test_has_prepare_command(self, skill_content):
+        assert "run_safe.py prepare" in skill_content
+
+    def test_has_negotiate_command(self, skill_content):
+        assert "run_safe.py negotiate" in skill_content
+
+    def test_mentions_background_exec(self, skill_content):
+        assert "background" in skill_content.lower()
+        assert "timeout" in skill_content.lower()
+
+    def test_no_pipe_instructions(self, skill_content):
+        assert "NEVER use pipes" in skill_content or "NEVER use pipe" in skill_content
+
+    def test_mentions_output_dir(self, skill_content):
+        assert "--output-dir" in skill_content
 
 
 class TestCrossFileConsistency:
     def test_all_formatter_types_reachable_from_skill(self, skill_content):
-        """Each FORMATTERS key should map to a template visible in the doc.
-
-        Not every type needs a verbatim copy block in the doc, but the critical
-        user-facing ones do. Catches drift where we add a formatter but forget
-        to document the intent.
-        """
         critical = {"confirm", "authorized", "offer", "agreed", "cosign_requested", "signed"}
         assert critical <= set(tf.FORMATTERS.keys()), \
             "format_event.py is missing a formatter the skill assumes"
-
-    def test_skill_references_script_names(self, skill_content):
-        for script in ("parse_constraints.py", "mint_token.py", "format_event.py"):
-            assert script in skill_content, f"SKILL.md never mentions {script}"
-
-    def test_skill_documents_direct_import(self, skill_content):
-        assert "run_local()" in skill_content or "importlib" in skill_content
-        assert "auto_setup" in skill_content
