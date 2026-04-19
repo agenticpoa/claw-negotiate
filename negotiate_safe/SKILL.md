@@ -30,23 +30,21 @@ python3 /root/.agents/skills/negotiate_safe/run_safe.py negotiate --output-dir /
 
 Set `timeout` to 600. The command will auto-background after ~10 seconds. That is expected.
 
-Tell the user: "Negotiation running. This takes about 2 minutes. I'll share the results when it's done."
+Then IMMEDIATELY run the results waiter (do not respond to the user between these two commands):
 
-## Step 3: Wait for results and present them
+```
+python3 /root/.agents/skills/negotiate_safe/wait_results.py --output-dir /tmp/safe_negotiate
+```
 
-After starting the negotiation, wait 30 seconds, then check if the results file exists by reading it:
+Set `timeout` to 600. This command blocks until the negotiation finishes and results are ready (typically 2 minutes), then prints the full results. You will get the output directly when it returns.
 
-Read the file `/tmp/safe_negotiate/results.md`
+## Step 3: Present results
 
-If the file doesn't exist yet, wait another 30 seconds and try again. Repeat up to 5 times (total ~3 minutes).
-
-When the file exists, read its contents and send them to the user EXACTLY as written. Do not summarize, restructure, or shorten the content. The file contains:
+The wait_results.py output contains the complete negotiation results. Send it to the user EXACTLY as written. Do not summarize, restructure, or shorten it. It includes:
 - Every negotiation round with terms and reasoning
 - The outcome (agreement or deadlock)
 - A signing URL (send as a clickable link)
 - The PDF path (share the PDF file with the user)
-
-If the file never appears after 5 attempts, tell the user the negotiation may have failed and ask them to try again.
 
 ## Step 4: Verify signature
 
