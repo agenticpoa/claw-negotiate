@@ -60,7 +60,7 @@ def extract_constraints(message: str) -> dict[str, Any]:
 
     client = Anthropic()
     response = client.messages.create(
-        model="claude-sonnet-4-7-20250418",
+        model="claude-sonnet-4-6",
         max_tokens=512,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": message}],
