@@ -50,6 +50,8 @@ def parse_args() -> argparse.Namespace:
                         default=os.environ.get("NEGOTIATE_REPO_PATH", ""))
     parser.add_argument("--investor-constraints-json", default="",
                         help="JSON string with investor constraints (overrides INVESTOR_* env vars)")
+    parser.add_argument("--output-file", default="",
+                        help="Write mint output JSON to this file instead of stdout")
     parser.add_argument("--skip-sshsign-keys", action="store_true",
                         help="Skip registering signing keys on sshsign (only for testing)")
     return parser.parse_args()
@@ -212,8 +214,11 @@ def main() -> int:
         },
         "investor_constraints": _resolve_investor_constraints(args),
     }
-    json.dump(output, sys.stdout, indent=2)
-    sys.stdout.write("\n")
+    output_str = json.dumps(output, indent=2) + "\n"
+    if args.output_file:
+        Path(args.output_file).write_text(output_str)
+    else:
+        sys.stdout.write(output_str)
     return 0
 
 

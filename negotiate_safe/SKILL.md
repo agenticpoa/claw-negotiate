@@ -9,12 +9,12 @@ You are negotiating a SAFE on behalf of a founder. This is a binding financial a
 
 ## Step 0: Preflight
 
-Confirm the environment is ready. Do not mint APOA tokens here. Tokens are per-negotiation (Step 2.5).
+Skip manual shell checks. All preflight validation is built into the Python scripts. Just confirm you have the user's negotiation request and proceed to Step 1.
 
-1. `$NEGOTIATE_REPO_PATH/negotiate.py` exists. If not, report "Negotiate repo not found at $NEGOTIATE_REPO_PATH" and stop.
-2. Verify sshsign is reachable: run `ssh ${SSHSIGN_HOST:-sshsign.dev} history --negotiation-id healthcheck`. Any JSON response (even an error like `{"error":"..."}`) proves connectivity. Only fail if the SSH connection itself is refused or times out. If SSH is not configured for sshsign.dev, tell the user: "Run `ssh-keygen -t ed25519 -f ~/.ssh/sshsign_key` and add a Host entry for sshsign.dev in ~/.ssh/config."
-3. Generate a fresh `negotiation_id` (UUID v4). Hold it in memory for the rest of the flow.
-4. If `$FOUNDER_DID` is not set, default to `did:apoa:default`. If `$SSHSIGN_KEY_PATH` is not set, assume SSH config handles key selection.
+Important constraints for all exec calls in this skill:
+- Use ONLY simple `python3 /path/to/script.py --flag value` commands
+- NEVER use pipes (`|`), heredocs (`<<`), shell variables (`$VAR`, `${VAR}`), redirections (`>`), or multi-line commands
+- Write data to files using the write tool, then pass file paths as arguments
 
 ## Step 1: Parse the user's requirements
 
@@ -62,19 +62,13 @@ The user's "go" is the authorization event. It converts into a signed APOA token
 
 The founder is the principal. "Go" authorizes this skill to act as their agent, bounded by the constraints they just approved. Convert that authorization into a cryptographically signed APOA token scoped to this specific negotiation, not a reusable blank check.
 
-Call `{baseDir}/mint_token.py` using file-based arguments. Do NOT use pipes or shell variable expansion:
+Call `{baseDir}/mint_token.py` with file-based arguments only:
 
 ```
-python3 {baseDir}/mint_token.py --constraints-file /tmp/safe_constraints.json --company-name "Acme Corp" --founder-name "Jane Doe" --investor-name "Angel Ventures" --investment-amount 500000 --skip-sshsign-keys
+python3 {baseDir}/mint_token.py --constraints-file /tmp/safe_constraints.json --company-name "Acme Corp" --founder-name "Jane Doe" --investor-name "Angel Ventures" --investment-amount 500000 --output-file /tmp/safe_mint.json
 ```
 
-The script reads constraints from the JSON file written in Step 1. It writes its output (mint summary) to stdout. Capture this to a file for Step 3:
-
-```
-python3 {baseDir}/mint_token.py --constraints-file /tmp/safe_constraints.json ... > /tmp/safe_mint.json
-```
-
-`mint_token.py` wraps `apoa.create_client().create_token()` and writes `${NEGOTIATE_REPO_PATH}/negotiations/<negotiation_id>/{founder,investor}.json`. Mint both sides: founder token for the agent acting on the user's behalf, investor token for the counterparty agent.
+The script reads constraints from the JSON file written in Step 1 and writes its mint output to the file specified by `--output-file`. No pipes or redirects needed.
 
 Save the `tid` (token ID) from the response. The user can revoke it at any time to cancel (see Troubleshooting).
 
