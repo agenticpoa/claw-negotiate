@@ -28,12 +28,14 @@ Return ONLY a JSON object (no prose, no code fences) with these exact fields:
 }
 
 Rules:
-- "$8M", "8 million", "8MM" -> 8000000.
-- "20%", "twenty percent" -> 0.20.
+- Parse dollar amounts carefully. "$8M" = 8000000. "$50M" = 50000000. "$100M" = 100000000. "$500,000" = 500000. "$1.5M" = 1500000.
+- "Cap between $50M and $100M" -> valuation_cap_min: 50000000, valuation_cap_max: 100000000. Read BOTH numbers.
+- "20%", "twenty percent" -> 0.20. "10%" -> 0.10.
 - If only a minimum cap is given, set valuation_cap_max to null.
 - If the user doesn't mention pro_rata, default to "preferred".
 - If the user doesn't mention mfn, default to "indifferent".
 - If a required numeric field is genuinely ambiguous, use null. The caller will ask the user to clarify rather than guess.
+- Double-check your numbers against the original message before returning.
 """
 
 
