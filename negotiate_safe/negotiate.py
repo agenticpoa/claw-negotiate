@@ -1,25 +1,22 @@
 #!/usr/bin/env python3
 """Skill wrapper around $NEGOTIATE_REPO_PATH/negotiate.py.
 
-Directly imports and calls upstream's run_local() function, bypassing
-main() and auto_setup(). This ensures:
-- Our mint_token.py's negotiation ID, tokens, and keys are used (not duplicated)
-- Constraints from APOA tokens drive agent behavior (not .env defaults)
-- PDFs land in a per-negotiation output directory we control
+Imports upstream's NegotiationConfig and run_negotiation() directly,
+bypassing main() and auto_setup(). Uses --json-events for structured
+offer streaming (no sshsign polling thread needed).
 """
 from __future__ import annotations
 
-import argparse
 import asyncio
 import json
 import os
 import sys
 import threading
-import time
 from pathlib import Path
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args():
+    import argparse
     parser = argparse.ArgumentParser(description="Run a SAFE negotiation via upstream negotiate.py")
     parser.add_argument("--mint-output", required=True,
                         help="JSON output from mint_token.py (path, or - for stdin)")
@@ -27,8 +24,6 @@ def parse_args() -> argparse.Namespace:
                         default=os.environ.get("NEGOTIATE_REPO_PATH", ""))
     parser.add_argument("--no-sshsign", action="store_true",
                         help="Skip sshsign audit trail (dry run)")
-    parser.add_argument("--poll-interval", type=float, default=2.0,
-                        help="Seconds between sshsign history polls")
     return parser.parse_args()
 
 
@@ -67,74 +62,51 @@ def check_token_expiry(jwt_str: str, buffer_seconds: int = 60) -> str | None:
     return None
 
 
-def build_namespace(
+def build_config_dict(
     mint: dict,
     repo: Path,
     f_cfg: dict,
     i_cfg: dict,
     no_sshsign: bool = False,
-) -> argparse.Namespace:
-    """Build an argparse.Namespace matching upstream's parse_args() output.
+) -> dict:
+    """Build a dict matching NegotiationConfig fields from mint output + configs.
 
-    Populates every field run_local() reads, using values from mint_token.py
-    output and per-negotiation config files. Bypasses auto_setup() entirely.
+    Returned as a plain dict so unit tests don't need to import the upstream
+    module. main() converts to NegotiationConfig at runtime.
     """
     neg_id = mint["negotiation_id"]
     neg_dir = Path(mint["founder_config_path"]).parent
     output_dir = str(neg_dir / "output")
 
-    fc = mint.get("founder_constraints", {})
-    ic = mint.get("investor_constraints", {})
-
-    return argparse.Namespace(
-        schema=str(repo / "schemas" / "safe.json"),
-        role="",
-        negotiation_id=neg_id,
-        session_id=f"session_{neg_id}",
-        founder_token=mint["founder_token_path"],
-        investor_token=mint["investor_token_path"],
-        founder_pubkey=f_cfg["pubkey"],
-        investor_pubkey=i_cfg["pubkey"],
-        no_sshsign=no_sshsign,
-        sshsign_host=f_cfg.get("sshsign_host") or os.environ.get("SSHSIGN_HOST", "sshsign.dev"),
-        output_dir=output_dir,
-        company_name=f_cfg["company_name"],
-        founder_name=f_cfg["name"],
-        founder_title=f_cfg.get("title", ""),
-        investor_name=i_cfg["name"],
-        investor_firm=i_cfg.get("firm", ""),
-        investment_amount=f_cfg["investment_amount"],
-        date="",
-        signing_key_id=f_cfg.get("founder_signing_key_id") or f_cfg.get("signing_key_id", ""),
-        founder_signing_key_id=f_cfg.get("founder_signing_key_id") or f_cfg.get("signing_key_id", ""),
-        investor_signing_key_id=i_cfg.get("investor_signing_key_id") or i_cfg.get("signing_key_id", ""),
-        founder_require_signature=True,
-        investor_require_signature=True,
-        poll=True,
-        poll_timeout=300,
-        founder_cap_min=fc.get("cap_min", 8_000_000),
-        founder_cap_max=fc.get("cap_max", 12_000_000),
-        founder_discount_min=fc.get("discount_min", 0.20),
-        founder_discount_max=fc.get("discount_max", 0.25),
-        founder_pro_rata_required=fc.get("pro_rata_required", True),
-        founder_mfn_required=fc.get("mfn_required", False),
-        investor_cap_min=ic.get("cap_min", 6_000_000),
-        investor_cap_max=ic.get("cap_max", 10_000_000),
-        investor_discount_min=ic.get("discount_min", 0.15),
-        investor_discount_max=ic.get("discount_max", 0.25),
-        investor_pro_rata_required=ic.get("pro_rata_required", False),
-        investor_mfn_required=ic.get("mfn_required", False),
-        verbose=False,
-        finalize="",
-    )
+    return {
+        "negotiate_repo": repo,
+        "negotiation_id": neg_id,
+        "founder_token_path": mint["founder_token_path"],
+        "investor_token_path": mint["investor_token_path"],
+        "founder_pubkey_path": f_cfg["pubkey"],
+        "investor_pubkey_path": i_cfg["pubkey"],
+        "company_name": f_cfg["company_name"],
+        "founder_name": f_cfg["name"],
+        "founder_title": f_cfg.get("title", ""),
+        "investor_name": i_cfg["name"],
+        "investor_firm": i_cfg.get("firm", ""),
+        "investment_amount": f_cfg["investment_amount"],
+        "sshsign_host": f_cfg.get("sshsign_host") or os.environ.get("SSHSIGN_HOST", "sshsign.dev"),
+        "no_sshsign": no_sshsign,
+        "output_dir": output_dir,
+        "signing_key_id": f_cfg.get("founder_signing_key_id") or f_cfg.get("signing_key_id", ""),
+        "founder_signing_key_id": f_cfg.get("founder_signing_key_id") or f_cfg.get("signing_key_id", ""),
+        "investor_signing_key_id": i_cfg.get("investor_signing_key_id") or i_cfg.get("signing_key_id", ""),
+        "json_events": True,
+        "poll": True,
+    }
 
 
-def load_run_local(repo: Path):
-    """Import run_local from the upstream negotiate module.
+def load_upstream_module(repo: Path):
+    """Import the upstream negotiate module via importlib.
 
-    Uses importlib.util with a distinct module name ('negotiate_upstream')
-    to avoid collision with this wrapper module. Adds repo to sys.path
-    temporarily so upstream's internal imports (protocol, agents, etc.) resolve.
+    Returns the module object (with NegotiationConfig, run_negotiation, etc.)
+    or None on failure.
     """
     import importlib.util
 
@@ -156,16 +128,13 @@ def load_run_local(repo: Path):
         sys.stderr.write(f"cannot import negotiate: {e}\n")
         return None
 
-    return getattr(module, "run_local", None)
+    return module
 
 
 def load_get_history(repo: Path):
     """Import sshsign_client.get_history from the negotiate repo.
 
-    Uses importlib.util to load the module from its file path directly, so
-    this does not pollute sys.path or sys.modules (which leaks across tests
-    and can mask the "module missing" code path).
-    Returns the callable on success, or None on failure with a stderr log.
+    Kept as a fallback for environments where --json-events isn't available.
     """
     import importlib.util
 
@@ -195,7 +164,10 @@ def stream_offers(
     stop: threading.Event,
     interval: float,
 ) -> None:
-    """Tail sshsign history via the injected callable; emit new entries as NDJSON."""
+    """Tail sshsign history via the injected callable; emit new entries as NDJSON.
+
+    Fallback streaming mechanism. Prefer --json-events when available.
+    """
     seen = 0
     while not stop.is_set():
         try:
@@ -229,44 +201,24 @@ def main() -> int:
     f_cfg = load_config(mint["founder_config_path"])
     i_cfg = load_config(mint["investor_config_path"])
 
-    ns = build_namespace(mint, repo, f_cfg, i_cfg, no_sshsign=args.no_sshsign)
+    config_dict = build_config_dict(mint, repo, f_cfg, i_cfg, no_sshsign=args.no_sshsign)
 
-    run_local_fn = load_run_local(repo)
-    if run_local_fn is None:
-        sys.stderr.write("Failed to load run_local from upstream.\n")
+    upstream = load_upstream_module(repo)
+    if upstream is None:
+        sys.stderr.write("Failed to load upstream negotiate module.\n")
         return 2
 
-    # Start sshsign history streaming in background
-    host = ns.sshsign_host
-    stop = threading.Event()
-    streamer = None
-    if not ns.no_sshsign:
-        get_history_fn = load_get_history(repo)
-        if get_history_fn is not None:
-            streamer = threading.Thread(
-                target=stream_offers,
-                args=(get_history_fn, host, negotiation_id, stop, args.poll_interval),
-                daemon=True,
-            )
-            streamer.start()
+    config = upstream.NegotiationConfig(**config_dict)
 
-    original_cwd = os.getcwd()
-    os.chdir(str(repo))
     try:
-        asyncio.run(run_local_fn(ns))
+        asyncio.run(upstream.run_negotiation(config))
         rc = 0
     except Exception as e:
         sys.stderr.write(f"Negotiation error: {e}\n")
         rc = 1
-    finally:
-        os.chdir(original_cwd)
-        if streamer is not None:
-            time.sleep(args.poll_interval + 0.5)
-            stop.set()
-            streamer.join(timeout=5)
 
     # Emit PDF path if generated
-    output_dir = Path(ns.output_dir)
+    output_dir = Path(config_dict["output_dir"])
     for suffix in ("_executed.pdf", ".pdf"):
         pdf = output_dir / f"{negotiation_id}{suffix}"
         if pdf.exists():
