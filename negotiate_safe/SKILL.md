@@ -18,9 +18,13 @@ Confirm the environment is ready. Do not mint APOA tokens here. Tokens are per-n
 
 ## Step 1: Parse the user's requirements
 
-Call `{baseDir}/parse_constraints.py` with the user's message on stdin. It uses Claude to extract structured constraints.
+Write the user's message to a temporary file, then call `{baseDir}/parse_constraints.py` with file-based arguments. Do NOT use pipes or shell constructs.
 
-Example input: "Negotiate my SAFE. Cap between $8M and $12M, discount at least 20%, pro-rata required."
+```
+python3 {baseDir}/parse_constraints.py --message "Negotiate my SAFE. Cap between $8M and $12M, discount at least 20%, pro-rata required." --output-file /tmp/safe_constraints.json
+```
+
+Or for longer messages, write to a file first and use `--message-file`.
 
 The script emits JSON with these fields (APOA flat format, matches `protocol.py`):
 
@@ -58,15 +62,17 @@ The user's "go" is the authorization event. It converts into a signed APOA token
 
 The founder is the principal. "Go" authorizes this skill to act as their agent, bounded by the constraints they just approved. Convert that authorization into a cryptographically signed APOA token scoped to this specific negotiation, not a reusable blank check.
 
-Call `{baseDir}/mint_token.py` with:
+Call `{baseDir}/mint_token.py` using file-based arguments. Do NOT use pipes or shell variable expansion:
 
-- `--principal-id` = `$FOUNDER_DID` (the founder's DID)
-- `--agent-id` = `did:apoa:negotiate_safe:<negotiation_id>`
-- `--service` = `safe:<company-slug>:<negotiation_id>` (names this specific deal)
-- `--access-mode` = `api`
-- `--constraints` = the full flat-format JSON from Step 1 (matches `ServiceAuthorization.constraints`)
-- `--expires` = now + `$NEGOTIATION_TTL` (default 1h)
-- `--signing-key` = `$PRINCIPAL_KEY_PATH`
+```
+python3 {baseDir}/mint_token.py --constraints-file /tmp/safe_constraints.json --company-name "Acme Corp" --founder-name "Jane Doe" --investor-name "Angel Ventures" --investment-amount 500000 --skip-sshsign-keys
+```
+
+The script reads constraints from the JSON file written in Step 1. It writes its output (mint summary) to stdout. Capture this to a file for Step 3:
+
+```
+python3 {baseDir}/mint_token.py --constraints-file /tmp/safe_constraints.json ... > /tmp/safe_mint.json
+```
 
 `mint_token.py` wraps `apoa.create_client().create_token()` and writes `${NEGOTIATE_REPO_PATH}/negotiations/<negotiation_id>/{founder,investor}.json`. Mint both sides: founder token for the agent acting on the user's behalf, investor token for the counterparty agent.
 
@@ -86,14 +92,17 @@ Revoke anytime: apoa revoke tid_abc123
 
 ## Step 3: Run the negotiation
 
-Call `{baseDir}/negotiate.py` (the skill's wrapper) with `--mint-output` pointing to the mint JSON from Step 2.5.
+Call `{baseDir}/negotiate.py` with simple arguments:
 
-The wrapper directly imports and calls the upstream `run_local()` function, bypassing `auto_setup()`. This means:
-- Our negotiation ID, tokens, and keys are used (no duplication)
-- Constraints from the APOA tokens drive agent behavior
-- PDFs are written to a per-negotiation output directory
+```
+python3 {baseDir}/negotiate.py --mint-output /tmp/safe_mint.json
+```
 
-The wrapper handles the full lifecycle: negotiation, offer logging to sshsign, PDF generation, co-sign submission, and approval polling. The upstream prints each offer to stdout as it happens. Relay these to the user as they appear.
+Add `--no-sshsign` for dry runs without the audit trail.
+
+The wrapper directly imports the upstream `run_local()` function, bypassing `auto_setup()`. It uses `NegotiationConfig` and `--json-events` for structured output. The negotiation takes 30-60 seconds. Each offer is emitted as a JSON line on stdout.
+
+After completion, the wrapper exits with a `{"type": "pdf", "path": "..."}` event and a `{"type": "exit", "code": 0}` event. The process does NOT wait for signature approval (that's handled separately in Step 5).
 
 Both parties run as real Claude agents in the same process. The investor is not a stub.
 
