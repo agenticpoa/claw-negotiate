@@ -36,32 +36,13 @@ This command mints APOA tokens, runs the full negotiation, logs every offer to s
 
 ## Step 3: Present results
 
-When the negotiation completes, the output contains JSON events (one per line starting with `{`). Parse them and present to the user:
+The negotiate command writes a pre-formatted `results.md` to the output dir AND prints it to stdout. The output includes round-by-round offers, the outcome, the signing link, and the PDF path — all formatted for the user.
 
-**For each offer event** (`"type": "offer"` or `"type": "counter"`), show the round:
-```
-Round 1 — Founder
-Cap: $100,000,000 | Discount: 10% | Pro-rata: yes | MFN: no
-```
+Relay the output to the user exactly as formatted. Do not summarize or restructure it.
 
-```
-Round 2 — Investor
-Cap: $35,000,000 | Discount: 5% | Pro-rata: no | MFN: no
-```
+If the output includes a signing URL (starts with `https://`), make sure it's clickable.
 
-Show EVERY round, not just a summary. The user wants to see the negotiation unfold.
-
-**For the outcome event** (`"type": "outcome"`), show whether agreement was reached and the final terms.
-
-**For the signing event** (`"type": "signing"`), extract the `approval_url` field and present it as a clickable link:
-```
-Agreement reached! Sign here to approve:
-https://sshsign.dev/approve/pnd_xxx?token=yyy
-```
-
-Do NOT tell the user to run SSH commands. If `approval_url` is present, show it as a link. If not, show the SSH fallback as a last resort.
-
-**For the PDF event** (`"type": "pdf"`), share the file with the user. Use the message tool with the file path to send it as an attachment. Do not just print a raw file path like `/root/negotiate/...` — the user cannot access that.
+If the output includes a PDF path, share the PDF file with the user as an attachment.
 
 ## Step 4: Verify signature
 

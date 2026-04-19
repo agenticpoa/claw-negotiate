@@ -217,22 +217,124 @@ def run_negotiation_flow(output_dir: str) -> int:
         poll=False,
     )
 
+    # Capture stdout to parse JSON events for results.md
+    import io
+    captured = io.StringIO()
+    original_stdout = sys.stdout
+    sys.stdout = captured
+
     try:
         asyncio.run(module.run_negotiation(config))
         rc = 0
     except Exception as e:
         sys.stderr.write(f"Negotiation error: {e}\n")
         rc = 1
+    finally:
+        sys.stdout = original_stdout
 
-    output_path = Path(config.output_dir)
-    for suffix in ("_executed.pdf", ".pdf"):
-        pdf = output_path / f"{neg_id}{suffix}"
-        if pdf.exists():
-            sys.stdout.write(json.dumps({"type": "pdf", "path": str(pdf)}) + "\n")
-            break
+    raw_output = captured.getvalue()
+
+    # Parse JSON events from captured output
+    events = []
+    for line in raw_output.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+
+    # Build results.md
+    results = _build_results(events, neg_id, config)
+    results_path = out / "results.md"
+    results_path.write_text(results)
+
+    # Also write to stdout for the model
+    sys.stdout.write(results)
+    sys.stdout.write("\n")
 
     sys.stdout.write(json.dumps({"type": "exit", "code": rc}) + "\n")
     return rc
+
+
+def _fmt_dollars(n) -> str:
+    if n is None:
+        return "?"
+    return f"${int(n):,}"
+
+
+def _fmt_pct(d) -> str:
+    if d is None:
+        return "?"
+    return f"{d * 100:.0f}%"
+
+
+def _build_results(events: list[dict], neg_id: str, config) -> str:
+    """Build a human-readable results summary from JSON events."""
+    lines = ["# Negotiation Results", ""]
+
+    # Rounds
+    offers = [e for e in events if e.get("type") in ("offer", "counter", "accept")]
+    if offers:
+        lines.append("## Rounds")
+        lines.append("")
+        for e in offers:
+            party = e.get("party", "?").capitalize()
+            round_num = e.get("round", "?")
+            terms = e.get("terms", {})
+            etype = e.get("type", "offer")
+
+            if etype == "accept":
+                lines.append(f"**Round {round_num} — {party}: ACCEPTED**")
+            else:
+                cap = _fmt_dollars(terms.get("valuation_cap"))
+                disc = _fmt_pct(terms.get("discount_rate"))
+                pr = "yes" if terms.get("pro_rata") else "no"
+                mfn = "yes" if terms.get("mfn") else "no"
+                lines.append(f"**Round {round_num} — {party}**")
+                lines.append(f"Cap: {cap} | Discount: {disc} | Pro-rata: {pr} | MFN: {mfn}")
+
+            if e.get("message"):
+                lines.append(f"> {e['message']}")
+            lines.append("")
+
+    # Outcome
+    outcome = next((e for e in events if e.get("type") == "outcome"), None)
+    if outcome:
+        lines.append("## Outcome")
+        lines.append("")
+        if outcome.get("result") == "accepted" and outcome.get("terms"):
+            t = outcome["terms"]
+            lines.append(f"**Agreement reached!**")
+            lines.append(f"- Cap: {_fmt_dollars(t.get('valuation_cap'))}")
+            lines.append(f"- Discount: {_fmt_pct(t.get('discount_rate'))}")
+            lines.append(f"- Pro-rata: {'yes' if t.get('pro_rata') else 'no'}")
+            lines.append(f"- MFN: {'yes' if t.get('mfn') else 'no'}")
+        elif outcome.get("result") == "max_rounds":
+            lines.append("**No agreement reached after 10 rounds.**")
+        lines.append("")
+
+    # Signing
+    signing = next((e for e in events if e.get("type") == "signing"), None)
+    if signing:
+        lines.append("## Sign to approve")
+        lines.append("")
+        if signing.get("approval_url"):
+            lines.append(f"Sign here: {signing['approval_url']}")
+        else:
+            pid = signing.get("pending_id", "?")
+            lines.append(f"Approve: `ssh sshsign.dev approve --id {pid}`")
+        lines.append("")
+
+    # PDF
+    pdf_event = next((e for e in events if e.get("type") == "pdf"), None)
+    if pdf_event:
+        lines.append("## Document")
+        lines.append("")
+        lines.append(f"PDF: {pdf_event['path']}")
+        lines.append("")
+
+    return "\n".join(lines)
 
 
 def run_negotiate(output_dir: str) -> int:
