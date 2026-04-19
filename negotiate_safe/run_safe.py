@@ -43,6 +43,12 @@ def run_prepare(
         sys.stderr.write(f"Parse error: {e}\n")
         return 1
 
+    required_fields = ("valuation_cap_min", "valuation_cap_max", "discount_min", "pro_rata", "mfn")
+    missing = [f for f in required_fields if constraints.get(f) is None]
+    if missing:
+        sys.stderr.write(f"Ambiguous constraints (null values): {missing}. Ask the user to clarify.\n")
+        return 1
+
     config = {
         "constraints": constraints,
         "founder_name": founder_name or os.environ.get("FOUNDER_NAME", "Founder"),
@@ -81,7 +87,8 @@ def run_mint(output_dir: str, config: dict) -> int:
 
     pro_rata_required = constraints.get("pro_rata") == "required"
     mfn_required = constraints.get("mfn") == "required"
-    discount_max = max(0.25, float(constraints.get("discount_min", 0.20)))
+    discount_min = float(constraints.get("discount_min", 0.20))
+    discount_max = discount_min + 0.10
 
     company = constraints.get("company_name", "Company")
     investor = constraints.get("investor_name", "Investor")

@@ -37,6 +37,22 @@ class TestPrepare:
             rc = rs.run_prepare("bad message", str(tmp_path), "F", "CEO")
         assert rc == 1
 
+    def test_rejects_null_required_fields(self, tmp_path):
+        constraints_with_nulls = {
+            "valuation_cap_min": None,
+            "valuation_cap_max": 12_000_000,
+            "discount_min": 0.20,
+            "pro_rata": "required",
+            "mfn": "preferred",
+            "company_name": "Co",
+            "investor_name": "Inv",
+            "investment_amount": 500_000.0,
+        }
+        with patch.object(rs, "extract_constraints", return_value=constraints_with_nulls):
+            rc = rs.run_prepare("test", str(tmp_path), "F", "CEO")
+        assert rc == 1
+        assert not (tmp_path / "config.json").exists()
+
     def test_creates_output_dir(self, tmp_path, sample_constraints):
         out_dir = tmp_path / "new_dir"
         with patch.object(rs, "extract_constraints", return_value=sample_constraints):
