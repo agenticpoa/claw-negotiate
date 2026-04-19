@@ -46,29 +46,19 @@ The wait_results.py output contains the complete negotiation results. Send it to
 - A signing URL (send as a clickable link)
 - The PDF path (share the PDF file with the user)
 
-## Step 4: Verify signature
+## Step 4: Wait for signature and confirm
 
-After presenting the results, tell the user:
-
-"After you've signed, reply 'signed' and I'll verify and share the final document."
-
-When the user replies (e.g. "signed", "done", "approved"), extract the pending ID from the results (it's in the signing URL after `pnd_`) and verify:
+After presenting the results, IMMEDIATELY run the approval waiter (do not wait for the user to reply):
 
 ```
-python3 /root/.agents/skills/negotiate_safe/wait_results.py --output-dir /tmp/safe_negotiate
+python3 /root/.agents/skills/negotiate_safe/wait_approval.py --output-dir /tmp/safe_negotiate
 ```
 
-Read the results.md to find the pending ID, then run:
-
-```
-ssh sshsign.dev get-envelope --id pnd_XXXXX
-```
-
-If the response contains `"status": "approved"`, tell the user:
+Set `timeout` to 600. This blocks until the user signs via the URL (polls sshsign every 10 seconds). When it returns with `"status": "approved"`, tell the user:
 
 "Signature verified! Your executed SAFE is ready."
 
-Then share the PDF file from the output directory.
+Then share the PDF file from the negotiation output directory.
 
 ## Invariants
 
