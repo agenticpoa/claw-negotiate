@@ -122,10 +122,12 @@ def load_upstream_module(repo: Path):
 
     sys.path.insert(0, str(repo))
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     try:
         spec.loader.exec_module(module)
     except Exception as e:
         sys.stderr.write(f"cannot import negotiate: {e}\n")
+        del sys.modules[spec.name]
         return None
 
     return module

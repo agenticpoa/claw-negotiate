@@ -96,12 +96,15 @@ class TestTokenExpiry:
 class TestLoadUpstreamModule:
     def test_returns_module_with_run_negotiation(self, tmp_path):
         (tmp_path / "negotiate.py").write_text(
+            "import sys\n"
             "from dataclasses import dataclass\n"
             "@dataclass\n"
             "class NegotiationConfig:\n"
             "    negotiate_repo: str = ''\n"
             "async def run_negotiation(config): pass\n"
             "async def run_local(args): pass\n"
+            "# verify module is in sys.modules during exec\n"
+            "assert 'negotiate_upstream' in sys.modules\n"
         )
         module = ng.load_upstream_module(tmp_path)
         assert module is not None
