@@ -30,7 +30,8 @@ python3 {baseDir}/run_safe.py negotiate --output-dir /tmp/safe_negotiate
 
 IMPORTANT exec parameters:
 - Set `timeout` to 600 (negotiation takes 90-180 seconds with sshsign logging)
-- Set `background` to true
+- Set `yieldMs` to 300000 (prevents auto-backgrounding so you get the full output)
+- Do NOT set `background` to true — run foreground so the output returns directly
 
 This command mints APOA tokens, runs the full negotiation, logs every offer to sshsign, and generates the PDF.
 
