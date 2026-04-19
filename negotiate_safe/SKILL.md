@@ -28,22 +28,25 @@ Once the user confirms, run the negotiation:
 python3 /root/.agents/skills/negotiate_safe/run_safe.py negotiate --output-dir /tmp/safe_negotiate
 ```
 
-IMPORTANT exec parameters:
-- Set `timeout` to 600 (negotiation takes 90-180 seconds with sshsign logging)
-- Set `yieldMs` to 300000 (prevents auto-backgrounding so you get the full output)
-- Do NOT set `background` to true — run foreground so the output returns directly
+Set `timeout` to 600. The command will auto-background after ~10 seconds. That is expected.
 
-This command mints APOA tokens, runs the full negotiation, logs every offer to sshsign, and generates the PDF.
+Tell the user: "Negotiation running. This takes about 2 minutes. I'll share the results when it's done."
 
-## Step 3: Present results
+## Step 3: Wait for results and present them
 
-The negotiate command writes a pre-formatted `results.md` to the output dir AND prints it to stdout. The output includes round-by-round offers, the outcome, the signing link, and the PDF path — all formatted for the user.
+After starting the negotiation, wait 30 seconds, then check if the results file exists by reading it:
 
-Relay the output to the user exactly as formatted. Do not summarize or restructure it.
+Read the file `/tmp/safe_negotiate/results.md`
 
-If the output includes a signing URL (starts with `https://`), make sure it's clickable.
+If the file doesn't exist yet, wait another 30 seconds and try again. Repeat up to 5 times (total ~3 minutes).
 
-If the output includes a PDF path, share the PDF file with the user as an attachment.
+When the file exists, read its contents and send them to the user EXACTLY as written. Do not summarize, restructure, or shorten the content. The file contains:
+- Every negotiation round with terms and reasoning
+- The outcome (agreement or deadlock)
+- A signing URL (send as a clickable link)
+- The PDF path (share the PDF file with the user)
+
+If the file never appears after 5 attempts, tell the user the negotiation may have failed and ask them to try again.
 
 ## Step 4: Verify signature
 
