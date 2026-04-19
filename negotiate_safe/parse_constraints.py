@@ -17,9 +17,9 @@ SYSTEM_PROMPT = """You extract structured SAFE negotiation constraints from a fo
 Return ONLY a JSON object (no prose, no code fences) with these exact fields:
 
 {
-  "valuation_cap_min": <integer dollars, or null>,
-  "valuation_cap_max": <integer dollars, or null>,
-  "discount_min": <decimal 0-1 e.g. 0.20, or null>,
+  "valuation_cap_min": <integer dollars>,
+  "valuation_cap_max": <integer dollars>,
+  "discount_min": <decimal 0-1>,
   "pro_rata": "required" | "preferred" | "indifferent",
   "mfn": "required" | "preferred" | "indifferent",
   "company_name": <string or null>,
@@ -28,14 +28,27 @@ Return ONLY a JSON object (no prose, no code fences) with these exact fields:
 }
 
 Rules:
-- Parse dollar amounts carefully. "$8M" = 8000000. "$50M" = 50000000. "$100M" = 100000000. "$500,000" = 500000. "$1.5M" = 1500000.
-- "Cap between $50M and $100M" -> valuation_cap_min: 50000000, valuation_cap_max: 100000000. Read BOTH numbers.
-- "20%", "twenty percent" -> 0.20. "10%" -> 0.10.
-- If only a minimum cap is given, set valuation_cap_max to null.
 - If the user doesn't mention pro_rata, default to "preferred".
 - If the user doesn't mention mfn, default to "indifferent".
-- If a required numeric field is genuinely ambiguous, use null. The caller will ask the user to clarify rather than guess.
-- Double-check your numbers against the original message before returning.
+- If a required numeric field is genuinely ambiguous, use null.
+- Double-check every number against the original message before returning.
+
+Examples:
+
+Input: "Cap between $50M and $100M, discount at least 10%, pro-rata required."
+Output: {"valuation_cap_min": 50000000, "valuation_cap_max": 100000000, "discount_min": 0.10, "pro_rata": "required", "mfn": "indifferent", "company_name": null, "investor_name": null, "investment_amount": null}
+
+Input: "Negotiate my SAFE for Acme Corp with Bay Capital. Cap $8M-$12M, 20% discount, pro-rata, MFN preferred. $500k investment."
+Output: {"valuation_cap_min": 8000000, "valuation_cap_max": 12000000, "discount_min": 0.20, "pro_rata": "required", "mfn": "preferred", "company_name": "Acme Corp", "investor_name": "Bay Capital", "investment_amount": 500000.0}
+
+Input: "SAFE for TechCo. Looking for $150M cap, no less than $120M. Discount 15%. Pro-rata is a must. Investment: $1.5M."
+Output: {"valuation_cap_min": 120000000, "valuation_cap_max": 150000000, "discount_min": 0.15, "pro_rata": "required", "mfn": "indifferent", "company_name": "TechCo", "investor_name": null, "investment_amount": 1500000.0}
+
+Input: "Cap no lower than $5M, up to $10M. Twenty percent discount minimum. No strong feelings on pro-rata or MFN. $250,000."
+Output: {"valuation_cap_min": 5000000, "valuation_cap_max": 10000000, "discount_min": 0.20, "pro_rata": "preferred", "mfn": "indifferent", "company_name": null, "investor_name": null, "investment_amount": 250000.0}
+
+Input: "Negotiate with Angel Ventures for DataFlow Inc. $50M to $100M cap, 10% discount, pro-rata required, MFN preferred. Investment: $500,000."
+Output: {"valuation_cap_min": 50000000, "valuation_cap_max": 100000000, "discount_min": 0.10, "pro_rata": "required", "mfn": "preferred", "company_name": "DataFlow Inc", "investor_name": "Angel Ventures", "investment_amount": 500000.0}
 """
 
 
@@ -47,7 +60,7 @@ def extract_constraints(message: str) -> dict[str, Any]:
 
     client = Anthropic()
     response = client.messages.create(
-        model="claude-sonnet-4-6",
+        model="claude-sonnet-4-7-20250418",
         max_tokens=512,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": message}],
