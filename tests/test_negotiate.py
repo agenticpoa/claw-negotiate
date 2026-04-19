@@ -58,6 +58,10 @@ class TestBuildConfigDict:
         d = ng.build_config_dict(sample_mint_output, tmp_path, sample_founder_config, sample_investor_config)
         assert d["json_events"] is True
 
+    def test_poll_disabled_for_skill_mode(self, sample_mint_output, sample_founder_config, sample_investor_config, tmp_path):
+        d = ng.build_config_dict(sample_mint_output, tmp_path, sample_founder_config, sample_investor_config)
+        assert d["poll"] is False, "poll=True causes the process to hang waiting for signature approval"
+
     def test_negotiate_repo_is_path(self, sample_mint_output, sample_founder_config, sample_investor_config, tmp_path):
         d = ng.build_config_dict(sample_mint_output, tmp_path, sample_founder_config, sample_investor_config)
         assert d["negotiate_repo"] == tmp_path

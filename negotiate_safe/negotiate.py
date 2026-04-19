@@ -98,7 +98,7 @@ def build_config_dict(
         "founder_signing_key_id": f_cfg.get("founder_signing_key_id") or f_cfg.get("signing_key_id", ""),
         "investor_signing_key_id": i_cfg.get("investor_signing_key_id") or i_cfg.get("signing_key_id", ""),
         "json_events": True,
-        "poll": True,
+        "poll": False,
     }
 
 
