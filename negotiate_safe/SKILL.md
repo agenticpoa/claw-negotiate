@@ -15,7 +15,7 @@ IMPORTANT: All exec calls in this skill MUST be simple commands. Use ONLY `pytho
 2. Run:
 
 ```
-python3 {baseDir}/run_safe.py prepare --message-file /tmp/safe_request.txt --output-dir /tmp/safe_negotiate
+python3 /root/.agents/skills/negotiate_safe/run_safe.py prepare --message-file /tmp/safe_request.txt --output-dir /tmp/safe_negotiate
 ```
 
 3. Show the parsed constraints to the user and ask for confirmation. Wait for "go" before proceeding.
@@ -25,7 +25,7 @@ python3 {baseDir}/run_safe.py prepare --message-file /tmp/safe_request.txt --out
 Once the user confirms, run the negotiation:
 
 ```
-python3 {baseDir}/run_safe.py negotiate --output-dir /tmp/safe_negotiate
+python3 /root/.agents/skills/negotiate_safe/run_safe.py negotiate --output-dir /tmp/safe_negotiate
 ```
 
 IMPORTANT exec parameters:
