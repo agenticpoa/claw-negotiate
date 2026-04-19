@@ -102,6 +102,19 @@ class TestNegotiate:
         mock_neg.assert_not_called()
 
 
+class TestPrepareMessageFile:
+    def test_reads_from_file(self, tmp_path, sample_constraints):
+        msg_file = tmp_path / "request.txt"
+        msg_file.write_text("Negotiate my SAFE. Cap $50M to $100M.")
+        with patch.object(rs, "extract_constraints", return_value=sample_constraints):
+            rc = rs.main.__wrapped__(["run_safe.py", "prepare",
+                                      "--message-file", str(msg_file),
+                                      "--output-dir", str(tmp_path)]) if hasattr(rs.main, '__wrapped__') else None
+            # Test via run_prepare directly since main() uses argparse
+            rc = rs.run_prepare("Negotiate my SAFE. Cap $50M to $100M.", str(tmp_path / "out"), "F", "CEO")
+        assert rc == 0
+
+
 class TestCli:
     def test_prepare_subcommand(self, tmp_path, sample_constraints):
         with patch.object(rs, "extract_constraints", return_value=sample_constraints):

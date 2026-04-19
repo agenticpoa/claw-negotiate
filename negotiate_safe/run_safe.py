@@ -257,7 +257,8 @@ def main() -> int:
     sub = parser.add_subparsers(dest="command")
 
     prep = sub.add_parser("prepare", help="Parse NL message into constraints")
-    prep.add_argument("--message", required=True)
+    prep.add_argument("--message", default="", help="The negotiation request text")
+    prep.add_argument("--message-file", default="", help="Path to file containing the request (avoids shell $ expansion)")
     prep.add_argument("--output-dir", required=True)
     prep.add_argument("--founder-name", default=os.environ.get("FOUNDER_NAME", ""))
     prep.add_argument("--founder-title", default="CEO")
@@ -268,7 +269,13 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.command == "prepare":
-        return run_prepare(args.message, args.output_dir, args.founder_name, args.founder_title)
+        message = args.message
+        if not message and args.message_file:
+            message = Path(args.message_file).read_text().strip()
+        if not message:
+            sys.stderr.write("Provide --message or --message-file.\n")
+            return 2
+        return run_prepare(message, args.output_dir, args.founder_name, args.founder_title)
     elif args.command == "negotiate":
         return run_negotiate(args.output_dir)
     else:

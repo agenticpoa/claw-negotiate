@@ -11,11 +11,16 @@ IMPORTANT: All exec calls in this skill MUST be simple commands. Use ONLY `pytho
 
 ## Step 1: Parse and confirm
 
-Run the prepare command with the user's message:
+IMPORTANT: The user's message contains dollar signs ($50M, $500,000) which the shell will corrupt. You MUST write the message to a file first using the write tool, then pass the file path:
+
+1. Write the user's message to `/tmp/safe_request.txt` using the write tool
+2. Run the prepare command:
 
 ```
-python3 {baseDir}/run_safe.py prepare --message "<user's negotiation request>" --output-dir /tmp/safe_negotiate
+python3 {baseDir}/run_safe.py prepare --message-file /tmp/safe_request.txt --output-dir /tmp/safe_negotiate
 ```
+
+Do NOT use --message with dollar amounts. The shell will strip them.
 
 This parses the NL message into structured constraints and prints them as JSON. Show the constraints to the user for confirmation:
 
