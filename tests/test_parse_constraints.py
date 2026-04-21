@@ -52,6 +52,79 @@ class TestExtractConstraints:
             with pytest.raises(RuntimeError, match="anthropic SDK not installed"):
                 pc.extract_constraints("anything")
 
+
+class TestModeAndSessionCodeDefaults:
+    """The parser returns `mode` and `session_code` with defensive defaults
+    when the LLM omits them."""
+
+    def test_missing_mode_defaults_to_demo(self):
+        body = json.dumps({
+            "role": "founder",
+            "valuation_cap_min": 1, "valuation_cap_max": 2,
+            "discount_min": 0.1, "pro_rata": "indifferent", "mfn": "indifferent",
+        })
+        with patch("anthropic.Anthropic", return_value=make_mock_client(body)):
+            r = pc.extract_constraints("x")
+        assert r["mode"] == "demo"
+        assert r["session_code"] is None
+
+    def test_unknown_mode_coerces_to_demo(self):
+        body = json.dumps({
+            "role": "founder", "mode": "whatever",
+            "valuation_cap_min": 1, "valuation_cap_max": 2,
+            "discount_min": 0.1, "pro_rata": "indifferent", "mfn": "indifferent",
+        })
+        with patch("anthropic.Anthropic", return_value=make_mock_client(body)):
+            r = pc.extract_constraints("x")
+        assert r["mode"] == "demo"
+
+    def test_session_code_forces_two_party_mode(self):
+        """Even if Haiku picks up the code but leaves mode=demo, we override."""
+        body = json.dumps({
+            "role": "investor", "mode": "demo", "session_code": "INV-7K3X9",
+            "valuation_cap_min": 0, "valuation_cap_max": 40000000,
+            "discount_min": 0.1, "pro_rata": "required", "mfn": "indifferent",
+        })
+        with patch("anthropic.Anthropic", return_value=make_mock_client(body)):
+            r = pc.extract_constraints("Join negotiation INV-7K3X9 as investor.")
+        assert r["mode"] == "two_party"
+        assert r["session_code"] == "INV-7K3X9"
+
+    def test_session_code_normalized_to_uppercase(self):
+        body = json.dumps({
+            "role": "investor", "mode": "two_party", "session_code": "  inv-7k3x9 ",
+            "valuation_cap_min": 0, "valuation_cap_max": 10,
+            "discount_min": 0.1, "pro_rata": "indifferent", "mfn": "indifferent",
+        })
+        with patch("anthropic.Anthropic", return_value=make_mock_client(body)):
+            r = pc.extract_constraints("x")
+        assert r["session_code"] == "INV-7K3X9"
+
+    def test_empty_session_code_normalized_to_none(self):
+        body = json.dumps({
+            "role": "founder", "mode": "two_party", "session_code": "",
+            "valuation_cap_min": 1, "valuation_cap_max": 2,
+            "discount_min": 0.1, "pro_rata": "indifferent", "mfn": "indifferent",
+        })
+        with patch("anthropic.Anthropic", return_value=make_mock_client(body)):
+            r = pc.extract_constraints("x")
+        assert r["session_code"] is None
+        # Mode stays two_party since parser said so and we don't auto-downgrade
+        assert r["mode"] == "two_party"
+
+    def test_two_party_without_code_is_valid_for_founder_creating(self):
+        """Founders create sessions and start in two-party mode without a
+        code — they RECEIVE one from sshsign."""
+        body = json.dumps({
+            "role": "founder", "mode": "two_party", "session_code": None,
+            "valuation_cap_min": 1, "valuation_cap_max": 2,
+            "discount_min": 0.1, "pro_rata": "indifferent", "mfn": "indifferent",
+        })
+        with patch("anthropic.Anthropic", return_value=make_mock_client(body)):
+            r = pc.extract_constraints("Live negotiation with my investor.")
+        assert r["mode"] == "two_party"
+        assert r["session_code"] is None
+
     def test_passes_message_through(self):
         client = make_mock_client('{"valuation_cap_min": 1}')
         with patch("anthropic.Anthropic", return_value=client):

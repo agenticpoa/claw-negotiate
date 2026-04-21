@@ -1,8 +1,23 @@
 #!/usr/bin/env python3
-"""Format negotiation events as short Telegram messages.
+"""Format negotiation events as short chat messages.
 
-Reads a JSON event on stdin, writes a formatted message on stdout.
-Event 'type' field selects the template. Templates mirror SKILL.md exactly.
+OpenClaw's Telegram plugin uses GitHub-flavored Markdown rendering:
+  **bold**     — emphasis
+  `code`       — inline code (also safe escape for strings with `_` or `*`)
+  [text](url)  — explicit links
+Single `*` and `_` both render as italic; avoid them in copy per product
+direction. Any user-supplied text that might contain `_`, `*`, `` ` ``, or `[`
+is escaped via `_escape_md` to prevent accidental formatting.
+
+Event schema reflects what upstream agenticpoa/negotiate emits via
+`--json-events` plus two events our wrappers emit themselves:
+
+  offer / counter / accept   (upstream emit_json_event)
+  outcome                    (upstream emit_outcome_event)
+  signing                    (upstream, when awaiting cosign approval)
+  confirm                    (our prepare step)
+  authorized                 (our mint step)
+  signed                     (synthesized by us after envelope=approved)
 """
 from __future__ import annotations
 
@@ -10,13 +25,28 @@ import json
 import sys
 from typing import Any
 
-CHECK = "\u2713"
+
+# ──────────────────────────────────────────────────────────────
+# Formatting helpers
+# ──────────────────────────────────────────────────────────────
 
 
 def fmt_dollars(n: float | int | None) -> str:
+    """Smart-shorten dollar amounts: $8M, $12.5M, $500K, $1,000, $12."""
     if n is None:
         return "-"
-    return f"${int(n):,}"
+    n = int(n)
+    if n == 0:
+        return "$0"
+    sign = "-" if n < 0 else ""
+    n = abs(n)
+    if n >= 1_000_000:
+        if n % 1_000_000 == 0:
+            return f"{sign}${n // 1_000_000}M"
+        return f"{sign}${n / 1_000_000:.1f}M"
+    if n >= 10_000 and n % 1000 == 0:
+        return f"{sign}${n // 1000}K"
+    return f"{sign}${n:,}"
 
 
 def fmt_percent(d: float | None) -> str:
@@ -25,118 +55,368 @@ def fmt_percent(d: float | None) -> str:
     return f"{d * 100:.0f}%"
 
 
+def _yn(flag: Any) -> str:
+    return "yes" if flag else "no"
+
+
+def _escape_md(s: str) -> str:
+    """Escape Markdown formatting chars for use in plain text spans."""
+    return (
+        s.replace("\\", "\\\\")
+         .replace("_", "\\_")
+         .replace("*", "\\*")
+         .replace("`", "\\`")
+         .replace("[", "\\[")
+    )
+
+
+_PARTY_ICON = {"founder": "\U0001f464", "investor": "\U0001f4bc"}  # 👤, 💼
+
+_OFFER_LABELS = {"offer": "Offer", "counter": "Counter", "accept": "Accepted"}
+
+
+# ──────────────────────────────────────────────────────────────
+# Wrapper-side events
+# ──────────────────────────────────────────────────────────────
+
+
 def format_confirm(event: dict[str, Any]) -> str:
     c = event["constraints"]
-    pro_rata_label = {
-        "required": "required (I won't agree without this)",
+    labels = {
+        "required": "required (I won't agree without them)",
         "preferred": "preferred (I'll push for it but can concede)",
         "indifferent": "indifferent",
-    }[c["pro_rata"]]
-    mfn_label = {
-        "required": "required (I won't agree without this)",
+    }
+    mfn_labels = {
+        "required": "required (I won't agree without it)",
         "preferred": "preferred (I'll push for it but can concede)",
         "indifferent": "indifferent",
-    }[c["mfn"]]
+    }
+    role = (c.get("role") or "founder").lower()
+    role_label = "founder" if role == "founder" else "investor"
+    role_icon = "\U0001f464" if role == "founder" else "\U0001f4bc"  # 👤 / 💼
+
+    founder_name = c.get("founder_name")
+    founder_title = c.get("founder_title")
+    company_name = c.get("company_name")
+    investor_name = c.get("investor_name")
+    investor_firm = c.get("investor_firm")
+
+    # Build "You" and "Counterparty" lines based on the user's role. Show
+    # only what was captured — omit missing pieces so the line stays clean.
+    def _format_founder_side() -> str:
+        parts = []
+        if founder_name and founder_title:
+            parts.append(f"{founder_name}, {founder_title}")
+        elif founder_name:
+            parts.append(founder_name)
+        if company_name:
+            prefix = "of " if parts else ""
+            parts.append(f"{prefix}{company_name}")
+        return ", ".join(parts) if parts else None
+
+    def _format_investor_side() -> str:
+        parts = []
+        if investor_name:
+            parts.append(investor_name)
+        if investor_firm:
+            prefix = "at " if parts else ""
+            parts.append(f"{prefix}{investor_firm}")
+        return ", ".join(parts) if parts else None
+
+    if role == "founder":
+        you_line = _format_founder_side()
+        counterparty_line = _format_investor_side()
+    else:
+        you_line = _format_investor_side()
+        counterparty_line = _format_founder_side()
+
+    identity_lines = [f"{role_icon} Negotiating as **{role_label}**."]
+    if you_line:
+        identity_lines.append(f"**You:** {you_line}")
+    if counterparty_line:
+        identity_lines.append(f"**Counterparty:** {counterparty_line}")
+
     return (
-        "Got it. Here's what I'll enforce during the negotiation:\n\n"
-        f"Valuation cap: {fmt_dollars(c['valuation_cap_min'])} to {fmt_dollars(c['valuation_cap_max'])}\n"
-        f"Discount rate: {fmt_percent(c['discount_min'])} or better\n"
-        f"Pro-rata rights: {pro_rata_label}\n"
-        f"MFN clause: {mfn_label}\n\n"
+        "\n".join(identity_lines) + "\n\n"
+        "Please review the terms below and confirm:\n\n"
+        f"**Valuation cap:** {fmt_dollars(c['valuation_cap_min'])} – {fmt_dollars(c['valuation_cap_max'])}\n"
+        f"**Discount:** {fmt_percent(c['discount_min'])} or better\n"
+        f"**Pro-rata rights:** {labels[c['pro_rata']]}\n"
+        f"**MFN clause:** {mfn_labels[c['mfn']]}\n\n"
         "I'll need your approval before signing anything.\n\n"
-        'Does this look right? Say "go" to start or correct me.'
+        "If these terms look right, reply **GO**. Otherwise, please send your edits."
     )
 
 
 def format_authorized(event: dict[str, Any]) -> str:
     return (
         "Authorization signed.\n\n"
-        f"Token: {event['tid']}\n"
-        f"Scope: {event['service']}\n"
+        f"Token: `{event['tid']}`\n"
+        f"Scope: `{event['service']}`\n"
         f"Expires: {event['expires_at']}\n\n"
-        f"Revoke anytime: apoa revoke {event['tid']}"
+        f"Revoke anytime: `apoa revoke {event['tid']}`"
     )
 
 
-def format_offer(event: dict[str, Any]) -> str:
-    terms = event.get("terms", {})
+# ──────────────────────────────────────────────────────────────
+# Upstream events (from --json-events)
+# ──────────────────────────────────────────────────────────────
+
+
+def format_offer(
+    event: dict[str, Any],
+    constraints: dict[str, Any] | None = None,
+) -> str:
+    """Render an offer/counter/accept event.
+
+    offer/counter → round card showing the party, rationale, and terms.
+    accept        → celebration card ("🤝 Deal!") with agreed terms. The
+                    accept event is the last event before signing, so this
+                    is the user's big win-moment and should feel celebratory.
+    """
+    etype = event.get("type", "offer")
+    if etype == "accept":
+        return _format_accept(event)
+
+    label = _OFFER_LABELS.get(etype, "Offer")
+    party_raw = (event.get("party") or "").lower()
+    icon = _PARTY_ICON.get(party_raw, "")
+    party = party_raw.capitalize() or "?"
+    round_num = event.get("round", "?")
+
+    terms = event.get("terms") or {}
     cap = terms.get("valuation_cap")
     discount = terms.get("discount_rate")
-    lines = [f"[Round {event.get('round', '?')} - {event.get('party', '?')}]"]
-    if event.get("rationale"):
-        lines.append(f'"{event["rationale"].strip()}"')
+
+    header_prefix = f"{icon} " if icon else ""
+    header = f"{header_prefix}**Round {round_num} — {party}**"
+    lines = [header]
+
+    message = (event.get("message") or "").strip()
+    if message:
+        lines.append(f'"{_escape_md(message)}"')
+
+    if constraints:
+        cap_min = constraints.get("valuation_cap_min")
+        cap_max = constraints.get("valuation_cap_max")
+        disc_min = constraints.get("discount_min")
+        cap_range = f" (your range: {fmt_dollars(cap_min)}–{fmt_dollars(cap_max)})" if cap_min is not None else ""
+        disc_range = f" (your min: {fmt_percent(disc_min)})" if disc_min is not None else ""
+    else:
+        cap_range = disc_range = ""
+
     lines.extend([
         "",
-        f"Cap: {fmt_dollars(cap)} {CHECK} "
-        f"(range: {fmt_dollars(event.get('cap_min'))}-{fmt_dollars(event.get('cap_max'))})",
-        f"Discount: {fmt_percent(discount)} {CHECK} "
-        f"(min: {fmt_percent(event.get('discount_min'))})",
-        f"immudb tx: {event.get('immudb_tx', 'pending')}",
+        f"• Cap: **{fmt_dollars(cap)}**{cap_range}",
+        f"• Discount: **{fmt_percent(discount)}**{disc_range}",
+        f"• Pro-rata: {_yn(terms.get('pro_rata'))}",
+        f"• MFN: {_yn(terms.get('mfn'))}",
     ])
+
     return "\n".join(lines)
 
 
-def format_agreed(event: dict[str, Any]) -> str:
-    terms = event.get("terms", {})
+def _format_accept(event: dict[str, Any]) -> str:
+    """Celebration card rendered on the accept event (fires before outcome).
+
+    Pulling the celebration forward to the accept event (instead of waiting
+    for outcome) eliminates the ~second-long delay upstream introduces
+    between the two; user sees the deal land the instant it's struck.
+    """
+    terms = event.get("terms") or {}
     return (
-        "Agreement reached!\n\n"
-        f"Cap: {fmt_dollars(terms.get('valuation_cap'))}\n"
-        f"Discount: {fmt_percent(terms.get('discount_rate'))}\n"
-        f"Pro-rata: {'yes' if terms.get('pro_rata') else 'no'}\n"
-        f"MFN: {'yes' if terms.get('mfn') else 'no'}\n\n"
-        f"All terms within your authorization {CHECK}\n\n"
-        "Generating SAFE document..."
+        "\U0001f91d **Deal!**\n\n"  # 🤝
+        "Terms agreed:\n"
+        f"• Cap: **{fmt_dollars(terms.get('valuation_cap'))}**\n"
+        f"• Discount: **{fmt_percent(terms.get('discount_rate'))}**\n"
+        f"• Pro-rata: {_yn(terms.get('pro_rata'))}\n"
+        f"• MFN: {_yn(terms.get('mfn'))}"
     )
 
 
-def format_cosign_requested(event: dict[str, Any]) -> str:
-    pending_id = event["pending_id"]
-    key_path = event.get("sshsign_key_path", "$SSHSIGN_KEY_PATH")
-    return (
-        "SAFE document generated. Waiting for your co-sign.\n\n"
-        "Approve from any terminal:\n"
-        f"  ssh -i {key_path} sshsign.dev approve --id {pending_id}\n\n"
-        "I'll confirm once signed."
-    )
+def format_outcome(event: dict[str, Any]) -> str | None:
+    """Render only failure outcomes.
+
+    For `result=accepted`, return None so the caller skips it — the preceding
+    `accept` event has already shown the full terms card with an "Accepted"
+    header, and the upcoming `signing` event is the next clear action. Emitting
+    a redundant "Deal!" card between them just adds a ~second of delay with no
+    new information.
+    """
+    result = event.get("result")
+
+    if result == "accepted":
+        return None
+    if result == "max_rounds":
+        return "No agreement reached after the maximum rounds."
+    if result == "rejected":
+        return "Negotiation rejected. No agreement reached."
+    return None
+
+
+def format_signing(event: dict[str, Any]) -> str:
+    approval_url = (event.get("approval_url") or "").strip()
+    pending_id = event.get("pending_id") or ""
+
+    if approval_url:
+        # Do NOT escape the URL — Telegram auto-detects and links it. Adding
+        # backslash escapes breaks the underscore in `pnd_XXX` when Telegram
+        # hands the URL back to sshsign (observed: "Invalid pending ID").
+        return (
+            "\u270d\ufe0f **Almost done — your signature, please.**\n\n"  # ✍️
+            "Tap the link below and draw your signature. "
+            "I'll share the executed SAFE here within a minute of signing.\n\n"
+            f"{approval_url}"
+        )
+    if pending_id:
+        return (
+            "Awaiting your co-signature.\n\n"
+            f"Approve from any terminal:\n`ssh sshsign.dev approve --id {pending_id}`"
+        )
+    return "Awaiting your co-signature."
+
+
+# ──────────────────────────────────────────────────────────────
+# Post-envelope synthesized event
+# ──────────────────────────────────────────────────────────────
 
 
 def format_signed(event: dict[str, Any]) -> str:
-    tx = event.get("audit_tx", "?")
-    terms = event.get("terms", {})
-    pro_rata_tag = ", pro-rata" if terms.get("pro_rata") else ""
+    terms = event.get("terms") or {}
+    cap = terms.get("valuation_cap")
+    discount = terms.get("discount_rate")
+    pro_rata = terms.get("pro_rata")
+
+    if cap is not None or discount is not None:
+        lines = ["\u2705 **Signed & sealed.**", "", "Here's your executed SAFE:"]
+        if cap is not None:
+            lines.append(f"• Cap: {fmt_dollars(cap)}")
+        if discount is not None:
+            lines.append(f"• Discount: {fmt_percent(discount)}")
+        if pro_rata is not None:
+            lines.append(f"• Pro-rata: {_yn(pro_rata)}")
+        lines.append("")
+        lines.append(
+            "Full audit trail is available on sshsign.dev if you ever need to "
+            "prove authenticity."
+        )
+        return "\n".join(lines)
     return (
-        "Signed!\n\n"
-        "Document: SAFE Agreement\n"
-        f"Terms: {fmt_dollars(terms.get('valuation_cap'))} cap, "
-        f"{fmt_percent(terms.get('discount_rate'))} discount{pro_rata_tag}\n"
-        f"Audit TX: {tx}\n"
-        f"Verify: sshsign.dev/verify/{tx}\n\n"
-        f"Full negotiation: {event.get('total_offers', '?')} offers "
-        f"in {event.get('duration_seconds', '?')} seconds.\n"
-        "All entries cryptographically verified."
+        "\u2705 **Signed & sealed.**\n\n"
+        "Full audit trail is available on sshsign.dev if you ever need to "
+        "prove authenticity."
     )
 
 
-def format_canceled(event: dict[str, Any]) -> str:
-    return f"Negotiation canceled. Token {event.get('tid', '?')} revoked."
+# ──────────────────────────────────────────────────────────────
+# Dispatcher + CLI
+# ──────────────────────────────────────────────────────────────
 
 
-def format_expired(event: dict[str, Any]) -> str:
+def format_profile(event: dict[str, Any]) -> str:
+    """Render the user's saved identity (from env vars) as a chat card.
+
+    Only shows lines for fields that are set — missing fields quietly
+    disappear so the card doesn't advertise placeholders.
+    """
+    p = event.get("profile") or {}
+    founder_name = (p.get("founder_name") or "").strip()
+    founder_title = (p.get("founder_title") or "").strip()
+    company_name = (p.get("company_name") or "").strip()
+    investor_name = (p.get("investor_name") or "").strip()
+    investor_firm = (p.get("investor_firm") or "").strip()
+
+    has_founder = bool(founder_name or founder_title or company_name)
+    has_investor = bool(investor_name or investor_firm)
+
+    if not has_founder and not has_investor:
+        return (
+            "\U0001f464 Your profile is empty. "  # 👤
+            "Say \"I'm Name, Title at Company\" to set it up."
+        )
+
+    lines = ["\U0001f464 **Your saved profile**"]  # 👤
+
+    if has_founder:
+        lines.append("")
+        lines.append("**Founder side** \U0001f464")  # 👤
+        if founder_name:
+            lines.append(f"• Name: **{founder_name}**")
+        if founder_title:
+            lines.append(f"• Title: {founder_title}")
+        if company_name:
+            lines.append(f"• Company: {company_name}")
+
+    if has_investor:
+        lines.append("")
+        lines.append("**Investor side** \U0001f4bc")  # 💼
+        if investor_name:
+            lines.append(f"• Name: **{investor_name}**")
+        if investor_firm:
+            lines.append(f"• Firm: {investor_firm}")
+
+    lines.append("")
+    lines.append("To update, say something like: "
+                 "\"Update my profile — I'm now Jane Smith, CFO of NewCo\".")
+    return "\n".join(lines)
+
+
+def format_invitation(event: dict[str, Any]) -> str:
+    """Founder-side card shown after a two-party session is created.
+
+    The code (`session_code`) is the only piece the user must share — copy
+    is optimized for "paste this into Signal / SMS / email and send to your
+    investor." Expiration is shown in relative terms.
+    """
+    code = (event.get("session_code") or "").strip()
+    expires_at = event.get("expires_at") or ""
+    ttl_h = event.get("ttl_hours") or 24
+    counterparty = (event.get("counterparty_label") or "your investor").strip()
+
+    lines = [
+        "\U0001f91d **Live negotiation started.**",  # 🤝
+        "",
+        f"Share this code with {counterparty} so they can join:",
+        "",
+        f"    **{code}**",
+        "",
+        "They'll reply to their own bot with something like:",
+        f"> Join negotiation {code} as investor. Cap up to $X, $Y% discount, \u2026",
+        "",
+    ]
+    if expires_at:
+        lines.append(f"Expires in ~{ttl_h} hours. I'll wait for them to join.")
+    else:
+        lines.append("I'll wait for them to join.")
+    return "\n".join(lines)
+
+
+def format_waiting(event: dict[str, Any]) -> str:
+    """Periodic status card while the founder waits for their counterparty.
+
+    Not fired on every poll — only when the wait has crossed a notable
+    threshold (e.g., 1h, 6h, 12h elapsed) so the user doesn't get spammed.
+    """
+    elapsed_minutes = int(event.get("elapsed_minutes") or 0)
+    remaining_hours = event.get("remaining_hours")
+    msg = f"\u23f3 Still waiting for your counterparty to join ({elapsed_minutes} min elapsed)."  # ⏳
+    if remaining_hours is not None:
+        msg += f" Invitation expires in ~{int(remaining_hours)}h."
+    return msg
+
+
+def format_counterparty_joined(event: dict[str, Any]) -> str:
+    """Fires the moment the other OC joins the session — flips founder OC
+    from waiting to active-negotiation mode."""
+    who = (event.get("counterparty_label") or "your counterparty").strip()
+    return f"\u2705 {who} joined. Starting the negotiation\u2026"  # ✅
+
+
+def format_invitation_expired(event: dict[str, Any]) -> str:
     return (
-        "APOA token expired mid-negotiation. Protocol halted.\n\n"
-        "Mint a fresh token to continue, or cancel."
-    )
-
-
-def format_deadlock(event: dict[str, Any]) -> str:
-    founder = event.get("founder_final", {})
-    investor = event.get("investor_final", {})
-    return (
-        "No agreement reached after 10 rounds.\n\n"
-        f"Founder final: cap {fmt_dollars(founder.get('valuation_cap'))}, "
-        f"discount {fmt_percent(founder.get('discount_rate'))}\n"
-        f"Investor final: cap {fmt_dollars(investor.get('valuation_cap'))}, "
-        f"discount {fmt_percent(investor.get('discount_rate'))}"
+        "\u23f0 Your invitation expired before anyone joined.\n\n"  # ⏰
+        "Say \"negotiate my SAFE with \u2026\" again to create a new one."
     )
 
 
@@ -144,13 +424,35 @@ FORMATTERS = {
     "confirm": format_confirm,
     "authorized": format_authorized,
     "offer": format_offer,
-    "agreed": format_agreed,
-    "cosign_requested": format_cosign_requested,
+    "counter": format_offer,
+    "accept": format_offer,
+    "outcome": format_outcome,
+    "signing": format_signing,
     "signed": format_signed,
-    "canceled": format_canceled,
-    "expired": format_expired,
-    "deadlock": format_deadlock,
+    "profile": format_profile,
+    "invitation": format_invitation,
+    "waiting": format_waiting,
+    "counterparty_joined": format_counterparty_joined,
+    "invitation_expired": format_invitation_expired,
 }
+
+
+def format_event(
+    event: dict[str, Any],
+    constraints: dict[str, Any] | None = None,
+) -> str | None:
+    """Dispatch an event to the right formatter.
+
+    Returns the formatted message body, or None if the event type is unknown
+    or a known formatter decides to skip (e.g. unknown outcome.result).
+    """
+    kind = event.get("type")
+    formatter = FORMATTERS.get(kind or "")
+    if formatter is None:
+        return None
+    if formatter is format_offer:
+        return format_offer(event, constraints)
+    return formatter(event)
 
 
 def main() -> int:
@@ -160,13 +462,17 @@ def main() -> int:
         sys.stderr.write(f"Invalid JSON: {e}\n")
         return 2
 
-    kind = event.get("type", "offer")
-    formatter = FORMATTERS.get(kind)
-    if formatter is None:
+    if not isinstance(event, dict):
+        sys.stderr.write("Event must be a JSON object\n")
+        return 2
+
+    output = format_event(event)
+    if output is None:
+        kind = event.get("type", "<missing>")
         sys.stderr.write(f"Unknown event type: {kind}. Known: {sorted(FORMATTERS)}\n")
         return 2
 
-    sys.stdout.write(formatter(event))
+    sys.stdout.write(output)
     sys.stdout.write("\n")
     return 0
 

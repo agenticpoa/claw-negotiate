@@ -45,11 +45,15 @@ class TestFrontmatter:
         assert "openclaw" in meta
         assert meta["openclaw"]["emoji"]
 
-    def test_requires_only_essential_env(self, frontmatter):
+    def test_requires_essential_env(self, frontmatter):
         m = re.search(r"^metadata:\s*(\{.*\})\s*$", frontmatter, re.M)
         meta = json.loads(m.group(1))
         env = set(meta["openclaw"]["requires"]["env"])
-        assert env == {"ANTHROPIC_API_KEY", "NEGOTIATE_REPO_PATH"}
+        # Core secrets + the installed user's APOA DID. Party-identity env
+        # vars (FOUNDER_NAME, INVESTOR_NAME, COMPANY_NAME, etc) come from
+        # upstream's .env.example convention; they're optional because the
+        # user can also supply them in the NL, so they're not in `requires`.
+        assert {"ANTHROPIC_API_KEY", "NEGOTIATE_REPO_PATH", "USER_DID"} <= env
 
     def test_requires_lists_bins(self, frontmatter):
         m = re.search(r"^metadata:\s*(\{.*\})\s*$", frontmatter, re.M)
@@ -100,6 +104,10 @@ class TestTwoCommandArchitecture:
 
 class TestCrossFileConsistency:
     def test_all_formatter_types_reachable_from_skill(self, skill_content):
-        critical = {"confirm", "authorized", "offer", "agreed", "cosign_requested", "signed"}
+        critical = {
+            "confirm", "authorized",
+            "offer", "counter", "accept",
+            "outcome", "signing", "signed",
+        }
         assert critical <= set(tf.FORMATTERS.keys()), \
             "format_event.py is missing a formatter the skill assumes"

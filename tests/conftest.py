@@ -26,16 +26,30 @@ def pytest_collection_modifyitems(config, items):
 
 
 
+@pytest.fixture(autouse=True)
+def _identity_configured(monkeypatch):
+    """Default every test to 'identity already configured' so the first-run
+    setup wizard only kicks in for tests that explicitly delete FOUNDER_NAME.
+    """
+    monkeypatch.setenv("FOUNDER_NAME", "Test User")
+
+
 @pytest.fixture
 def sample_constraints() -> dict:
     return {
+        "role": "founder",
+        "mode": "demo",
+        "session_code": None,
         "valuation_cap_min": 8_000_000,
         "valuation_cap_max": 12_000_000,
         "discount_min": 0.20,
         "pro_rata": "required",
         "mfn": "preferred",
         "company_name": "Acme Corp",
+        "founder_name": None,
+        "founder_title": None,
         "investor_name": "Angel Ventures",
+        "investor_firm": None,
         "investment_amount": 500_000.0,
     }
 

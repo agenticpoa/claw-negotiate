@@ -1,7 +1,11 @@
 """Tests for format_event.py.
 
-The formatter is a pure function of the event dict. Covers every event type in
-FORMATTERS, common edge cases (None values, missing fields), and the CLI surface.
+Covers each formatter, the format_event dispatcher, shared helpers, and the CLI
+surface. Event shapes mirror what upstream agenticpoa/negotiate emits via
+`--json-events`; wrapper-emitted events (confirm, authorized, signed) use the
+shapes our scripts produce.
+
+Output is Telegram legacy Markdown (see format_event.py module docstring).
 """
 from __future__ import annotations
 
@@ -12,58 +16,123 @@ from pathlib import Path
 
 import pytest
 
-import format_event as tf
+import format_event as fe
 
 SCRIPT = Path(__file__).parent.parent / "negotiate_safe" / "format_event.py"
 
 
 class TestFormatters:
-    def test_formatters_cover_all_documented_types(self):
-        expected = {
-            "confirm", "authorized", "offer", "agreed",
-            "cosign_requested", "signed", "canceled", "expired", "deadlock",
+    def test_formatters_cover_expected_types(self):
+        assert set(fe.FORMATTERS.keys()) == {
+            "confirm", "authorized",
+            "offer", "counter", "accept",
+            "outcome", "signing", "signed",
+            "profile",
+            "invitation", "waiting", "counterparty_joined", "invitation_expired",
         }
-        assert set(tf.FORMATTERS.keys()) == expected
 
-    def test_offer_matches_skill_md_template(self, sample_offer):
-        out = tf.format_offer(sample_offer)
-        assert "[Round 2 - Founder]" in out
-        assert '"$6M is below our minimum. Counter at $10M with 20% discount."' in out
-        assert "Cap: $10,000,000" in out
-        assert "(range: $8,000,000-$12,000,000)" in out
-        assert "Discount: 20%" in out
-        assert "(min: 20%)" in out
-        assert "immudb tx: 48326" in out
+    # ---- confirm (our emit) ----
 
-    def test_offer_without_rationale_omits_quote_line(self, sample_offer):
-        sample_offer.pop("rationale")
-        out = tf.format_offer(sample_offer)
-        assert '"' not in out
-        # The empty line between quote and stats should also be gone
-        assert out.count("\n\n") == 0 or out.startswith("[Round")
-
-    def test_offer_missing_terms_renders_dashes(self):
-        event = {"type": "offer", "round": 1, "party": "Founder"}
-        out = tf.format_offer(event)
-        assert "Cap: -" in out
-        assert "Discount: -" in out
-        assert "immudb tx: pending" in out
-
-    def test_confirm(self, sample_constraints):
+    def test_confirm_new_copy(self, sample_constraints):
         event = {"type": "confirm", "constraints": sample_constraints}
-        out = tf.format_confirm(event)
-        assert "Valuation cap: $8,000,000 to $12,000,000" in out
-        assert "Discount rate: 20% or better" in out
-        assert "Pro-rata rights: required" in out
-        assert "MFN clause: preferred" in out
-        assert 'Say "go"' in out
+        out = fe.format_confirm(event)
+        assert "Please review the terms below and confirm:" in out
+        assert "**Valuation cap:** $8M – $12M" in out
+        assert "**Discount:** 20% or better" in out
+        assert "**Pro-rata rights:** required" in out
+        assert "**MFN clause:** preferred" in out
+        assert "reply **GO**" in out
+        assert "please send your edits" in out
+
+    def test_confirm_drops_primer_section(self, sample_constraints):
+        out = fe.format_confirm({"type": "confirm", "constraints": sample_constraints})
+        assert "Quick primer" not in out
+        assert "Pro-rata = right" not in out
+        assert "MFN = you automatically" not in out
 
     def test_confirm_all_pro_rata_mfn_combos(self, sample_constraints):
         for flag in ("required", "preferred", "indifferent"):
             c = {**sample_constraints, "pro_rata": flag, "mfn": flag}
-            out = tf.format_confirm({"type": "confirm", "constraints": c})
-            assert "Pro-rata rights:" in out
-            assert "MFN clause:" in out
+            out = fe.format_confirm({"type": "confirm", "constraints": c})
+            assert "**Pro-rata rights:**" in out
+            assert "**MFN clause:**" in out
+
+    def test_confirm_shows_founder_role_header(self, sample_constraints):
+        c = {**sample_constraints, "role": "founder"}
+        out = fe.format_confirm({"type": "confirm", "constraints": c})
+        assert "Negotiating as **founder**" in out
+        assert "\U0001f464" in out  # 👤
+
+    def test_confirm_shows_investor_role_header(self, sample_constraints):
+        c = {**sample_constraints, "role": "investor"}
+        out = fe.format_confirm({"type": "confirm", "constraints": c})
+        assert "Negotiating as **investor**" in out
+        assert "\U0001f4bc" in out  # 💼
+
+    def test_confirm_defaults_to_founder_when_role_missing(self, sample_constraints):
+        c = {k: v for k, v in sample_constraints.items() if k != "role"}
+        out = fe.format_confirm({"type": "confirm", "constraints": c})
+        assert "Negotiating as **founder**" in out
+
+    def test_confirm_founder_identity_block(self, sample_constraints):
+        c = {
+            **sample_constraints,
+            "role": "founder",
+            "founder_name": "Jane Doe",
+            "founder_title": "CEO",
+            "company_name": "Acme Corp",
+            "investor_name": "Mark Stone",
+            "investor_firm": "Bay Capital",
+        }
+        out = fe.format_confirm({"type": "confirm", "constraints": c})
+        assert "**You:** Jane Doe, CEO, of Acme Corp" in out
+        assert "**Counterparty:** Mark Stone, at Bay Capital" in out
+
+    def test_confirm_investor_identity_block(self, sample_constraints):
+        c = {
+            **sample_constraints,
+            "role": "investor",
+            "founder_name": "Dr. Rivera",
+            "founder_title": "CEO",
+            "company_name": "QuantumLabs",
+            "investor_name": "Alex Chen",
+            "investor_firm": "Blue Fund",
+        }
+        out = fe.format_confirm({"type": "confirm", "constraints": c})
+        assert "**You:** Alex Chen, at Blue Fund" in out
+        assert "**Counterparty:** Dr. Rivera, CEO, of QuantumLabs" in out
+
+    def test_confirm_omits_missing_identity_fields(self, sample_constraints):
+        # Only company_name known on the founder side; only firm on investor side
+        c = {
+            **sample_constraints,
+            "role": "founder",
+            "founder_name": None,
+            "founder_title": None,
+            "company_name": "Acme Corp",
+            "investor_name": None,
+            "investor_firm": "Bay Capital",
+        }
+        out = fe.format_confirm({"type": "confirm", "constraints": c})
+        assert "**You:** Acme Corp" in out  # just the company when no name
+        assert "**Counterparty:** Bay Capital" in out  # just the firm when no name
+
+    def test_confirm_drops_identity_lines_when_nothing_known(self, sample_constraints):
+        c = {
+            **sample_constraints,
+            "role": "founder",
+            "founder_name": None,
+            "founder_title": None,
+            "company_name": None,
+            "investor_name": None,
+            "investor_firm": None,
+        }
+        out = fe.format_confirm({"type": "confirm", "constraints": c})
+        assert "**You:**" not in out
+        assert "**Counterparty:**" not in out
+        assert "Negotiating as **founder**" in out  # role header still shown
+
+    # ---- authorized (our emit) ----
 
     def test_authorized(self):
         event = {
@@ -72,93 +141,343 @@ class TestFormatters:
             "service": "safe:acme:nego_5f2a",
             "expires_at": "2026-04-16T15:00:00Z",
         }
-        out = tf.format_authorized(event)
+        out = fe.format_authorized(event)
         assert "Authorization signed." in out
-        assert "Token: tid_abc123" in out
-        assert "Scope: safe:acme:nego_5f2a" in out
-        assert "apoa revoke tid_abc123" in out
+        assert "`tid_abc123`" in out
+        assert "`safe:acme:nego_5f2a`" in out
+        assert "`apoa revoke tid_abc123`" in out
 
-    def test_agreed(self):
+    # ---- offer/counter/accept (upstream schema) ----
+
+    def test_offer_upstream_shape(self):
         event = {
-            "type": "agreed",
+            "type": "offer",
+            "round": 2,
+            "party": "founder",
+            "message": "Counter at 10M, 20% discount.",
             "terms": {
-                "valuation_cap": 9_000_000,
+                "valuation_cap": 10_000_000,
                 "discount_rate": 0.20,
                 "pro_rata": True,
                 "mfn": False,
             },
+            "immudb_tx": 48326,
         }
-        out = tf.format_agreed(event)
-        assert "Agreement reached!" in out
-        assert "Cap: $9,000,000" in out
-        assert "Pro-rata: yes" in out
-        assert "MFN: no" in out
+        out = fe.format_offer(event)
+        assert out.startswith("\U0001f464 **Round 2 — Founder**")  # 👤
+        assert '"Counter at 10M, 20% discount."' in out
+        assert "• Cap: **$10M**" in out
+        assert "• Discount: **20%**" in out
+        assert "• Pro-rata: yes\n• MFN: no" in out
 
-    def test_cosign_requested(self):
+    def test_counter_uses_founder_icon_and_label(self):
+        event = {"type": "counter", "round": 3, "party": "founder",
+                 "terms": {"valuation_cap": 8_000_000, "discount_rate": 0.15}}
+        out = fe.format_offer(event)
+        assert out.startswith("\U0001f464 **Round 3 — Founder**")  # 👤 (counter uses same header)
+
+    def test_investor_uses_briefcase_icon(self):
+        event = {"type": "counter", "round": 3, "party": "investor",
+                 "terms": {"valuation_cap": 8_000_000, "discount_rate": 0.15}}
+        out = fe.format_offer(event)
+        assert out.startswith("\U0001f4bc **Round 3 — Investor**")  # 💼
+
+    def test_accept_renders_deal_celebration(self):
+        event = {"type": "accept", "round": 5, "party": "founder",
+                 "terms": {"valuation_cap": 9_000_000, "discount_rate": 0.20,
+                           "pro_rata": True, "mfn": False}}
+        out = fe.format_offer(event)
+        assert out.startswith("\U0001f91d **Deal!**")  # 🤝
+        assert "Terms agreed:" in out
+        assert "• Cap: **$9M**" in out
+        assert "• Discount: **20%**" in out
+        assert "• Pro-rata: yes" in out
+        assert "• MFN: no" in out
+        # Not a round card — no "Round" header
+        assert "Round 5" not in out
+
+    def test_offer_without_message_omits_quote(self):
+        event = {"type": "offer", "round": 1, "party": "founder",
+                 "terms": {"valuation_cap": 10_000_000, "discount_rate": 0.20}}
+        out = fe.format_offer(event)
+        assert '"' not in out
+
+    def test_offer_with_constraints_shows_range(self, sample_constraints):
         event = {
-            "type": "cosign_requested",
-            "pending_id": "pnd_xyz789",
-            "sshsign_key_path": "/path/to/key",
+            "type": "offer",
+            "round": 1,
+            "party": "founder",
+            "terms": {"valuation_cap": 10_000_000, "discount_rate": 0.20},
         }
-        out = tf.format_cosign_requested(event)
-        assert "pnd_xyz789" in out
-        assert "/path/to/key" in out
-        assert "ssh -i /path/to/key sshsign.dev approve" in out
+        out = fe.format_offer(event, constraints=sample_constraints)
+        assert "(your range: $8M–$12M)" in out
+        assert "(your min: 20%)" in out
 
-    def test_cosign_requested_falls_back_to_env_placeholder(self):
-        event = {"type": "cosign_requested", "pending_id": "pnd_1"}
-        out = tf.format_cosign_requested(event)
-        assert "$SSHSIGN_KEY_PATH" in out
+    def test_offer_without_constraints_no_range(self):
+        event = {"type": "offer", "round": 1, "party": "founder",
+                 "terms": {"valuation_cap": 10_000_000, "discount_rate": 0.20}}
+        out = fe.format_offer(event)
+        assert "(your range:" not in out
+        assert "(your min:" not in out
 
-    def test_signed_with_pro_rata(self):
+    def test_offer_missing_terms_renders_dashes(self):
+        event = {"type": "offer", "round": 1, "party": "founder"}
+        out = fe.format_offer(event)
+        assert "• Cap: **-**" in out
+        assert "• Discount: **-**" in out
+
+    def test_offer_whitespace_message_ignored(self):
+        event = {"type": "offer", "round": 1, "party": "founder",
+                 "message": "   ", "terms": {}}
+        out = fe.format_offer(event)
+        assert '"' not in out
+
+    def test_offer_escapes_markdown_in_message(self):
+        event = {
+            "type": "offer",
+            "round": 1,
+            "party": "founder",
+            "message": "We want *bold* and _italic_ and `code`",
+            "terms": {"valuation_cap": 10_000_000, "discount_rate": 0.20},
+        }
+        out = fe.format_offer(event)
+        assert "\\*bold\\*" in out
+        assert "\\_italic\\_" in out
+        assert "\\`code\\`" in out
+
+    # ---- outcome (upstream schema) ----
+
+    def test_outcome_accepted_returns_none(self):
+        """Accepted outcome is skipped — the preceding `accept` event already
+        showed the terms and 'Deal!' would be redundant."""
+        event = {
+            "type": "outcome",
+            "result": "accepted",
+            "terms": {"valuation_cap": 9_000_000, "discount_rate": 0.20},
+            "duration_seconds": 24.0,
+        }
+        assert fe.format_outcome(event) is None
+
+    def test_outcome_max_rounds(self):
+        out = fe.format_outcome({"type": "outcome", "result": "max_rounds"})
+        assert "No agreement reached" in out
+
+    def test_outcome_rejected(self):
+        out = fe.format_outcome({"type": "outcome", "result": "rejected"})
+        assert "rejected" in out.lower()
+
+    def test_outcome_unknown_result_returns_none(self):
+        out = fe.format_outcome({"type": "outcome", "result": "exploded"})
+        assert out is None
+
+    # ---- signing (upstream schema) ----
+
+    def test_signing_with_url(self):
+        event = {
+            "type": "signing",
+            "pending_id": "pnd_abc",
+            "approval_url": "https://sshsign.dev/approve/pnd_abc?callback=x",
+            "requires_signature": True,
+        }
+        out = fe.format_signing(event)
+        assert "\u270d\ufe0f **Almost done — your signature, please.**" in out  # ✍️
+        assert "Tap the link below and draw your signature." in out
+        assert "within a minute of signing" in out
+        # URL is emitted verbatim. Escaping underscores was breaking the link
+        # on Telegram → sshsign (Telegram kept the backslash in the hyperlink
+        # target, yielding "Invalid pending ID" on sshsign's side).
+        assert "https://sshsign.dev/approve/pnd_abc?callback=x" in out
+        assert "pnd\\_abc" not in out
+
+    def test_signing_without_url_falls_back_to_ssh_command(self):
+        event = {"type": "signing", "pending_id": "pnd_abc"}
+        out = fe.format_signing(event)
+        assert "ssh sshsign.dev approve --id pnd_abc" in out
+
+    def test_signing_minimal(self):
+        out = fe.format_signing({"type": "signing"})
+        assert "signature" in out.lower()
+
+    # ---- signed (synthesized by us after envelope=approved) ----
+
+    def test_signed_with_terms(self):
         event = {
             "type": "signed",
-            "audit_tx": 48329,
             "terms": {"valuation_cap": 9_000_000, "discount_rate": 0.20, "pro_rata": True},
-            "total_offers": 6,
-            "duration_seconds": 24,
         }
-        out = tf.format_signed(event)
-        assert "Signed!" in out
-        assert "$9,000,000 cap, 20% discount, pro-rata" in out
-        assert "Audit TX: 48329" in out
-        assert "sshsign.dev/verify/48329" in out
-        assert "6 offers in 24 seconds" in out
+        out = fe.format_signed(event)
+        assert out.startswith("\u2705 **Signed & sealed.**")  # ✅
+        assert "Here's your executed SAFE:" in out
+        assert "• Cap: $9M" in out
+        assert "• Discount: 20%" in out
+        assert "• Pro-rata: yes" in out
+        assert "audit trail" in out.lower()
 
-    def test_signed_without_pro_rata_omits_tag(self):
-        event = {
-            "type": "signed",
-            "audit_tx": 1,
-            "terms": {"valuation_cap": 9_000_000, "discount_rate": 0.20, "pro_rata": False},
-        }
-        out = tf.format_signed(event)
-        assert "pro-rata" not in out
+    def test_signed_without_terms(self):
+        out = fe.format_signed({"type": "signed"})
+        assert "**Signed & sealed.**" in out
+        assert "audit trail" in out.lower()
 
-    def test_canceled(self):
-        out = tf.format_canceled({"type": "canceled", "tid": "tid_abc"})
-        assert "canceled" in out.lower()
-        assert "tid_abc" in out
 
-    def test_canceled_without_tid(self):
-        out = tf.format_canceled({"type": "canceled"})
-        assert "canceled" in out.lower()
+class TestFormatInvitation:
+    def test_includes_session_code_prominently(self):
+        out = fe.format_invitation({
+            "type": "invitation",
+            "session_code": "INV-7K3X9",
+            "ttl_hours": 24,
+            "counterparty_label": "Alex Smith, Central Park Labs",
+        })
+        assert "INV-7K3X9" in out
+        assert "**INV-7K3X9**" in out
+        assert "Alex Smith, Central Park Labs" in out
+        assert "Share this code" in out or "share this code" in out.lower()
 
-    def test_expired(self):
-        out = tf.format_expired({"type": "expired"})
+    def test_generic_counterparty_label_when_missing(self):
+        out = fe.format_invitation({"type": "invitation", "session_code": "INV-X"})
+        assert "your investor" in out.lower() or "your counterparty" in out.lower()
+
+    def test_example_join_phrasing_included(self):
+        """The card tells the user what the other side should reply with,
+        so copy-paste onboarding is frictionless."""
+        out = fe.format_invitation({"type": "invitation", "session_code": "INV-X"})
+        assert "Join negotiation" in out or "join negotiation" in out.lower()
+        assert "as investor" in out.lower()
+
+
+class TestFormatWaiting:
+    def test_shows_elapsed_minutes(self):
+        out = fe.format_waiting({"elapsed_minutes": 15, "remaining_hours": 23.75})
+        assert "15 min" in out
+        assert "expires" in out.lower()
+        assert "23h" in out or "24h" in out
+
+    def test_omits_remaining_when_missing(self):
+        out = fe.format_waiting({"elapsed_minutes": 30})
+        assert "30 min" in out
+
+
+class TestFormatCounterpartyJoined:
+    def test_names_counterparty(self):
+        out = fe.format_counterparty_joined({"counterparty_label": "Mark Stone"})
+        assert "Mark Stone" in out
+        assert "joined" in out.lower()
+
+
+class TestFormatInvitationExpired:
+    def test_tells_user_how_to_retry(self):
+        out = fe.format_invitation_expired({})
         assert "expired" in out.lower()
-        assert "Mint a fresh token" in out
+        assert "negotiate my SAFE" in out or "try again" in out.lower()
 
-    def test_deadlock(self):
-        event = {
-            "type": "deadlock",
-            "founder_final": {"valuation_cap": 10_000_000, "discount_rate": 0.20},
-            "investor_final": {"valuation_cap": 7_000_000, "discount_rate": 0.25},
-        }
-        out = tf.format_deadlock(event)
-        assert "10 rounds" in out
-        assert "$10,000,000" in out
-        assert "$7,000,000" in out
-        assert "25%" in out
+
+class TestFormatProfile:
+    def test_empty_profile_prompts_setup(self):
+        out = fe.format_profile({"profile": {}})
+        assert "profile is empty" in out.lower()
+        assert "set it up" in out.lower() or "setup" in out.lower()
+
+    def test_founder_side_only(self):
+        out = fe.format_profile({"profile": {
+            "founder_name": "Juan Figuera", "founder_title": "CEO",
+            "company_name": "APOA Inc",
+        }})
+        assert "Your saved profile" in out
+        assert "**Founder side**" in out
+        assert "**Juan Figuera**" in out
+        assert "CEO" in out
+        assert "APOA Inc" in out
+        assert "**Investor side**" not in out
+        assert "update" in out.lower()
+
+    def test_investor_side_only(self):
+        out = fe.format_profile({"profile": {
+            "investor_name": "Mark Stone", "investor_firm": "Blue Fund",
+        }})
+        assert "**Investor side**" in out
+        assert "**Mark Stone**" in out
+        assert "Blue Fund" in out
+        assert "**Founder side**" not in out
+
+    def test_both_sides_shown(self):
+        out = fe.format_profile({"profile": {
+            "founder_name": "Juan", "company_name": "APOA",
+            "investor_name": "Mark", "investor_firm": "Blue Fund",
+        }})
+        assert "**Founder side**" in out
+        assert "**Investor side**" in out
+
+    def test_missing_fields_silently_dropped(self):
+        out = fe.format_profile({"profile": {"founder_name": "Juan"}})
+        # Only name line, no empty title/company slots
+        assert "Juan" in out
+        assert "Title:" not in out
+        assert "Company:" not in out
+
+
+class TestDispatcher:
+    def test_dispatch_offer(self):
+        event = {"type": "offer", "round": 1, "party": "founder",
+                 "terms": {"valuation_cap": 10_000_000, "discount_rate": 0.20}}
+        out = fe.format_event(event)
+        assert out is not None
+        assert "**Round 1 — Founder**" in out
+
+    def test_dispatch_offer_forwards_constraints(self, sample_constraints):
+        event = {"type": "offer", "round": 1, "party": "founder",
+                 "terms": {"valuation_cap": 10_000_000, "discount_rate": 0.20}}
+        out = fe.format_event(event, constraints=sample_constraints)
+        assert "(your range: $8M–$12M)" in out
+
+    def test_dispatch_counter(self):
+        event = {"type": "counter", "round": 2, "party": "investor",
+                 "terms": {"valuation_cap": 8_000_000, "discount_rate": 0.15}}
+        out = fe.format_event(event)
+        assert "**Round 2 — Investor**" in out
+
+    def test_dispatch_accept(self):
+        event = {"type": "accept", "round": 4, "party": "founder",
+                 "terms": {"valuation_cap": 9_000_000, "discount_rate": 0.20}}
+        out = fe.format_event(event)
+        # Accept renders as the Deal celebration, not a round card
+        assert "Deal!" in out
+
+    def test_dispatch_outcome(self):
+        out = fe.format_event({"type": "outcome", "result": "max_rounds"})
+        assert "No agreement" in out
+
+    def test_dispatch_signing(self):
+        out = fe.format_event({
+            "type": "signing",
+            "approval_url": "https://sshsign.dev/x",
+            "pending_id": "pnd_1",
+        })
+        assert "signature" in out.lower()
+
+    def test_dispatch_signed(self):
+        out = fe.format_event({"type": "signed"})
+        assert "Signed" in out
+
+    def test_dispatch_confirm(self, sample_constraints):
+        out = fe.format_event({"type": "confirm", "constraints": sample_constraints})
+        assert "Please review the terms below" in out
+
+    def test_dispatch_authorized(self):
+        out = fe.format_event({
+            "type": "authorized",
+            "tid": "tid_1",
+            "service": "safe:x:y",
+            "expires_at": "2026-04-19T00:00:00Z",
+        })
+        assert "Authorization signed." in out
+
+    def test_dispatch_unknown_returns_none(self):
+        assert fe.format_event({"type": "mystery"}) is None
+
+    def test_dispatch_missing_type_returns_none(self):
+        assert fe.format_event({}) is None
+
+    def test_dispatch_unknown_outcome_result_returns_none(self):
+        assert fe.format_event({"type": "outcome", "result": "exploded"}) is None
 
 
 class TestHelpers:
@@ -167,33 +486,59 @@ class TestHelpers:
         (0, "$0"),
         (1, "$1"),
         (1000, "$1,000"),
-        (8_000_000, "$8,000,000"),
-        (12.7, "$12"),  # cast to int
+        (9999, "$9,999"),
+        (10_000, "$10K"),
+        (500_000, "$500K"),
+        (8_000_000, "$8M"),
+        (12_500_000, "$12.5M"),
+        (100_000_000, "$100M"),
+        (12.7, "$12"),
+        (-8_000_000, "-$8M"),
     ])
     def test_fmt_dollars(self, n, expected):
-        assert tf.fmt_dollars(n) == expected
+        assert fe.fmt_dollars(n) == expected
 
     @pytest.mark.parametrize("d,expected", [
         (None, "-"),
         (0, "0%"),
         (0.20, "20%"),
-        (0.255, "26%"),  # rounds
+        (0.255, "26%"),
         (1.0, "100%"),
     ])
     def test_fmt_percent(self, d, expected):
-        assert tf.fmt_percent(d) == expected
+        assert fe.fmt_percent(d) == expected
+
+    def test_escape_md_handles_all_reserved_chars(self):
+        assert fe._escape_md("*_`[") == "\\*\\_\\`\\["
 
 
 class TestCli:
-    def test_cli_formats_offer(self, sample_offer):
+    def test_cli_formats_upstream_offer(self):
+        event = {
+            "type": "offer",
+            "round": 2,
+            "party": "founder",
+            "terms": {"valuation_cap": 10_000_000, "discount_rate": 0.20},
+            "message": "Counter at 10M",
+        }
         result = subprocess.run(
             [sys.executable, str(SCRIPT)],
-            input=json.dumps(sample_offer),
+            input=json.dumps(event),
             capture_output=True,
             text=True,
         )
         assert result.returncode == 0
-        assert "[Round 2 - Founder]" in result.stdout
+        assert "**Round 2 — Founder**" in result.stdout
+
+    def test_cli_formats_outcome(self):
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT)],
+            input=json.dumps({"type": "outcome", "result": "max_rounds"}),
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        assert "No agreement" in result.stdout
 
     def test_cli_rejects_invalid_json(self):
         result = subprocess.run(
@@ -204,6 +549,16 @@ class TestCli:
         )
         assert result.returncode == 2
         assert "Invalid JSON" in result.stderr
+
+    def test_cli_rejects_non_object(self):
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT)],
+            input="[]",
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 2
+        assert "JSON object" in result.stderr
 
     def test_cli_rejects_unknown_type(self):
         result = subprocess.run(

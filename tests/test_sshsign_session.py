@@ -1,0 +1,228 @@
+"""Tests for sshsign_session.py — the SSH client for signing_sessions."""
+from __future__ import annotations
+
+import json
+import subprocess
+from unittest.mock import MagicMock
+
+import pytest
+
+import sshsign_session as ss
+
+
+def _cp(returncode: int, stdout: str = "", stderr: str = ""):
+    return subprocess.CompletedProcess(
+        args=[], returncode=returncode, stdout=stdout, stderr=stderr,
+    )
+
+
+class TestCreateSession:
+    def test_builds_correct_argv(self):
+        runner = MagicMock(return_value=_cp(0, json.dumps({
+            "session_id": "neg_1", "session_code": "INV-7K3X9", "status": "open",
+        })))
+        client = ss.SshsignSession(host="sshsign.dev", runner=runner)
+
+        result = client.create_session(
+            session_id="neg_1",
+            role="founder",
+            apoa_pubkey_pem="PEM",
+            party_did="did:apoa:juan",
+            metadata_public={"use_case": "safe"},
+            metadata_member={"company_name": "Acme"},
+            ttl_seconds=86400,
+        )
+
+        assert result["session_code"] == "INV-7K3X9"
+        argv = runner.call_args[0][0]
+        assert argv[:3] == ["ssh", "sshsign.dev", "create-session"]
+        assert "--session-id" in argv
+        assert argv[argv.index("--session-id") + 1] == "neg_1"
+        assert "--role" in argv
+        assert argv[argv.index("--role") + 1] == "founder"
+        assert "--apoa-pubkey" in argv
+        assert argv[argv.index("--apoa-pubkey") + 1] == "PEM"
+        assert "--party-did" in argv
+        assert "--metadata-public" in argv
+        mp = json.loads(argv[argv.index("--metadata-public") + 1])
+        assert mp == {"use_case": "safe"}
+        assert "--metadata-member" in argv
+        assert argv[argv.index("--ttl") + 1] == "86400"
+
+    def test_omits_optional_flags_when_not_given(self):
+        runner = MagicMock(return_value=_cp(0, json.dumps({
+            "session_code": "INV-X", "status": "open",
+        })))
+        client = ss.SshsignSession(runner=runner)
+        client.create_session(session_id="n", role="founder", apoa_pubkey_pem="K")
+        argv = runner.call_args[0][0]
+        assert "--party-did" not in argv
+        assert "--metadata-public" not in argv
+        assert "--metadata-member" not in argv
+        assert "--ttl" not in argv
+
+
+class TestJoinSession:
+    def test_builds_correct_argv(self):
+        runner = MagicMock(return_value=_cp(0, json.dumps({
+            "session_code": "INV-7K3X9", "status": "joined",
+        })))
+        client = ss.SshsignSession(runner=runner)
+        client.join_session(
+            session_code="INV-7K3X9", role="investor", apoa_pubkey_pem="PEM",
+            party_did="did:apoa:bob",
+        )
+        argv = runner.call_args[0][0]
+        assert argv[:3] == ["ssh", "sshsign.dev", "join-session"]
+        assert argv[argv.index("--session-code") + 1] == "INV-7K3X9"
+
+
+class TestGetSession:
+    def test_by_code(self):
+        runner = MagicMock(return_value=_cp(0, json.dumps({
+            "session_code": "INV-X", "status": "open",
+        })))
+        client = ss.SshsignSession(runner=runner)
+        client.get_session(session_code="INV-X")
+        argv = runner.call_args[0][0]
+        assert "--session-code" in argv
+
+    def test_by_id(self):
+        runner = MagicMock(return_value=_cp(0, json.dumps({
+            "session_id": "neg_x", "status": "open",
+        })))
+        client = ss.SshsignSession(runner=runner)
+        client.get_session(session_id="neg_x")
+        argv = runner.call_args[0][0]
+        assert "--session-id" in argv
+
+    def test_requires_one_of(self):
+        client = ss.SshsignSession(runner=MagicMock())
+        with pytest.raises(ValueError):
+            client.get_session()
+
+
+class TestCancelAndComplete:
+    def test_cancel_plain(self):
+        runner = MagicMock(return_value=_cp(0, json.dumps({"status": "canceled"})))
+        client = ss.SshsignSession(runner=runner)
+        client.cancel_session("neg_1")
+        argv = runner.call_args[0][0]
+        assert argv[:3] == ["ssh", "sshsign.dev", "cancel-session"]
+        assert "--rescind" not in argv
+
+    def test_cancel_with_rescind(self):
+        runner = MagicMock(return_value=_cp(0, json.dumps({"status": "rescinded_after_sign"})))
+        client = ss.SshsignSession(runner=runner)
+        client.cancel_session("neg_1", rescind=True)
+        assert "--rescind" in runner.call_args[0][0]
+
+    def test_complete(self):
+        runner = MagicMock(return_value=_cp(0, json.dumps({
+            "status": "completed", "view_token": "v_x",
+        })))
+        client = ss.SshsignSession(runner=runner)
+        result = client.complete_session("neg_1", "sshsign://artifact/final.pdf")
+        assert result["view_token"] == "v_x"
+        argv = runner.call_args[0][0]
+        assert argv[argv.index("--executed-artifact") + 1] == "sshsign://artifact/final.pdf"
+
+
+class TestErrorMapping:
+    def test_not_found(self):
+        runner = MagicMock(return_value=_cp(0, json.dumps({"error": "session not found"})))
+        client = ss.SshsignSession(runner=runner)
+        with pytest.raises(ss.SessionNotFoundError):
+            client.get_session(session_code="INV-NOPE")
+
+    def test_role_conflict(self):
+        runner = MagicMock(return_value=_cp(0, json.dumps({
+            "error": "session already has a member in that role: founder",
+        })))
+        client = ss.SshsignSession(runner=runner)
+        with pytest.raises(ss.SessionRoleConflictError):
+            client.join_session(session_code="INV-X", role="founder", apoa_pubkey_pem="K")
+
+    def test_terminal(self):
+        runner = MagicMock(return_value=_cp(0, json.dumps({"error": "session is in a terminal state"})))
+        client = ss.SshsignSession(runner=runner)
+        with pytest.raises(ss.SessionTerminalError):
+            client.cancel_session("neg_1")
+
+    def test_not_creator(self):
+        runner = MagicMock(return_value=_cp(0, json.dumps({
+            "error": "only the session creator may perform this action",
+        })))
+        client = ss.SshsignSession(runner=runner)
+        with pytest.raises(ss.SessionNotCreatorError):
+            client.complete_session("neg_1", "artifact://x")
+
+    def test_not_member(self):
+        runner = MagicMock(return_value=_cp(0, json.dumps({"error": "not a member of this session"})))
+        client = ss.SshsignSession(runner=runner)
+        with pytest.raises(ss.SessionNotMemberError):
+            client.audit_session("neg_1")
+
+    def test_expired(self):
+        runner = MagicMock(return_value=_cp(0, json.dumps({"error": "session has expired"})))
+        client = ss.SshsignSession(runner=runner)
+        with pytest.raises(ss.SessionExpiredError):
+            client.join_session(session_code="INV-X", role="investor", apoa_pubkey_pem="K")
+
+    def test_generic_error(self):
+        runner = MagicMock(return_value=_cp(0, json.dumps({"error": "some unknown thing"})))
+        client = ss.SshsignSession(runner=runner)
+        with pytest.raises(ss.SshsignSessionError):
+            client.get_session(session_id="x")
+
+
+class TestTransportErrors:
+    def test_non_zero_exit(self):
+        runner = MagicMock(return_value=_cp(255, "", "Permission denied"))
+        client = ss.SshsignSession(runner=runner)
+        with pytest.raises(ss.SshsignSessionError, match="ssh exited 255"):
+            client.get_session(session_id="x")
+
+    def test_timeout(self):
+        def raiser(*a, **kw):
+            raise subprocess.TimeoutExpired(cmd=["ssh"], timeout=20)
+        client = ss.SshsignSession(runner=raiser)
+        with pytest.raises(ss.SshsignSessionError, match="timed out"):
+            client.get_session(session_id="x")
+
+    def test_ssh_binary_missing(self):
+        def raiser(*a, **kw):
+            raise FileNotFoundError("no ssh binary")
+        client = ss.SshsignSession(runner=raiser)
+        with pytest.raises(ss.SshsignSessionError, match="ssh not found"):
+            client.get_session(session_id="x")
+
+    def test_empty_response(self):
+        runner = MagicMock(return_value=_cp(0, "  \n  "))
+        client = ss.SshsignSession(runner=runner)
+        with pytest.raises(ss.SshsignSessionError, match="empty"):
+            client.get_session(session_id="x")
+
+    def test_non_json_response(self):
+        runner = MagicMock(return_value=_cp(0, "this is not json"))
+        client = ss.SshsignSession(runner=runner)
+        with pytest.raises(ss.SshsignSessionError, match="non-JSON"):
+            client.get_session(session_id="x")
+
+
+class TestAuditList:
+    def test_returns_list(self):
+        events = [
+            {"event_type": "created", "actor_id": "alice"},
+            {"event_type": "joined", "actor_id": "bob"},
+        ]
+        runner = MagicMock(return_value=_cp(0, json.dumps(events)))
+        client = ss.SshsignSession(runner=runner)
+        result = client.audit_session("neg_1")
+        assert result == events
+
+    def test_rejects_non_list_response(self):
+        runner = MagicMock(return_value=_cp(0, json.dumps({"not": "a list"})))
+        client = ss.SshsignSession(runner=runner)
+        with pytest.raises(ss.SshsignSessionError, match="expected audit list"):
+            client.audit_session("neg_1")
