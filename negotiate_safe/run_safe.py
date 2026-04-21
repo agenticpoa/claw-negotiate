@@ -827,6 +827,7 @@ def _await_sign_and_push(
         # PDF is coming. Finalize (upstream pdf generation) takes a few
         # seconds; posting "Generating executed file\u2026" fills that gap.
         sender(chat_id, message="\u2705 Confirmed signature.")  # ✅
+        _mark_signed(output_dir)
         sender(chat_id, message="\U0001f4c4 Generating executed file\u2026")  # 📄
 
         pdf_path = finalize_fn(output_dir, pending_id, sshsign_host)
@@ -984,6 +985,7 @@ def _joiner_await_sign_and_finalize(
             return 3
 
         sender(chat_id, message="\u2705 Confirmed signature.")  # ✅
+        _mark_signed(output_dir)
         sender(chat_id, message=(
             "\u23f3 Waiting for your counterparty to sign\u2026"  # ⏳
         ))
@@ -1011,11 +1013,21 @@ def _joiner_await_sign_and_finalize(
             status = (sess.get("status") or "").lower()
             if status == "completed":
                 break
-            if status in ("canceled", "rescinded_after_sign"):
-                sender(chat_id, message=(
-                    "\u26a0\ufe0f Counterparty canceled after signing. "  # ⚠
-                    "The session is closed; no PDF will be generated."
-                ))
+            if status == "rescinded_after_sign":
+                body = format_event({
+                    "type": "rescinded_after_sign_observer",
+                    "by": "Your counterparty",
+                })
+                if body:
+                    sender(chat_id, message=body)
+                return 2
+            if status == "canceled":
+                body = format_event({
+                    "type": "canceled_after_deal_observer",
+                    "by": "Your counterparty",
+                })
+                if body:
+                    sender(chat_id, message=body)
                 return 2
             sleep_fn(completion_poll_interval)
 
@@ -1546,6 +1558,122 @@ def run_setup(
     return 0
 
 
+_SIGNED_MARKER = ".signed"
+
+
+def _mark_signed(output_dir: Path) -> None:
+    """Drop a sentinel file indicating that the user's envelope was approved.
+
+    Used by run_cancel to distinguish cancel-before-sign (→ `canceled`)
+    from cancel-after-sign (→ `rescinded_after_sign`). A plain file beats
+    re-querying sshsign since the state needs to survive across processes
+    (user signs, then later says "cancel" as a fresh invocation).
+    """
+    try:
+        (output_dir / _SIGNED_MARKER).write_text("1")
+    except OSError:
+        pass
+
+
+def _has_signed(output_dir: Path) -> bool:
+    return (output_dir / _SIGNED_MARKER).exists()
+
+
+def run_cancel(
+    output_dir: str,
+    chat_id_flag: str | None = None,
+    sender=send_telegram,
+    session_client=None,
+) -> int:
+    """Cancel an in-flight negotiation.
+
+    State model (see PLAN.md PR J5):
+      state 1/2: open/joined → cancel-session, push "canceled before sign"
+      state 3:   user has signed → cancel-session --rescind, push rescinded
+      state 4:   completed → refuse, push "already executed"
+
+    State 1 vs state 2 (before-deal vs after-deal-pre-sign) is not
+    distinguished here: both route through cancel-session with the same
+    user-facing copy for the cancel initiator. The observer-side copy
+    is pushed by each OC's own wait/poll loop when it detects the
+    status transition.
+    """
+    out = Path(output_dir)
+    chat_id = resolve_chat_id(chat_id_flag)
+
+    mint_path = out / "mint.json"
+    if not mint_path.exists():
+        if chat_id:
+            sender(chat_id, message=(
+                "\u2139\ufe0f No active negotiation to cancel."  # ℹ
+            ))
+        return 2
+
+    try:
+        mint = json.loads(mint_path.read_text())
+    except json.JSONDecodeError:
+        return 2
+
+    session_id = mint.get("negotiation_id")
+    if not session_id:
+        if chat_id:
+            sender(chat_id, message=(
+                "\u26a0\ufe0f Couldn't find a session to cancel."  # ⚠
+            ))
+        return 2
+
+    client = session_client or SshsignSession(
+        host=os.environ.get("SSHSIGN_HOST", "sshsign.dev"),
+    )
+
+    # State 4 check: refuse if already completed.
+    try:
+        sess = client.get_session(session_id=session_id)
+    except SshsignSessionError as e:
+        sys.stderr.write(f"get-session on cancel: {e}\n")
+        if chat_id:
+            sender(chat_id, message=(
+                "\u26a0\ufe0f Couldn't reach the signing service. "  # ⚠
+                "Try again in a moment."
+            ))
+        return 3
+    status = (sess.get("status") or "").lower()
+    if status == "completed":
+        body = format_event({"type": "cancel_completed_refused"})
+        if chat_id and body:
+            sender(chat_id, message=body)
+        return 1
+    if status in ("canceled", "rescinded_after_sign", "expired"):
+        # Already in a terminal state — nothing to do. Tell the user so
+        # they don't think the command silently failed.
+        if chat_id:
+            sender(chat_id, message=(
+                f"\u2139\ufe0f This negotiation is already {status.replace('_', ' ')}."  # ℹ
+            ))
+        return 0
+
+    # State 1/2 vs 3 split based on local .signed marker.
+    rescind = _has_signed(out)
+    try:
+        client.cancel_session(session_id=session_id, rescind=rescind)
+    except SshsignSessionError as e:
+        sys.stderr.write(f"cancel-session failed: {e}\n")
+        if chat_id:
+            sender(chat_id, message=(
+                "\u26a0\ufe0f Couldn't cancel — signing service error. "  # ⚠
+                "Try again, or contact support if it persists."
+            ))
+        return 3
+
+    if rescind:
+        body = format_event({"type": "rescinded_after_sign_initiator"})
+    else:
+        body = format_event({"type": "canceled_before_deal_initiator"})
+    if chat_id and body:
+        sender(chat_id, message=body)
+    return 0
+
+
 def run_profile(chat_id_flag: str | None = None, sender=send_telegram) -> int:
     """Show the user's saved identity (read from env vars) as a chat card."""
     chat_id = resolve_chat_id(chat_id_flag)
@@ -1606,6 +1734,15 @@ def main() -> int:
     )
     profile.add_argument("--chat-id", default="")
 
+    cancel = sub.add_parser(
+        "cancel",
+        help="Cancel the in-flight negotiation. Automatically chooses "
+             "between canceled and rescinded_after_sign based on whether "
+             "the user has already signed their side.",
+    )
+    cancel.add_argument("--output-dir", required=True)
+    cancel.add_argument("--chat-id", default="")
+
     args = parser.parse_args()
 
     if args.command == "prepare":
@@ -1634,6 +1771,8 @@ def main() -> int:
         return run_setup(message, chat_id_flag=args.chat_id or None)
     elif args.command == "profile":
         return run_profile(chat_id_flag=args.chat_id or None)
+    elif args.command == "cancel":
+        return run_cancel(args.output_dir, chat_id_flag=args.chat_id or None)
     else:
         parser.print_help()
         return 2

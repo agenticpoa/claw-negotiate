@@ -2293,7 +2293,31 @@ class TestJoinerAwaitSignAndFinalize:
         )
         assert rc == 2
         msgs = [c.kwargs.get("message", "") for c in sender.call_args_list]
-        assert any("canceled" in m.lower() for m in msgs)
+        assert any("revoked" in m.lower() for m in msgs)
+
+    def test_rescinded_during_wait_returns_2_with_rescinded_copy(self, tmp_path):
+        """If the creator rescinds after signing (different terminal state
+        than canceled), the joiner sees rescinded-specific copy."""
+        client = MagicMock()
+        client.get_session.return_value = {"status": "rescinded_after_sign"}
+        now_iter = iter([0.0, 1.0, 2.0])
+        sender = MagicMock()
+        rc = rs._joiner_await_sign_and_finalize(
+            output_dir=tmp_path, chat_id="1", sshsign_host="h",
+            pending_id="pnd_i", session_id="neg_1",
+            sender=sender,
+            poll_fn=lambda **kw: True,
+            finalize_fn=MagicMock(),
+            is_active_fn=lambda _o: True,
+            session_client=client,
+            sleep_fn=MagicMock(),
+            now_fn=lambda: next(now_iter),
+            typing_factory=lambda _c: self._fake_loop(),
+        )
+        assert rc == 2
+        msgs = [c.kwargs.get("message", "") for c in sender.call_args_list]
+        assert any("rescinded" in m.lower() for m in msgs)
+        assert any("signature is on record" in m.lower() for m in msgs)
 
     def test_transient_get_session_error_retries(self, tmp_path):
         from sshsign_session import SshsignSessionError
@@ -2319,3 +2343,147 @@ class TestJoinerAwaitSignAndFinalize:
         )
         assert rc == 0
         assert client.get_session.call_count == 2
+
+
+class TestMarkSigned:
+    def test_mark_and_check_signed(self, tmp_path):
+        assert rs._has_signed(tmp_path) is False
+        rs._mark_signed(tmp_path)
+        assert rs._has_signed(tmp_path) is True
+
+    def test_mark_is_idempotent(self, tmp_path):
+        rs._mark_signed(tmp_path)
+        rs._mark_signed(tmp_path)
+        assert rs._has_signed(tmp_path) is True
+
+    def test_missing_dir_silently_swallows(self, tmp_path):
+        bogus = tmp_path / "does-not-exist"
+        rs._mark_signed(bogus)  # should NOT raise
+        assert rs._has_signed(bogus) is False
+
+
+class TestRunCancel:
+    def _write_mint(self, tmp_path, neg_id: str = "neg_1"):
+        (tmp_path / "mint.json").write_text(json.dumps({
+            "negotiation_id": neg_id,
+        }))
+
+    def test_no_mint_returns_2(self, tmp_path):
+        sender = MagicMock()
+        rc = rs.run_cancel(str(tmp_path), chat_id_flag="1", sender=sender)
+        assert rc == 2
+        msgs = [c.kwargs.get("message", "") for c in sender.call_args_list]
+        assert any("no active negotiation" in m.lower() for m in msgs)
+
+    def test_cancel_open_session_before_sign(self, tmp_path):
+        self._write_mint(tmp_path)
+        client = MagicMock()
+        client.get_session.return_value = {"status": "open"}
+        client.cancel_session.return_value = {"status": "canceled"}
+
+        sender = MagicMock()
+        with patch.object(rs, "resolve_chat_id", return_value="1"):
+            rc = rs.run_cancel(str(tmp_path), sender=sender, session_client=client)
+
+        assert rc == 0
+        # Cancel called without rescind flag
+        call = client.cancel_session.call_args
+        assert call.kwargs["session_id"] == "neg_1"
+        assert call.kwargs["rescind"] is False
+        # Initiator card pushed
+        msgs = [c.kwargs.get("message", "") for c in sender.call_args_list]
+        assert any("canceled the negotiation before any agreement" in m.lower()
+                   for m in msgs)
+
+    def test_cancel_after_sign_rescinds(self, tmp_path):
+        self._write_mint(tmp_path)
+        rs._mark_signed(tmp_path)  # user has signed
+        client = MagicMock()
+        client.get_session.return_value = {"status": "joined"}
+        client.cancel_session.return_value = {"status": "rescinded_after_sign"}
+
+        sender = MagicMock()
+        with patch.object(rs, "resolve_chat_id", return_value="1"):
+            rc = rs.run_cancel(str(tmp_path), sender=sender, session_client=client)
+
+        assert rc == 0
+        call = client.cancel_session.call_args
+        assert call.kwargs["rescind"] is True
+        msgs = [c.kwargs.get("message", "") for c in sender.call_args_list]
+        assert any("rescinded after signing" in m.lower() for m in msgs)
+        assert any("stays on record" in m.lower() for m in msgs)
+
+    def test_cancel_completed_refused(self, tmp_path):
+        self._write_mint(tmp_path)
+        client = MagicMock()
+        client.get_session.return_value = {"status": "completed"}
+
+        sender = MagicMock()
+        with patch.object(rs, "resolve_chat_id", return_value="1"):
+            rc = rs.run_cancel(str(tmp_path), sender=sender, session_client=client)
+
+        assert rc == 1
+        client.cancel_session.assert_not_called()
+        msgs = [c.kwargs.get("message", "") for c in sender.call_args_list]
+        assert any("already executed" in m.lower() for m in msgs)
+        assert any("rescission" in m.lower() for m in msgs)
+
+    def test_cancel_terminal_state_is_noop(self, tmp_path):
+        """If a previous cancel already transitioned the session, don't
+        re-call cancel-session — just tell the user it's already canceled."""
+        self._write_mint(tmp_path)
+        client = MagicMock()
+        client.get_session.return_value = {"status": "canceled"}
+
+        sender = MagicMock()
+        with patch.object(rs, "resolve_chat_id", return_value="1"):
+            rc = rs.run_cancel(str(tmp_path), sender=sender, session_client=client)
+
+        assert rc == 0
+        client.cancel_session.assert_not_called()
+        msgs = [c.kwargs.get("message", "") for c in sender.call_args_list]
+        assert any("already" in m.lower() and "canceled" in m.lower()
+                   for m in msgs)
+
+    def test_get_session_transport_error(self, tmp_path):
+        from sshsign_session import SshsignSessionError
+        self._write_mint(tmp_path)
+        client = MagicMock()
+        client.get_session.side_effect = SshsignSessionError("ssh boom")
+
+        sender = MagicMock()
+        with patch.object(rs, "resolve_chat_id", return_value="1"):
+            rc = rs.run_cancel(str(tmp_path), sender=sender, session_client=client)
+
+        assert rc == 3
+        client.cancel_session.assert_not_called()
+        msgs = [c.kwargs.get("message", "") for c in sender.call_args_list]
+        assert any("signing service" in m.lower() for m in msgs)
+
+    def test_cancel_session_error_returns_3(self, tmp_path):
+        from sshsign_session import SshsignSessionError
+        self._write_mint(tmp_path)
+        client = MagicMock()
+        client.get_session.return_value = {"status": "open"}
+        client.cancel_session.side_effect = SshsignSessionError("rate limited")
+
+        sender = MagicMock()
+        with patch.object(rs, "resolve_chat_id", return_value="1"):
+            rc = rs.run_cancel(str(tmp_path), sender=sender, session_client=client)
+
+        assert rc == 3
+        msgs = [c.kwargs.get("message", "") for c in sender.call_args_list]
+        assert any("couldn't cancel" in m.lower() for m in msgs)
+
+    def test_cli_dispatches_cancel(self, tmp_path, monkeypatch):
+        self._write_mint(tmp_path)
+        monkeypatch.setattr(sys, "argv", [
+            "run_safe.py", "cancel",
+            "--output-dir", str(tmp_path),
+            "--chat-id", "1",
+        ])
+        with patch.object(rs, "run_cancel", return_value=0) as mock_cancel:
+            rc = rs.main()
+        assert rc == 0
+        mock_cancel.assert_called_once()
+        assert mock_cancel.call_args.args[0] == str(tmp_path)

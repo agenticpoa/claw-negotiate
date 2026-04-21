@@ -459,6 +459,71 @@ def format_invitation_expired(event: dict[str, Any]) -> str:
     )
 
 
+def _who_label(event: dict[str, Any]) -> str:
+    who = (event.get("by") or "").strip()
+    return who or "The other party"
+
+
+def format_canceled_before_deal_initiator(event: dict[str, Any]) -> str:
+    """You canceled — no agreement had been reached yet."""
+    return (
+        "\u274c You canceled the negotiation before any agreement was reached.\n\n"  # ❌
+        "No SAFE was executed. Your APOA authorization has been revoked."
+    )
+
+
+def format_canceled_before_deal_observer(event: dict[str, Any]) -> str:
+    """Your counterparty canceled — no agreement had been reached yet."""
+    who = _who_label(event)
+    return (
+        f"\u274c {who} stopped negotiating before an agreement was reached.\n\n"  # ❌
+        "No SAFE was executed."
+    )
+
+
+def format_canceled_after_deal_initiator(event: dict[str, Any]) -> str:
+    """You revoked the agreed deal before either side signed."""
+    return (
+        "\u274c You revoked the agreed deal before signing.\n\n"  # ❌
+        "Your counterparty has been notified. No SAFE will be executed."
+    )
+
+
+def format_canceled_after_deal_observer(event: dict[str, Any]) -> str:
+    who = _who_label(event)
+    return (
+        f"\u274c {who} revoked the agreed deal before signing.\n\n"  # ❌
+        "No SAFE will be executed. The negotiation is closed."
+    )
+
+
+def format_rescinded_after_sign_initiator(event: dict[str, Any]) -> str:
+    """You rescinded AFTER signing — your signature stays on record but the
+    deal does not execute."""
+    return (
+        "\u26a0\ufe0f You rescinded after signing.\n\n"  # ⚠
+        "Your signature stays on record for audit purposes, "
+        "but the SAFE will NOT execute. Your counterparty has been notified."
+    )
+
+
+def format_rescinded_after_sign_observer(event: dict[str, Any]) -> str:
+    who = _who_label(event)
+    return (
+        f"\u26a0\ufe0f {who} rescinded after signing.\n\n"  # ⚠
+        "The SAFE will NOT execute. Their signature is on record but void for this deal."
+    )
+
+
+def format_cancel_completed_deal_refused(event: dict[str, Any]) -> str:
+    """User tried to cancel an already-executed SAFE — not allowed."""
+    return (
+        "\U0001f512 This SAFE is already executed.\n\n"  # 🔒
+        "To unwind, you'll need a separate rescission agreement signed by both parties. "
+        "I can help draft one — just say so."
+    )
+
+
 FORMATTERS = {
     "confirm": format_confirm,
     "authorized": format_authorized,
@@ -473,6 +538,13 @@ FORMATTERS = {
     "waiting": format_waiting,
     "counterparty_joined": format_counterparty_joined,
     "invitation_expired": format_invitation_expired,
+    "canceled_before_deal_initiator": format_canceled_before_deal_initiator,
+    "canceled_before_deal_observer": format_canceled_before_deal_observer,
+    "canceled_after_deal_initiator": format_canceled_after_deal_initiator,
+    "canceled_after_deal_observer": format_canceled_after_deal_observer,
+    "rescinded_after_sign_initiator": format_rescinded_after_sign_initiator,
+    "rescinded_after_sign_observer": format_rescinded_after_sign_observer,
+    "cancel_completed_refused": format_cancel_completed_deal_refused,
 }
 
 

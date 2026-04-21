@@ -29,6 +29,10 @@ class TestFormatters:
             "outcome", "signing", "signed",
             "profile",
             "invitation", "waiting", "counterparty_joined", "invitation_expired",
+            "canceled_before_deal_initiator", "canceled_before_deal_observer",
+            "canceled_after_deal_initiator", "canceled_after_deal_observer",
+            "rescinded_after_sign_initiator", "rescinded_after_sign_observer",
+            "cancel_completed_refused",
         }
 
     # ---- confirm (our emit) ----
@@ -429,6 +433,48 @@ class TestFormatProfile:
         assert "Juan" in out
         assert "Title:" not in out
         assert "Company:" not in out
+
+
+class TestCancellationCards:
+    def test_canceled_before_deal_initiator(self):
+        out = fe.format_canceled_before_deal_initiator({})
+        assert "You canceled" in out
+        assert "before any agreement was reached" in out
+        assert "APOA" in out
+
+    def test_canceled_before_deal_observer(self):
+        out = fe.format_canceled_before_deal_observer({"by": "Jane"})
+        assert "Jane stopped negotiating" in out
+
+    def test_canceled_before_deal_observer_default_label(self):
+        out = fe.format_canceled_before_deal_observer({})
+        assert "The other party" in out
+
+    def test_canceled_after_deal_initiator(self):
+        out = fe.format_canceled_after_deal_initiator({})
+        assert "You revoked the agreed deal" in out
+        assert "before signing" in out
+
+    def test_canceled_after_deal_observer(self):
+        out = fe.format_canceled_after_deal_observer({"by": "Jane"})
+        assert "Jane revoked the agreed deal" in out
+        assert "No SAFE will be executed" in out
+
+    def test_rescinded_after_sign_initiator(self):
+        out = fe.format_rescinded_after_sign_initiator({})
+        assert "You rescinded after signing" in out
+        assert "signature stays on record" in out
+        assert "will NOT execute" in out
+
+    def test_rescinded_after_sign_observer(self):
+        out = fe.format_rescinded_after_sign_observer({"by": "Jane"})
+        assert "Jane rescinded after signing" in out
+        assert "SAFE will NOT execute" in out
+
+    def test_cancel_completed_refused(self):
+        out = fe.format_cancel_completed_deal_refused({})
+        assert "already executed" in out
+        assert "rescission" in out
 
 
 class TestDispatcher:
