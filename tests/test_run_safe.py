@@ -1934,6 +1934,101 @@ class TestNegotiateInvestorBranch:
             "founder_name": "", "founder_title": "CEO", "message": "Join INV-X",
         }))
 
+    def test_two_party_creator_uses_creator_await_path(self, tmp_path, sample_constraints):
+        """Founder in two-party mode routes signing through the creator
+        finalize helper, which adds a complete-session call."""
+        (tmp_path / "config.json").write_text(json.dumps({
+            "constraints": sample_constraints,
+            "founder_name": "F", "founder_title": "CEO", "message": "m",
+        }))
+
+        def fake_mint(output_dir, config):
+            (Path(output_dir) / "mint.json").write_text(json.dumps({
+                "negotiation_id": "neg_1", "mode": "two_party",
+                "user_role": "founder", "session_code": "INV-X",
+            }))
+            return 0
+
+        mock_creator = MagicMock(return_value=0)
+        mock_joiner = MagicMock(return_value=0)
+        mock_demo_await = MagicMock(return_value=0)
+        signing = {"type": "signing", "pending_id": "pnd_f"}
+
+        with patch.object(rs, "run_mint", side_effect=fake_mint), \
+             patch.object(rs, "_founder_two_party_gate", return_value=0), \
+             patch.object(rs, "_stream_to_telegram", return_value=(0, signing)), \
+             patch.object(rs, "_creator_await_sign_and_finalize", mock_creator), \
+             patch.object(rs, "_joiner_await_sign_and_finalize", mock_joiner), \
+             patch.object(rs, "_await_sign_and_push", mock_demo_await), \
+             patch.object(rs, "resolve_chat_id", return_value="12345"):
+            rc = rs.run_negotiate(str(tmp_path), chat_id_flag="12345")
+
+        assert rc == 0
+        mock_creator.assert_called_once()
+        mock_joiner.assert_not_called()
+        mock_demo_await.assert_not_called()
+        assert mock_creator.call_args.kwargs["session_id"] == "neg_1"
+
+    def test_two_party_joiner_uses_joiner_await_path(self, tmp_path, sample_constraints):
+        """Investor in two-party mode routes through the joiner helper
+        (which waits for creator to finalize before running local finalize)."""
+        (tmp_path / "config.json").write_text(json.dumps({
+            "constraints": sample_constraints,
+            "founder_name": "F", "founder_title": "CEO", "message": "m",
+        }))
+
+        def fake_mint(output_dir, config):
+            (Path(output_dir) / "mint.json").write_text(json.dumps({
+                "negotiation_id": "neg_1", "mode": "two_party",
+                "user_role": "investor", "session_code": "INV-X",
+            }))
+            return 0
+
+        mock_creator = MagicMock(return_value=0)
+        mock_joiner = MagicMock(return_value=0)
+        signing = {"type": "signing", "pending_id": "pnd_i"}
+
+        with patch.object(rs, "run_mint", side_effect=fake_mint), \
+             patch.object(rs, "_stream_to_telegram", return_value=(0, signing)), \
+             patch.object(rs, "_creator_await_sign_and_finalize", mock_creator), \
+             patch.object(rs, "_joiner_await_sign_and_finalize", mock_joiner), \
+             patch.object(rs, "resolve_chat_id", return_value="12345"):
+            rc = rs.run_negotiate(str(tmp_path), chat_id_flag="12345")
+
+        assert rc == 0
+        mock_joiner.assert_called_once()
+        mock_creator.assert_not_called()
+
+    def test_demo_mode_uses_demo_await(self, tmp_path, sample_constraints):
+        """Demo mode must stay on the simple one-side finalize path."""
+        (tmp_path / "config.json").write_text(json.dumps({
+            "constraints": sample_constraints,
+            "founder_name": "F", "founder_title": "CEO", "message": "m",
+        }))
+
+        def fake_mint(output_dir, config):
+            (Path(output_dir) / "mint.json").write_text(json.dumps({
+                "negotiation_id": "neg_1", "mode": "demo",
+            }))
+            return 0
+
+        mock_demo_await = MagicMock(return_value=0)
+        mock_creator = MagicMock()
+        mock_joiner = MagicMock()
+        signing = {"type": "signing", "pending_id": "pnd_x"}
+
+        with patch.object(rs, "run_mint", side_effect=fake_mint), \
+             patch.object(rs, "_stream_to_telegram", return_value=(0, signing)), \
+             patch.object(rs, "_await_sign_and_push", mock_demo_await), \
+             patch.object(rs, "_creator_await_sign_and_finalize", mock_creator), \
+             patch.object(rs, "_joiner_await_sign_and_finalize", mock_joiner), \
+             patch.object(rs, "resolve_chat_id", return_value="12345"):
+            rs.run_negotiate(str(tmp_path), chat_id_flag="12345")
+
+        mock_demo_await.assert_called_once()
+        mock_creator.assert_not_called()
+        mock_joiner.assert_not_called()
+
     def test_investor_two_party_skips_gate_and_pushes_joined_card(self, tmp_path):
         self._write_config(tmp_path)
 
@@ -1964,3 +2059,263 @@ class TestNegotiateInvestorBranch:
         joined_msgs = [c.kwargs.get("message", "") for c in sender.call_args_list]
         assert any("joined" in m.lower() and "starting" in m.lower()
                    for m in joined_msgs)
+
+
+class TestAuthorizationCardOnRunNegotiate:
+    def _write_config(self, tmp_path, sample_constraints):
+        (tmp_path / "config.json").write_text(json.dumps({
+            "constraints": sample_constraints,
+            "founder_name": "F", "founder_title": "CEO", "message": "m",
+        }))
+
+    def test_auth_card_pushed_before_streaming(self, tmp_path, sample_constraints):
+        self._write_config(tmp_path, sample_constraints)
+        sender = MagicMock()
+        call_log = []
+        sender.side_effect = lambda *a, **kw: call_log.append(("send", kw.get("message", "")))
+        mock_stream = MagicMock(side_effect=lambda **kw: (
+            call_log.append(("stream", None)) or (0, None)
+        ))
+
+        with patch.object(rs, "run_mint", return_value=0), \
+             patch.object(rs, "_stream_to_telegram", mock_stream), \
+             patch.object(rs, "resolve_chat_id", return_value="12345"), \
+             patch.object(rs, "send_telegram", sender):
+            rs.run_negotiate(str(tmp_path), chat_id_flag="12345")
+
+        # Find the first auth card send, then find the stream call index
+        send_indices = [i for i, (k, _) in enumerate(call_log) if k == "send"
+                        and "authorization is set" in call_log[i][1].lower()]
+        stream_indices = [i for i, (k, _) in enumerate(call_log) if k == "stream"]
+        assert send_indices, f"no auth card pushed: {call_log}"
+        assert stream_indices, "stream not called"
+        assert send_indices[0] < stream_indices[0]
+
+    def test_auth_card_uses_negotiation_ttl(self, tmp_path, sample_constraints, monkeypatch):
+        self._write_config(tmp_path, sample_constraints)
+        monkeypatch.setenv("NEGOTIATION_TTL", "7200")  # 2 hours
+        sender = MagicMock()
+        with patch.object(rs, "run_mint", return_value=0), \
+             patch.object(rs, "_stream_to_telegram", return_value=(0, None)), \
+             patch.object(rs, "resolve_chat_id", return_value="12345"), \
+             patch.object(rs, "send_telegram", sender):
+            rs.run_negotiate(str(tmp_path), chat_id_flag="12345")
+        msgs = [c.kwargs.get("message", "") for c in sender.call_args_list]
+        auth_msgs = [m for m in msgs if "authorization is set" in m.lower()]
+        assert auth_msgs
+        assert "2 hours" in auth_msgs[0]
+
+
+class TestBuildArtifactUri:
+    def test_deterministic_per_session(self, tmp_path):
+        uri = rs._build_artifact_uri("neg_xyz", tmp_path / "executed.pdf")
+        assert uri == "sshsign://session/neg_xyz/executed.pdf"
+
+    def test_does_not_leak_local_path(self, tmp_path):
+        """The URI is content-addressed by session_id — the local file path
+        is an implementation detail that should not show up."""
+        uri = rs._build_artifact_uri("neg_abc", Path("/secret/path/file.pdf"))
+        assert "/secret/path" not in uri
+
+
+class TestCreatorAwaitSignAndFinalize:
+    def _write_mint(self, tmp_path, neg_id: str = "neg_1"):
+        neg_dir = tmp_path / "neg"
+        neg_dir.mkdir(parents=True, exist_ok=True)
+        (neg_dir / "founder.json").write_text("{}")
+        (tmp_path / "mint.json").write_text(json.dumps({
+            "negotiation_id": neg_id,
+            "founder_config_path": str(neg_dir / "founder.json"),
+        }))
+        return neg_dir
+
+    def test_success_pushes_pdf_and_calls_complete_session(self, tmp_path):
+        self._write_mint(tmp_path)
+        sender = MagicMock()
+        pdf = tmp_path / "executed.pdf"
+        pdf.write_bytes(b"PDF")
+
+        client = MagicMock()
+        client.complete_session.return_value = {"status": "completed"}
+
+        rc = rs._creator_await_sign_and_finalize(
+            output_dir=tmp_path, chat_id="1", sshsign_host="sshsign.test",
+            pending_id="pnd_f", session_id="neg_1",
+            sender=sender,
+            poll_fn=lambda **kw: True,
+            finalize_fn=lambda *a, **kw: pdf,
+            is_active_fn=lambda _o: True,
+            session_client=client,
+            typing_factory=lambda _c: MagicMock(start=MagicMock(), stop=MagicMock()),
+        )
+
+        assert rc == 0
+        client.complete_session.assert_called_once()
+        kwargs = client.complete_session.call_args.kwargs
+        assert kwargs["session_id"] == "neg_1"
+        assert kwargs["executed_artifact"].startswith("sshsign://session/neg_1/")
+
+        # PDF delivered
+        pdf_calls = [c for c in sender.call_args_list
+                     if c.kwargs.get("media_path")]
+        assert len(pdf_calls) == 1
+
+    def test_complete_session_error_is_non_fatal(self, tmp_path):
+        """PDF already reached the user; a flaky complete-session shouldn't
+        flip rc to failure — J7 will add retries."""
+        self._write_mint(tmp_path)
+        pdf = tmp_path / "executed.pdf"
+        pdf.write_bytes(b"PDF")
+
+        client = MagicMock()
+        client.complete_session.side_effect = \
+            __import__("sshsign_session").SshsignSessionError("boom")
+
+        rc = rs._creator_await_sign_and_finalize(
+            output_dir=tmp_path, chat_id="1", sshsign_host="h",
+            pending_id="pnd", session_id="neg_1",
+            sender=MagicMock(),
+            poll_fn=lambda **kw: True,
+            finalize_fn=lambda *a, **kw: pdf,
+            is_active_fn=lambda _o: True,
+            session_client=client,
+            typing_factory=lambda _c: MagicMock(start=MagicMock(), stop=MagicMock()),
+        )
+        assert rc == 0
+
+    def test_sign_timeout_skips_complete_session(self, tmp_path):
+        """If the user never signed, we never finalized — don't falsely
+        mark the session complete."""
+        self._write_mint(tmp_path)
+        client = MagicMock()
+        rc = rs._creator_await_sign_and_finalize(
+            output_dir=tmp_path, chat_id="1", sshsign_host="h",
+            pending_id="pnd", session_id="neg_1",
+            sender=MagicMock(),
+            poll_fn=lambda **kw: False,  # never approved
+            finalize_fn=lambda *a, **kw: None,
+            is_active_fn=lambda _o: True,
+            session_client=client,
+            typing_factory=lambda _c: MagicMock(start=MagicMock(), stop=MagicMock()),
+        )
+        assert rc == 1
+        client.complete_session.assert_not_called()
+
+
+class TestJoinerAwaitSignAndFinalize:
+    def _fake_loop(self):
+        return MagicMock(start=MagicMock(), stop=MagicMock())
+
+    def test_waits_for_completed_then_finalizes(self, tmp_path):
+        sender = MagicMock()
+        pdf = tmp_path / "executed.pdf"
+        pdf.write_bytes(b"PDF")
+
+        client = MagicMock()
+        client.get_session.side_effect = [
+            {"status": "joined"},
+            {"status": "joined"},
+            {"status": "completed"},
+        ]
+
+        now_calls = iter([0.0, 10.0, 20.0, 30.0, 40.0])
+        rc = rs._joiner_await_sign_and_finalize(
+            output_dir=tmp_path, chat_id="1", sshsign_host="h",
+            pending_id="pnd_i", session_id="neg_1",
+            sender=sender,
+            poll_fn=lambda **kw: True,
+            finalize_fn=lambda *a, **kw: pdf,
+            is_active_fn=lambda _o: True,
+            session_client=client,
+            sleep_fn=MagicMock(),
+            now_fn=lambda: next(now_calls),
+            typing_factory=lambda _c: self._fake_loop(),
+        )
+        assert rc == 0
+        assert client.get_session.call_count == 3
+        # PDF delivered
+        assert any(c.kwargs.get("media_path") for c in sender.call_args_list)
+        # "Waiting for counterparty" card was pushed at some point
+        msgs = [c.kwargs.get("message", "") for c in sender.call_args_list]
+        assert any("counterparty" in m.lower() and "sign" in m.lower()
+                   for m in msgs)
+
+    def test_sign_timeout_returns_1(self, tmp_path):
+        rc = rs._joiner_await_sign_and_finalize(
+            output_dir=tmp_path, chat_id="1", sshsign_host="h",
+            pending_id="pnd_i", session_id="neg_1",
+            sender=MagicMock(),
+            poll_fn=lambda **kw: False,
+            finalize_fn=lambda *a, **kw: None,
+            is_active_fn=lambda _o: True,
+            session_client=MagicMock(),
+            sleep_fn=MagicMock(),
+            now_fn=lambda: 0.0,
+            typing_factory=lambda _c: self._fake_loop(),
+        )
+        assert rc == 1
+
+    def test_completion_timeout_returns_1(self, tmp_path):
+        client = MagicMock()
+        client.get_session.return_value = {"status": "joined"}
+        now_iter = iter([0.0, 999999.0, 999999.0, 999999.0])
+        rc = rs._joiner_await_sign_and_finalize(
+            output_dir=tmp_path, chat_id="1", sshsign_host="h",
+            pending_id="pnd_i", session_id="neg_1",
+            sender=MagicMock(),
+            poll_fn=lambda **kw: True,
+            finalize_fn=lambda *a, **kw: tmp_path / "executed.pdf",
+            is_active_fn=lambda _o: True,
+            session_client=client,
+            sleep_fn=MagicMock(),
+            now_fn=lambda: next(now_iter),
+            completion_timeout=100,
+            typing_factory=lambda _c: self._fake_loop(),
+        )
+        assert rc == 1
+
+    def test_canceled_during_wait_returns_2(self, tmp_path):
+        client = MagicMock()
+        client.get_session.return_value = {"status": "canceled"}
+        now_iter = iter([0.0, 1.0, 2.0])
+        sender = MagicMock()
+        rc = rs._joiner_await_sign_and_finalize(
+            output_dir=tmp_path, chat_id="1", sshsign_host="h",
+            pending_id="pnd_i", session_id="neg_1",
+            sender=sender,
+            poll_fn=lambda **kw: True,
+            finalize_fn=MagicMock(),
+            is_active_fn=lambda _o: True,
+            session_client=client,
+            sleep_fn=MagicMock(),
+            now_fn=lambda: next(now_iter),
+            typing_factory=lambda _c: self._fake_loop(),
+        )
+        assert rc == 2
+        msgs = [c.kwargs.get("message", "") for c in sender.call_args_list]
+        assert any("canceled" in m.lower() for m in msgs)
+
+    def test_transient_get_session_error_retries(self, tmp_path):
+        from sshsign_session import SshsignSessionError
+        client = MagicMock()
+        client.get_session.side_effect = [
+            SshsignSessionError("blip"),
+            {"status": "completed"},
+        ]
+        pdf = tmp_path / "executed.pdf"
+        pdf.write_bytes(b"PDF")
+        now_iter = iter([0.0, 1.0, 2.0, 3.0])
+        rc = rs._joiner_await_sign_and_finalize(
+            output_dir=tmp_path, chat_id="1", sshsign_host="h",
+            pending_id="pnd_i", session_id="neg_1",
+            sender=MagicMock(),
+            poll_fn=lambda **kw: True,
+            finalize_fn=lambda *a, **kw: pdf,
+            is_active_fn=lambda _o: True,
+            session_client=client,
+            sleep_fn=MagicMock(),
+            now_fn=lambda: next(now_iter),
+            typing_factory=lambda _c: self._fake_loop(),
+        )
+        assert rc == 0
+        assert client.get_session.call_count == 2

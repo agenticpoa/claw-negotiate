@@ -150,13 +150,52 @@ def format_confirm(event: dict[str, Any]) -> str:
 
 
 def format_authorized(event: dict[str, Any]) -> str:
-    return (
-        "Authorization signed.\n\n"
-        f"Token: `{event['tid']}`\n"
-        f"Scope: `{event['service']}`\n"
-        f"Expires: {event['expires_at']}\n\n"
-        f"Revoke anytime: `apoa revoke {event['tid']}`"
-    )
+    """Authorization card, framed user-first.
+
+    Fires once after mint completes, before the first round. Shows the
+    bounds in plain English so the user knows what their agent can and
+    can't do. APOA is cited in a lightweight footer, not the headline —
+    the concept earns its keep on the next screens (constraint
+    violations, signed audit trail).
+    """
+    c = event.get("constraints") or {}
+    cap_min = c.get("valuation_cap_min")
+    cap_max = c.get("valuation_cap_max")
+    disc_min = c.get("discount_min")
+    pro_rata = (c.get("pro_rata") or "indifferent").lower()
+    mfn = (c.get("mfn") or "indifferent").lower()
+
+    pr_labels = {
+        "required": "required",
+        "preferred": "preferred",
+        "indifferent": "indifferent",
+    }
+    ttl_hours = event.get("ttl_hours") or 1
+
+    lines = [
+        "\U0001f512 **Your agent's authorization is set**",  # 🔒
+        "",
+        "Your agent will only agree to terms inside these bounds:",
+        "",
+    ]
+    if cap_min is not None and cap_max is not None:
+        lines.append(
+            f"• Cap: **{fmt_dollars(cap_min)} – {fmt_dollars(cap_max)}** "
+            "(cannot go higher, cannot go lower)"
+        )
+    if disc_min is not None:
+        lines.append(f"• Discount: **\u2265 {fmt_percent(disc_min)}**")
+    lines.append(f"• Pro-rata rights: {pr_labels.get(pro_rata, pro_rata)}")
+    lines.append(f"• MFN clause: {pr_labels.get(mfn, mfn)}")
+    lines.extend([
+        "",
+        f"\u23f1\ufe0f  Valid for {ttl_hours} hour"  # ⏱
+        f"{'s' if ttl_hours != 1 else ''}. Reply \"cancel\" anytime to revoke.",
+        "",
+        "_Powered by APOA: every offer your agent makes is "
+        "cryptographically bound to this authorization._",
+    ])
+    return "\n".join(lines)
 
 
 # ──────────────────────────────────────────────────────────────

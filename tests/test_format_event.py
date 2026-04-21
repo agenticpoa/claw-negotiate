@@ -137,15 +137,32 @@ class TestFormatters:
     def test_authorized(self):
         event = {
             "type": "authorized",
-            "tid": "tid_abc123",
-            "service": "safe:acme:nego_5f2a",
-            "expires_at": "2026-04-16T15:00:00Z",
+            "constraints": {
+                "valuation_cap_min": 8_000_000,
+                "valuation_cap_max": 12_000_000,
+                "discount_min": 0.20,
+                "pro_rata": "required",
+                "mfn": "preferred",
+            },
+            "ttl_hours": 1,
         }
         out = fe.format_authorized(event)
-        assert "Authorization signed." in out
-        assert "`tid_abc123`" in out
-        assert "`safe:acme:nego_5f2a`" in out
-        assert "`apoa revoke tid_abc123`" in out
+        assert "Your agent's authorization is set" in out
+        assert "$8M – $12M" in out
+        assert "cannot go higher" in out
+        assert "20%" in out
+        assert "Pro-rata rights: required" in out
+        assert "MFN clause: preferred" in out
+        assert "cancel" in out.lower()
+        assert "APOA" in out  # cited in footer, not headline
+        # Token ID should NOT be shown — user-first framing
+        assert "tid_" not in out
+
+    def test_authorized_handles_missing_fields_gracefully(self):
+        out = fe.format_authorized({"type": "authorized", "constraints": {}})
+        assert "Your agent's authorization is set" in out
+        # No bounds to show → skip those lines, but footer is still present
+        assert "APOA" in out
 
     # ---- offer/counter/accept (upstream schema) ----
 
@@ -464,11 +481,15 @@ class TestDispatcher:
     def test_dispatch_authorized(self):
         out = fe.format_event({
             "type": "authorized",
-            "tid": "tid_1",
-            "service": "safe:x:y",
-            "expires_at": "2026-04-19T00:00:00Z",
+            "constraints": {
+                "valuation_cap_min": 8_000_000,
+                "valuation_cap_max": 12_000_000,
+                "discount_min": 0.20,
+                "pro_rata": "required",
+                "mfn": "indifferent",
+            },
         })
-        assert "Authorization signed." in out
+        assert "Your agent's authorization is set" in out
 
     def test_dispatch_unknown_returns_none(self):
         assert fe.format_event({"type": "mystery"}) is None

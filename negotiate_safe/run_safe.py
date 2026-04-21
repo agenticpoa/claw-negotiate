@@ -848,6 +848,200 @@ def _await_sign_and_push(
         typing.stop()
 
 
+def _build_artifact_uri(session_id: str, pdf_path: Path) -> str:
+    """Deterministic sshsign:// URI referring to the executed PDF for this
+    session. Content-addressed uploading lives in J7 — for now the URI is
+    a marker that tells the non-creator's OC "this is done, finalize on
+    your side too." Both sides have the same envelope signatures, so each
+    can reproduce the PDF locally.
+    """
+    return f"sshsign://session/{session_id}/executed.pdf"
+
+
+def _creator_await_sign_and_finalize(
+    output_dir: Path,
+    chat_id: str,
+    sshsign_host: str,
+    pending_id: str,
+    session_id: str,
+    timeout: int = 900,
+    poll_interval: int = 5,
+    sender=send_telegram,
+    poll_fn=_poll_envelope_approval,
+    finalize_fn=_finalize_executed_pdf,
+    is_active_fn=_is_still_active_session,
+    session_client=None,
+    typing_factory=None,
+) -> int:
+    """Creator-finalizes flow. Same as the demo path, plus a trailing
+    `complete-session` call that unblocks the non-creator's poll loop.
+
+    Returns 0 on success (PDF pushed + session marked complete), non-zero
+    for partial failures. A failed complete-session is NOT treated as
+    fatal — the PDF already reached the user; J7 adds retry + manual
+    fallback.
+    """
+    rc = _await_sign_and_push(
+        output_dir=output_dir,
+        chat_id=chat_id,
+        sshsign_host=sshsign_host,
+        pending_id=pending_id,
+        timeout=timeout,
+        poll_interval=poll_interval,
+        sender=sender,
+        poll_fn=poll_fn,
+        finalize_fn=finalize_fn,
+        is_active_fn=is_active_fn,
+        typing_factory=typing_factory,
+    )
+    if rc != 0 or not session_id:
+        return rc
+
+    # Locate the executed PDF so we can cite a stable URI back to the
+    # non-creator. The session's artifact URI points at it even when
+    # sshsign doesn't host the bytes yet — J7 will upload.
+    try:
+        mint = json.loads((output_dir / "mint.json").read_text())
+        neg_dir = Path(mint["founder_config_path"]).parent
+        pdf_path = neg_dir / "output" / f"{session_id}_executed.pdf"
+    except (OSError, json.JSONDecodeError, KeyError):
+        pdf_path = output_dir / "executed.pdf"
+
+    client = session_client or SshsignSession(host=sshsign_host)
+    try:
+        client.complete_session(
+            session_id=session_id,
+            executed_artifact=_build_artifact_uri(session_id, pdf_path),
+        )
+    except SshsignSessionError as e:
+        sys.stderr.write(f"complete-session failed (non-fatal): {e}\n")
+    return 0
+
+
+def _joiner_await_sign_and_finalize(
+    output_dir: Path,
+    chat_id: str,
+    sshsign_host: str,
+    pending_id: str,
+    session_id: str,
+    timeout: int = 900,
+    poll_interval: int = 5,
+    completion_poll_interval: int = 10,
+    completion_timeout: int = 900,
+    sender=send_telegram,
+    poll_fn=_poll_envelope_approval,
+    finalize_fn=_finalize_executed_pdf,
+    is_active_fn=_is_still_active_session,
+    session_client=None,
+    sleep_fn=None,
+    now_fn=None,
+    typing_factory=None,
+) -> int:
+    """Joiner-finalizes flow. The investor signs their own envelope, then
+    waits for the creator to finalize (status=completed) before running
+    their own finalize — that way both sides' signatures are present.
+
+    Why wait: `run_finalize` pulls signatures from sshsign. If the
+    investor finalizes before the founder has signed, the output PDF
+    only has the investor's signature. Waiting for status=completed
+    signals the founder is done and we can safely reproduce the PDF.
+
+    Returns 0 if the investor received the executed PDF, non-zero on
+    timeout or finalize failure.
+    """
+    if sleep_fn is None:
+        import time as _time
+        sleep_fn = _time.sleep
+    if now_fn is None:
+        import time as _time
+        now_fn = _time.time
+
+    # Typing indicator spans the whole wait — user just sees "…" between
+    # clicking sign and the PDF landing.
+    if typing_factory is None:
+        typing = TypingLoop(chat_id=chat_id, bot_token=get_bot_token())
+    else:
+        typing = typing_factory(chat_id)
+    typing.start()
+
+    try:
+        approved = poll_fn(
+            pending_id=pending_id,
+            sshsign_host=sshsign_host,
+            timeout=timeout,
+            interval=poll_interval,
+        )
+        if not approved:
+            if not is_active_fn(output_dir):
+                return 3
+            sender(chat_id, message=(
+                "Signature not received after waiting.\n"
+                'When you sign, reply "signed" and I\'ll verify manually.'
+            ))
+            return 1
+
+        if not is_active_fn(output_dir):
+            return 3
+
+        sender(chat_id, message="\u2705 Confirmed signature.")  # ✅
+        sender(chat_id, message=(
+            "\u23f3 Waiting for your counterparty to sign\u2026"  # ⏳
+        ))
+
+        # Poll the session until the founder finalizes.
+        client = session_client or SshsignSession(host=sshsign_host)
+        start = now_fn()
+        while True:
+            elapsed = now_fn() - start
+            if elapsed > completion_timeout:
+                if not is_active_fn(output_dir):
+                    return 3
+                sender(chat_id, message=(
+                    "\u26a0\ufe0f Counterparty didn't finalize in time. "  # ⚠
+                    "You can check the session status on sshsign.dev; the "
+                    "executed PDF will be available once both sides complete."
+                ))
+                return 1
+            try:
+                sess = client.get_session(session_id=session_id)
+            except SshsignSessionError as e:
+                sys.stderr.write(f"get-session while waiting completion: {e}\n")
+                sleep_fn(completion_poll_interval)
+                continue
+            status = (sess.get("status") or "").lower()
+            if status == "completed":
+                break
+            if status in ("canceled", "rescinded_after_sign"):
+                sender(chat_id, message=(
+                    "\u26a0\ufe0f Counterparty canceled after signing. "  # ⚠
+                    "The session is closed; no PDF will be generated."
+                ))
+                return 2
+            sleep_fn(completion_poll_interval)
+
+        if not is_active_fn(output_dir):
+            return 3
+
+        sender(chat_id, message="\U0001f4c4 Generating executed file\u2026")  # 📄
+        pdf_path = finalize_fn(output_dir, pending_id, sshsign_host)
+        if not pdf_path:
+            if not is_active_fn(output_dir):
+                return 3
+            sender(chat_id, message=(
+                "Signature received but I couldn't generate the executed PDF. "
+                "Check the session on sshsign.dev for the shared artifact."
+            ))
+            return 2
+
+        if not is_active_fn(output_dir):
+            return 3
+
+        sender(chat_id, media_path=str(pdf_path))
+        return 0
+    finally:
+        typing.stop()
+
+
 def run_negotiate(output_dir: str, chat_id_flag: str | None = None) -> int:
     """Full negotiate flow: mint tokens then stream the negotiation to chat."""
     out = Path(output_dir)
@@ -876,6 +1070,19 @@ def run_negotiate(output_dir: str, chat_id_flag: str | None = None) -> int:
             "No chat_id: pass --chat-id or ensure /root/.openclaw/agents/main/sessions/sessions.json has a telegram:direct entry.\n"
         )
         return 2
+
+    # Authorization card — first surfacing of APOA after mint. Fires once,
+    # before the founder-two-party wait or the first round. User sees their
+    # bounds spelled out in plain English so the later "agent tried X,
+    # rejected" event has context.
+    ttl_seconds = int(os.environ.get("NEGOTIATION_TTL", "3600"))
+    auth_body = format_event({
+        "type": "authorized",
+        "constraints": config.get("constraints") or {},
+        "ttl_hours": max(1, ttl_seconds // 3600),
+    })
+    if auth_body:
+        send_telegram(chat_id, message=auth_body)
 
     # Two-party mode: the founder waits for the investor to join; the
     # investor (who just joined) goes straight to streaming. Demo mode
@@ -918,6 +1125,31 @@ def run_negotiate(output_dir: str, chat_id_flag: str | None = None) -> int:
         return 0
 
     sshsign_host = os.environ.get("SSHSIGN_HOST", "sshsign.dev")
+
+    # Two-party mode: role determines who finalizes.
+    #   Creator (founder): wait for own sig, finalize locally, push PDF,
+    #     then call complete-session so the investor's OC unblocks.
+    #   Non-creator (investor): wait for own sig, then poll the session
+    #     until status=completed (founder finalized on their side), then
+    #     finalize locally using both signatures and push PDF.
+    if mint.get("mode") == "two_party":
+        is_creator = mint.get("user_role") == "founder"
+        if is_creator:
+            return _creator_await_sign_and_finalize(
+                output_dir=out,
+                chat_id=chat_id,
+                sshsign_host=sshsign_host,
+                pending_id=pending_id,
+                session_id=mint.get("negotiation_id") or "",
+            )
+        return _joiner_await_sign_and_finalize(
+            output_dir=out,
+            chat_id=chat_id,
+            sshsign_host=sshsign_host,
+            pending_id=pending_id,
+            session_id=mint.get("negotiation_id") or "",
+        )
+
     return _await_sign_and_push(
         output_dir=out,
         chat_id=chat_id,
