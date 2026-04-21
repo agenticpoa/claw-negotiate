@@ -39,40 +39,82 @@ def _load_upstream(repo: Path):
 
 def _build_config(module, output_dir: Path, sshsign_host: str):
     mint = json.loads((output_dir / "mint.json").read_text())
-    f_cfg = json.loads(Path(mint["founder_config_path"]).read_text())
-    i_cfg = json.loads(Path(mint["investor_config_path"]).read_text())
 
-    neg_dir = Path(mint["founder_config_path"]).parent
+    # Demo mode mints both sides; join (two-party investor) mints only the
+    # joiner's side and the counterparty's config file may not exist yet.
+    # Load what we can and fall back to defaults where needed.
+    def _maybe_load(path_field: str) -> dict:
+        path = mint.get(path_field, "")
+        if not path:
+            return {}
+        try:
+            return json.loads(Path(path).read_text())
+        except (OSError, json.JSONDecodeError):
+            return {}
 
-    # Tell upstream which party the human user is signing as so the executed
-    # PDF labels the handwritten signature on the correct block. Older
-    # versions of upstream that predate the `signer_role` field simply
-    # ignore it.
+    f_cfg = _maybe_load("founder_config_path")
+    i_cfg = _maybe_load("investor_config_path")
+
+    # Determine neg_dir from whichever config path is available.
+    config_anchor = mint.get("founder_config_path") or mint.get("investor_config_path") or ""
+    neg_dir = Path(config_anchor).parent if config_anchor else output_dir
+
     user_role = mint.get("user_role", "founder")
+    mode = mint.get("mode", "demo")
+
+    # Counterparty pubkey path: in join mode, run_safe.py writes it to
+    # neg_dir/keys/<counterparty_role>_public.pem. Prefer the explicit
+    # mint.counterparty_pubkey_path field if present.
+    counterparty_role = "investor" if user_role == "founder" else "founder"
+    counterparty_pubkey = mint.get("counterparty_pubkey_path", "")
+    if not counterparty_pubkey:
+        candidate = neg_dir / "keys" / f"{counterparty_role}_public.pem"
+        if candidate.exists():
+            counterparty_pubkey = str(candidate)
+
+    founder_pubkey = f_cfg.get("pubkey") or (
+        counterparty_pubkey if user_role == "investor" else ""
+    )
+    investor_pubkey = i_cfg.get("pubkey") or (
+        counterparty_pubkey if user_role == "founder" else ""
+    )
+
     kwargs = dict(
         negotiate_repo=Path(module.__file__).parent,
         negotiation_id=mint["negotiation_id"],
-        founder_token_path=mint["founder_token_path"],
-        investor_token_path=mint["investor_token_path"],
-        founder_pubkey_path=f_cfg["pubkey"],
-        investor_pubkey_path=i_cfg["pubkey"],
-        company_name=f_cfg["company_name"],
-        founder_name=f_cfg["name"],
+        founder_token_path=mint.get("founder_token_path", ""),
+        investor_token_path=mint.get("investor_token_path", ""),
+        founder_pubkey_path=founder_pubkey,
+        investor_pubkey_path=investor_pubkey,
+        company_name=f_cfg.get("company_name") or i_cfg.get("company_name", ""),
+        founder_name=f_cfg.get("name") or f_cfg.get("founder_name", ""),
         founder_title=f_cfg.get("title", ""),
-        investor_name=i_cfg["name"],
+        investor_name=i_cfg.get("name") or i_cfg.get("investor_name", ""),
         investor_firm=i_cfg.get("firm", ""),
-        investment_amount=f_cfg["investment_amount"],
-        sshsign_host=f_cfg.get("sshsign_host") or sshsign_host,
+        investment_amount=f_cfg.get("investment_amount") or i_cfg.get("investment_amount", 500000.0),
+        sshsign_host=f_cfg.get("sshsign_host") or i_cfg.get("sshsign_host") or sshsign_host,
         no_sshsign=False,
         output_dir=str(neg_dir / "output"),
-        signing_key_id=f_cfg.get("founder_signing_key_id") or f_cfg.get("signing_key_id", ""),
+        signing_key_id=(
+            f_cfg.get("founder_signing_key_id")
+            or i_cfg.get("investor_signing_key_id")
+            or f_cfg.get("signing_key_id")
+            or i_cfg.get("signing_key_id", "")
+        ),
         founder_signing_key_id=f_cfg.get("founder_signing_key_id") or f_cfg.get("signing_key_id", ""),
         investor_signing_key_id=i_cfg.get("investor_signing_key_id") or i_cfg.get("signing_key_id", ""),
         json_events=True,
         poll=False,
     )
+
+    # Two-party dispatches to upstream's run_distributed (which coordinates
+    # via sshsign). Demo mode leaves role="" so upstream runs run_local.
+    if mode == "two_party":
+        kwargs["role"] = user_role
+
     import dataclasses
-    if "signer_role" in {f.name for f in dataclasses.fields(module.NegotiationConfig)}:
+    fields = {f.name for f in dataclasses.fields(module.NegotiationConfig)}
+    if "signer_role" in fields:
         kwargs["signer_role"] = user_role
     return module.NegotiationConfig(**kwargs)
 

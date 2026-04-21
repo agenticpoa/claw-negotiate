@@ -400,14 +400,15 @@ class TestNegotiate:
         assert mock_await.call_args.kwargs["pending_id"] == "pnd_xyz"
 
     def test_two_party_mode_calls_gate_before_streaming(self, tmp_path, sample_constraints):
-        """When mint.json says mode=two_party, run_negotiate must call the
-        founder gate before firing the stream."""
+        """When mint.json says mode=two_party + user_role=founder,
+        run_negotiate must call the founder gate before firing the stream."""
         self._write_config(tmp_path, sample_constraints)
 
         def fake_mint(output_dir, config):
             (Path(output_dir) / "mint.json").write_text(json.dumps({
                 "negotiation_id": "neg_1",
                 "mode": "two_party",
+                "user_role": "founder",
                 "session_code": "INV-X",
             }))
             return 0
@@ -431,6 +432,7 @@ class TestNegotiate:
             (Path(output_dir) / "mint.json").write_text(json.dumps({
                 "negotiation_id": "neg_1",
                 "mode": "two_party",
+                "user_role": "founder",
                 "session_code": "INV-X",
             }))
             return 0
@@ -787,12 +789,18 @@ class TestRegisterSigningSession:
         assert call.kwargs["role"] == "founder"
         assert "FOUNDER_FAKE_KEY" in call.kwargs["apoa_pubkey_pem"]
         assert call.kwargs["party_did"] == "did:apoa:juan"
-        assert call.kwargs["metadata_public"] == {"use_case": "safe", "version": 1}
+        # company_name lives in metadata_public so a prospective investor
+        # can see "you're joining Acme's negotiation" pre-join.
+        assert call.kwargs["metadata_public"] == {
+            "use_case": "safe", "version": 1, "company_name": "Acme",
+        }
         # metadata_member picks up identity fields, drops null/empty
+        # (company_name is NOT here — it's in metadata_public for pre-join
+        # visibility).
         md = call.kwargs["metadata_member"]
-        assert md["company_name"] == "Acme"
         assert md["founder_name"] == "Jane"
         assert md["investor_firm"] == "Bay"
+        assert "company_name" not in md
 
     def test_investor_role_reads_investor_pubkey(self, tmp_path):
         neg_dir = self._neg_dir(tmp_path, role="investor")
@@ -1416,3 +1424,543 @@ class TestIsStillActiveSession:
     def test_malformed_file_defaults_active(self, tmp_path):
         (tmp_path / ".session.pid").write_text("not a number")
         assert rs._is_still_active_session(tmp_path) is True
+
+
+class TestFetchSessionForJoin:
+    def test_returns_payload_on_open_session(self):
+        client = MagicMock()
+        client.get_session.return_value = {
+            "session_id": "neg_1",
+            "session_code": "INV-7K3X9",
+            "status": "open",
+            "metadata_public": {"use_case": "safe", "company_name": "Acme"},
+        }
+        sess, err = rs._fetch_session_for_join("INV-7K3X9", session_client=client)
+        assert err is None
+        assert sess["session_code"] == "INV-7K3X9"
+        client.get_session.assert_called_once_with(session_code="INV-7K3X9")
+
+    def test_canceled_session_returns_user_friendly_error(self):
+        client = MagicMock()
+        client.get_session.return_value = {"status": "canceled"}
+        sess, err = rs._fetch_session_for_join("INV-X", session_client=client)
+        assert sess is None
+        assert "canceled" in err.lower()
+
+    def test_rescinded_after_sign_treated_as_canceled(self):
+        client = MagicMock()
+        client.get_session.return_value = {"status": "rescinded_after_sign"}
+        sess, err = rs._fetch_session_for_join("INV-X", session_client=client)
+        assert sess is None
+        assert "canceled" in err.lower()
+
+    def test_expired_session_returns_user_friendly_error(self):
+        client = MagicMock()
+        client.get_session.return_value = {"status": "expired"}
+        sess, err = rs._fetch_session_for_join("INV-X", session_client=client)
+        assert sess is None
+        assert "expired" in err.lower()
+
+    def test_completed_session_rejected(self):
+        client = MagicMock()
+        client.get_session.return_value = {"status": "completed"}
+        sess, err = rs._fetch_session_for_join("INV-X", session_client=client)
+        assert sess is None
+        assert "completed" in err.lower()
+
+    def test_unknown_status_rejected(self):
+        client = MagicMock()
+        client.get_session.return_value = {"status": "mystery"}
+        sess, err = rs._fetch_session_for_join("INV-X", session_client=client)
+        assert sess is None
+        assert "mystery" in err
+
+    def test_transport_error_returns_error_string(self):
+        from sshsign_session import SshsignSessionError
+        client = MagicMock()
+        client.get_session.side_effect = SshsignSessionError("ssh boom")
+        sess, err = rs._fetch_session_for_join("INV-X", session_client=client)
+        assert sess is None
+        assert "ssh boom" in err
+
+    def test_joined_status_is_valid(self):
+        """A session that already has one member (status=joined) is still
+        joinable up until the second counterparty is in — don't reject early."""
+        client = MagicMock()
+        client.get_session.return_value = {
+            "session_code": "INV-X", "status": "joined",
+        }
+        sess, err = rs._fetch_session_for_join("INV-X", session_client=client)
+        assert err is None
+        assert sess["status"] == "joined"
+
+
+class TestEnrichConstraintsFromSession:
+    def test_fills_company_name_from_public_metadata(self):
+        c = {"company_name": None, "founder_name": None}
+        sess = {"metadata_public": {"company_name": "Acme Corp"}}
+        out = rs._enrich_constraints_from_session(c, sess)
+        assert out["company_name"] == "Acme Corp"
+
+    def test_investor_fields_win_over_session_metadata(self):
+        """NL-supplied fields must not be overwritten by session metadata."""
+        c = {"company_name": "MyCo", "investor_name": "Mark"}
+        sess = {
+            "metadata_public": {"company_name": "OtherCo"},
+            "metadata_member": {"investor_name": "Someone Else"},
+        }
+        out = rs._enrich_constraints_from_session(c, sess)
+        assert out["company_name"] == "MyCo"
+        assert out["investor_name"] == "Mark"
+
+    def test_merges_from_member_metadata_when_available(self):
+        c = {"company_name": None, "founder_name": None, "founder_title": None}
+        sess = {
+            "metadata_public": {"company_name": "Acme"},
+            "metadata_member": {"founder_name": "Jane", "founder_title": "CEO"},
+        }
+        out = rs._enrich_constraints_from_session(c, sess)
+        assert out["company_name"] == "Acme"
+        assert out["founder_name"] == "Jane"
+        assert out["founder_title"] == "CEO"
+
+    def test_missing_metadata_leaves_constraints_unchanged(self):
+        c = {"company_name": None, "founder_name": "Jane"}
+        sess = {"metadata_public": None, "metadata_member": None}
+        out = rs._enrich_constraints_from_session(c, sess)
+        assert out["company_name"] is None
+        assert out["founder_name"] == "Jane"
+
+    def test_handles_metadata_as_json_string(self):
+        """sshsign sometimes returns metadata as a JSON-encoded string; the
+        helper must parse it transparently."""
+        c = {"company_name": None}
+        sess = {"metadata_public": json.dumps({"company_name": "Acme"})}
+        out = rs._enrich_constraints_from_session(c, sess)
+        assert out["company_name"] == "Acme"
+
+    def test_malformed_json_metadata_is_ignored(self):
+        c = {"company_name": None}
+        sess = {"metadata_public": "{not valid json"}
+        out = rs._enrich_constraints_from_session(c, sess)
+        assert out["company_name"] is None
+
+    def test_does_not_mutate_input_constraints(self):
+        c = {"company_name": None}
+        sess = {"metadata_public": {"company_name": "Acme"}}
+        out = rs._enrich_constraints_from_session(c, sess)
+        assert c["company_name"] is None
+        assert out["company_name"] == "Acme"
+
+
+class TestExtractCounterpartyPubkey:
+    def test_returns_first_member_pubkey(self):
+        sess = {"members": [{"role": "founder", "apoa_pubkey_pem": "PEM1"}]}
+        assert rs._extract_counterparty_pubkey(sess) == "PEM1"
+
+    def test_returns_empty_when_members_missing(self):
+        """Non-member get-session view omits the members list — we must
+        gracefully return empty so the caller can fall back to join-session."""
+        assert rs._extract_counterparty_pubkey({}) == ""
+        assert rs._extract_counterparty_pubkey({"members": None}) == ""
+        assert rs._extract_counterparty_pubkey({"members": []}) == ""
+
+    def test_skips_members_without_pubkey(self):
+        sess = {"members": [
+            {"role": "founder", "apoa_pubkey_pem": ""},
+            {"role": "investor", "apoa_pubkey_pem": "PEM2"},
+        ]}
+        assert rs._extract_counterparty_pubkey(sess) == "PEM2"
+
+
+class TestJoinSigningSession:
+    def _neg_dir(self, tmp_path, role: str = "investor") -> Path:
+        neg_dir = tmp_path / "neg"
+        (neg_dir / "keys").mkdir(parents=True)
+        (neg_dir / "keys" / f"{role}_public.pem").write_text(
+            f"-----BEGIN APOA-----\n{role.upper()}_FAKE_KEY\n-----END APOA-----\n"
+        )
+        return neg_dir
+
+    def test_calls_join_and_fetches_counterparty_pubkey(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("USER_DID", "did:apoa:investor-1")
+        neg_dir = self._neg_dir(tmp_path, role="investor")
+        mint_output = {"negotiation_id": "neg_1"}
+        shared_session = {"session_code": "INV-7K3X9", "session_id": "neg_1"}
+
+        client = MagicMock()
+        client.join_session.return_value = {"session_code": "INV-7K3X9", "status": "joined"}
+        client.get_session.return_value = {
+            "session_code": "INV-7K3X9",
+            "status": "joined",
+            "created_at": "2026-04-21T12:00:00Z",
+            "expires_at": "2026-04-22T12:00:00Z",
+            "members": [
+                {"role": "founder", "apoa_pubkey_pem": "FOUNDER_PEM_CONTENT"},
+                {"role": "investor", "apoa_pubkey_pem": "INVESTOR_PEM_CONTENT"},
+            ],
+        }
+
+        result = rs._join_signing_session(
+            mint_output=mint_output,
+            shared_session=shared_session,
+            user_role="investor",
+            neg_dir=neg_dir,
+            repo=tmp_path,
+            session_client=client,
+        )
+
+        assert result is not None
+        assert result["session_code"] == "INV-7K3X9"
+        assert result["session_status"] == "joined"
+        assert result["counterparty_pubkey_path"].endswith("founder_public.pem")
+
+        # Counterparty pubkey was written to disk
+        founder_key = neg_dir / "keys" / "founder_public.pem"
+        assert founder_key.exists()
+        assert founder_key.read_text() == "FOUNDER_PEM_CONTENT"
+
+        # join_session called with our pubkey + DID
+        call = client.join_session.call_args
+        assert call.kwargs["session_code"] == "INV-7K3X9"
+        assert call.kwargs["role"] == "investor"
+        assert "INVESTOR_FAKE_KEY" in call.kwargs["apoa_pubkey_pem"]
+        assert call.kwargs["party_did"] == "did:apoa:investor-1"
+
+    def test_missing_pubkey_returns_none(self, tmp_path):
+        neg_dir = tmp_path / "neg"
+        neg_dir.mkdir()
+        client = MagicMock()
+        result = rs._join_signing_session(
+            mint_output={"negotiation_id": "neg_1"},
+            shared_session={"session_code": "INV-X"},
+            user_role="investor",
+            neg_dir=neg_dir,
+            repo=tmp_path,
+            session_client=client,
+        )
+        assert result is None
+        client.join_session.assert_not_called()
+
+    def test_missing_session_code_returns_none(self, tmp_path):
+        neg_dir = self._neg_dir(tmp_path, role="investor")
+        client = MagicMock()
+        result = rs._join_signing_session(
+            mint_output={"negotiation_id": "neg_1"},
+            shared_session={},  # no session_code
+            user_role="investor",
+            neg_dir=neg_dir,
+            repo=tmp_path,
+            session_client=client,
+        )
+        assert result is None
+        client.join_session.assert_not_called()
+
+    def test_join_session_error_returns_none(self, tmp_path):
+        from sshsign_session import SshsignSessionError
+        neg_dir = self._neg_dir(tmp_path, role="investor")
+        client = MagicMock()
+        client.join_session.side_effect = SshsignSessionError("already has member")
+        result = rs._join_signing_session(
+            mint_output={"negotiation_id": "neg_1"},
+            shared_session={"session_code": "INV-X"},
+            user_role="investor",
+            neg_dir=neg_dir,
+            repo=tmp_path,
+            session_client=client,
+        )
+        assert result is None
+
+    def test_post_join_get_session_error_is_non_fatal(self, tmp_path):
+        """Join succeeded; a transient error on the follow-up get-session
+        should NOT fail the whole flow — we already joined, just proceed
+        with whatever info we have."""
+        from sshsign_session import SshsignSessionError
+        neg_dir = self._neg_dir(tmp_path, role="investor")
+        client = MagicMock()
+        client.join_session.return_value = {
+            "session_code": "INV-X", "status": "joined",
+        }
+        client.get_session.side_effect = SshsignSessionError("transient")
+
+        result = rs._join_signing_session(
+            mint_output={"negotiation_id": "neg_1"},
+            shared_session={"session_code": "INV-X"},
+            user_role="investor",
+            neg_dir=neg_dir,
+            repo=tmp_path,
+            session_client=client,
+        )
+        assert result is not None
+        assert result["session_code"] == "INV-X"
+        # No counterparty pubkey available → empty string path
+        assert result["counterparty_pubkey_path"] == ""
+
+    def test_founder_role_writes_investor_pubkey(self, tmp_path):
+        """Symmetric case: if the founder is the joiner (unusual but valid),
+        the counterparty pubkey file is investor_public.pem."""
+        neg_dir = self._neg_dir(tmp_path, role="founder")
+        client = MagicMock()
+        client.join_session.return_value = {"status": "joined"}
+        client.get_session.return_value = {
+            "members": [
+                {"role": "investor", "apoa_pubkey_pem": "INV_PEM"},
+            ],
+        }
+
+        result = rs._join_signing_session(
+            mint_output={"negotiation_id": "neg_1"},
+            shared_session={"session_code": "INV-X"},
+            user_role="founder",
+            neg_dir=neg_dir,
+            repo=tmp_path,
+            session_client=client,
+        )
+        assert result is not None
+        assert (neg_dir / "keys" / "investor_public.pem").read_text() == "INV_PEM"
+
+
+class TestPrepareJoinBranch:
+    """The investor-side flow: NL contains a session_code, so run_prepare
+    goes through _fetch_session_for_join + _enrich before writing config."""
+
+    def _constraints_with_code(self) -> dict:
+        return {
+            "role": "investor",
+            "mode": "two_party",
+            "session_code": "INV-7K3X9",
+            "valuation_cap_min": 10_000_000,
+            "valuation_cap_max": 40_000_000,
+            "discount_min": 0.12,
+            "pro_rata": "required",
+            "mfn": "preferred",
+            "company_name": None,  # will be filled by enrichment
+            "founder_name": None,
+            "founder_title": None,
+            "investor_name": "Alex Chen",
+            "investor_firm": "Blue Fund",
+            "investment_amount": 500_000.0,
+        }
+
+    def test_fetches_session_and_enriches_constraints(self, tmp_path):
+        c = self._constraints_with_code()
+        sess_payload = {
+            "session_id": "neg_abc",
+            "session_code": "INV-7K3X9",
+            "status": "open",
+            "metadata_public": {"company_name": "Acme"},
+            "members": [{"role": "founder", "apoa_pubkey_pem": "FOUNDER_PEM"}],
+        }
+
+        with patch.object(rs, "extract_constraints", return_value=c), \
+             patch.object(rs, "_fetch_session_for_join",
+                          return_value=(sess_payload, None)) as mock_fetch, \
+             patch.object(rs, "resolve_chat_id", return_value="1"):
+            rc = rs.run_prepare("Join INV-7K3X9", str(tmp_path), sender=MagicMock())
+
+        assert rc == 0
+        mock_fetch.assert_called_once_with("INV-7K3X9")
+
+        config = json.loads((tmp_path / "config.json").read_text())
+        # Company name pulled from metadata_public
+        assert config["constraints"]["company_name"] == "Acme"
+        # Session stashed for mint step
+        assert config["session"]["session_id"] == "neg_abc"
+        assert config["session"]["session_code"] == "INV-7K3X9"
+        assert config["session"]["counterparty_apoa_pubkey_pem"] == "FOUNDER_PEM"
+
+    def test_fetch_error_aborts_and_messages_user(self, tmp_path):
+        c = self._constraints_with_code()
+        sender = MagicMock()
+        with patch.object(rs, "extract_constraints", return_value=c), \
+             patch.object(rs, "_fetch_session_for_join",
+                          return_value=(None, "That negotiation expired.")), \
+             patch.object(rs, "resolve_chat_id", return_value="1"):
+            rc = rs.run_prepare("Join INV-X", str(tmp_path), sender=sender)
+
+        assert rc == 1
+        assert not (tmp_path / "config.json").exists()
+        # Last sender call is the error surface
+        err_msg = sender.call_args.kwargs.get("message", "")
+        assert "expired" in err_msg.lower()
+        assert "double-check" in err_msg.lower()
+
+    def test_no_session_code_skips_fetch(self, tmp_path, sample_constraints):
+        """Demo mode: no session_code, don't touch sshsign."""
+        with patch.object(rs, "extract_constraints", return_value=sample_constraints), \
+             patch.object(rs, "_fetch_session_for_join") as mock_fetch, \
+             patch.object(rs, "resolve_chat_id", return_value="1"):
+            rc = rs.run_prepare("Negotiate my SAFE", str(tmp_path), sender=MagicMock())
+        assert rc == 0
+        mock_fetch.assert_not_called()
+        config = json.loads((tmp_path / "config.json").read_text())
+        assert "session" not in config
+
+
+class TestRunMintJoinBranch:
+    """Investor mint flow: shared_session in config → reuse session_id,
+    skip AI-side env, call _join_signing_session instead of register."""
+
+    def _config_for_join(self, tmp_path) -> dict:
+        return {
+            "constraints": {
+                "role": "investor",
+                "mode": "two_party",
+                "valuation_cap_min": 10_000_000,
+                "valuation_cap_max": 40_000_000,
+                "discount_min": 0.12,
+                "pro_rata": "required",
+                "mfn": "preferred",
+                "company_name": "Acme",
+                "investor_name": "Alex",
+                "investor_firm": "Blue Fund",
+                "investment_amount": 500_000.0,
+            },
+            "session": {
+                "session_id": "neg_shared_xyz",
+                "session_code": "INV-7K3X9",
+                "status": "open",
+                "counterparty_apoa_pubkey_pem": "FOUNDER_PEM",
+            },
+            "founder_name": "",
+            "founder_title": "CEO",
+            "message": "Join INV-7K3X9",
+        }
+
+    def test_reuses_shared_session_id_and_passes_role_flag(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("NEGOTIATE_REPO_PATH", str(tmp_path))
+        (tmp_path / "create_tokens.py").write_text("# stub")
+
+        captured = {}
+
+        def fake_run(cmd, cwd=None, capture_output=None, text=None):
+            captured["cmd"] = cmd
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch.object(rs.subprocess, "run", side_effect=fake_run), \
+             patch.object(rs, "_join_signing_session",
+                          return_value={"session_code": "INV-7K3X9",
+                                        "session_status": "joined",
+                                        "counterparty_pubkey_path": "/tmp/f.pem"}):
+            rc = rs.run_mint(str(tmp_path), self._config_for_join(tmp_path))
+
+        assert rc == 0
+        cmd = captured["cmd"]
+        # negotiation_id == shared session_id
+        assert cmd[cmd.index("--negotiation-id") + 1] == "neg_shared_xyz"
+        # --role is passed so create_tokens skips the counterparty side
+        assert "--role" in cmd
+        assert cmd[cmd.index("--role") + 1] == "investor"
+
+    def test_does_not_pass_ai_env_when_joining(self, tmp_path, monkeypatch):
+        """In two-party join, there is no AI side — env overrides for
+        the counterparty must not be appended to the mint command."""
+        monkeypatch.setenv("NEGOTIATE_REPO_PATH", str(tmp_path))
+        monkeypatch.setenv("FOUNDER_CAP_MIN", "50000000")  # should be ignored
+        monkeypatch.setenv("FOUNDER_CAP_MAX", "99000000")
+        (tmp_path / "create_tokens.py").write_text("# stub")
+
+        captured = {}
+
+        def fake_run(cmd, cwd=None, capture_output=None, text=None):
+            captured["cmd"] = cmd
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch.object(rs.subprocess, "run", side_effect=fake_run), \
+             patch.object(rs, "_join_signing_session",
+                          return_value={"session_code": "INV-X",
+                                        "session_status": "joined"}):
+            rs.run_mint(str(tmp_path), self._config_for_join(tmp_path))
+
+        cmd = captured["cmd"]
+        # No --founder-cap-min from FOUNDER_CAP_MIN env leak
+        assert "--founder-cap-min" not in cmd
+        assert "--founder-cap-max" not in cmd
+
+    def test_calls_join_not_register(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("NEGOTIATE_REPO_PATH", str(tmp_path))
+        (tmp_path / "create_tokens.py").write_text("# stub")
+
+        with patch.object(rs.subprocess, "run",
+                          return_value=MagicMock(returncode=0, stdout="", stderr="")), \
+             patch.object(rs, "_join_signing_session",
+                          return_value={"session_code": "INV-X",
+                                        "session_status": "joined"}) as mock_join, \
+             patch.object(rs, "_register_signing_session") as mock_register:
+            rs.run_mint(str(tmp_path), self._config_for_join(tmp_path))
+
+        mock_join.assert_called_once()
+        mock_register.assert_not_called()
+
+    def test_join_failure_returns_nonzero(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("NEGOTIATE_REPO_PATH", str(tmp_path))
+        (tmp_path / "create_tokens.py").write_text("# stub")
+
+        with patch.object(rs.subprocess, "run",
+                          return_value=MagicMock(returncode=0, stdout="", stderr="")), \
+             patch.object(rs, "_join_signing_session", return_value=None):
+            rc = rs.run_mint(str(tmp_path), self._config_for_join(tmp_path))
+
+        assert rc == 3
+
+    def test_mint_json_written_with_join_fields(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("NEGOTIATE_REPO_PATH", str(tmp_path))
+        (tmp_path / "create_tokens.py").write_text("# stub")
+
+        with patch.object(rs.subprocess, "run",
+                          return_value=MagicMock(returncode=0, stdout="", stderr="")), \
+             patch.object(rs, "_join_signing_session",
+                          return_value={"session_code": "INV-7K3X9",
+                                        "session_status": "joined",
+                                        "counterparty_pubkey_path": "/tmp/f.pem"}):
+            rs.run_mint(str(tmp_path), self._config_for_join(tmp_path))
+
+        mint = json.loads((tmp_path / "mint.json").read_text())
+        assert mint["mode"] == "two_party"
+        assert mint["user_role"] == "investor"
+        assert mint["session_code"] == "INV-7K3X9"
+        assert mint["counterparty_pubkey_path"] == "/tmp/f.pem"
+
+
+class TestNegotiateInvestorBranch:
+    """Investor side of two-party: after mint, run_negotiate should push a
+    'Joined — starting now' card and go straight to streaming (skip the
+    founder wait gate)."""
+
+    def _write_config(self, out_dir: Path):
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "config.json").write_text(json.dumps({
+            "constraints": {"role": "investor", "mode": "two_party"},
+            "founder_name": "", "founder_title": "CEO", "message": "Join INV-X",
+        }))
+
+    def test_investor_two_party_skips_gate_and_pushes_joined_card(self, tmp_path):
+        self._write_config(tmp_path)
+
+        def fake_mint(output_dir, config):
+            (Path(output_dir) / "mint.json").write_text(json.dumps({
+                "negotiation_id": "neg_1",
+                "mode": "two_party",
+                "user_role": "investor",
+                "session_code": "INV-X",
+            }))
+            return 0
+
+        sender = MagicMock()
+        mock_gate = MagicMock()
+        mock_stream = MagicMock(return_value=(0, None))
+
+        with patch.object(rs, "run_mint", side_effect=fake_mint), \
+             patch.object(rs, "_founder_two_party_gate", mock_gate), \
+             patch.object(rs, "_stream_to_telegram", mock_stream), \
+             patch.object(rs, "resolve_chat_id", return_value="12345"), \
+             patch.object(rs, "send_telegram", sender):
+            rc = rs.run_negotiate(str(tmp_path), chat_id_flag="12345")
+
+        assert rc == 0
+        mock_gate.assert_not_called()
+        mock_stream.assert_called_once()
+        # A "joined" card was pushed before streaming started
+        joined_msgs = [c.kwargs.get("message", "") for c in sender.call_args_list]
+        assert any("joined" in m.lower() and "starting" in m.lower()
+                   for m in joined_msgs)

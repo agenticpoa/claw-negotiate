@@ -120,6 +120,23 @@ def run_prepare(
             sys.stderr.write(f"Ambiguous constraints (null values): {missing}. Ask the user to clarify.\n")
             return 1
 
+        # Two-party join path: the investor pasted a session_code. Validate
+        # the session via sshsign, merge founder-side metadata into
+        # constraints, and stash the shared session_id in config so mint
+        # can reuse it instead of generating a fresh one.
+        joined_session: dict | None = None
+        if constraints.get("session_code"):
+            sess_payload, err = _fetch_session_for_join(constraints["session_code"])
+            if err or not sess_payload:
+                if chat_id:
+                    sender(chat_id, message=(
+                        "\u26a0\ufe0f " + (err or "Couldn't find that negotiation.")  # ⚠️
+                        + "\n\nDouble-check the code with your counterparty."
+                    ))
+                return 1
+            constraints = _enrich_constraints_from_session(constraints, sess_payload)
+            joined_session = sess_payload
+
         config = {
             "constraints": constraints,
             # Legacy field; run_mint reads identity from constraints +
@@ -128,6 +145,15 @@ def run_prepare(
             "founder_title": founder_title,
             "message": message,
         }
+        if joined_session:
+            config["session"] = {
+                "session_id": joined_session.get("session_id"),
+                "session_code": joined_session.get("session_code"),
+                "status": joined_session.get("status"),
+                # Save the founder's APOA pubkey (if we got it in members)
+                # so mint can write it to disk without a second sshsign call.
+                "counterparty_apoa_pubkey_pem": _extract_counterparty_pubkey(joined_session),
+            }
 
         if chat_id:
             body = format_event({"type": "confirm", "constraints": constraints})
@@ -146,6 +172,23 @@ def run_prepare(
         typing.stop()
 
 
+def _extract_counterparty_pubkey(session_payload: dict) -> str:
+    """Return the first member's APOA pubkey PEM that isn't the caller's own.
+
+    get-session returns the members list only when the caller is a member;
+    for a prospective joiner (not yet a member) the list is empty and we
+    rely on join-session + a follow-up get-session to retrieve it. In that
+    case this returns '' and mint writes a placeholder that _stream_negotiate
+    can refresh later.
+    """
+    members = session_payload.get("members") or []
+    for m in members:
+        pem = m.get("apoa_pubkey_pem") or ""
+        if pem:
+            return pem
+    return ""
+
+
 def run_mint(output_dir: str, config: dict) -> int:
     """Mint APOA tokens using the constraints from config.json."""
     repo = os.environ.get("NEGOTIATE_REPO_PATH", "")
@@ -161,7 +204,14 @@ def run_mint(output_dir: str, config: dict) -> int:
     constraints = config["constraints"]
     out = Path(output_dir)
 
-    negotiation_id = f"neg_{uuid.uuid4().hex[:12]}"
+    # Join mode: the investor is entering a session the founder already
+    # created. Reuse the shared session_id as the negotiation_id so both
+    # sides' APOA tokens, pending_signatures, and offer logs correlate.
+    shared_session = config.get("session")
+    if shared_session and shared_session.get("session_id"):
+        negotiation_id = shared_session["session_id"]
+    else:
+        negotiation_id = f"neg_{uuid.uuid4().hex[:12]}"
     neg_dir = repo / "negotiations" / negotiation_id
     neg_dir.mkdir(parents=True, exist_ok=True)
 
@@ -257,10 +307,19 @@ def run_mint(output_dir: str, config: dict) -> int:
         "PRO_RATA_REQUIRED": "pro-rata-required",
         "MFN_REQUIRED": "mfn-required",
     }
-    for env_key_suffix, flag_suffix in ai_flag_suffixes.items():
-        val = os.environ.get(f"{ai_env_prefix}{env_key_suffix}")
-        if val:
-            cmd.extend([f"{ai_flag_prefix}{flag_suffix}", val])
+
+    # In join mode (shared_session set), the investor only mints their OWN
+    # token — the founder already minted theirs on their OC. Pass --role to
+    # create_tokens.py to skip the counterparty-token generation.
+    # Skip the AI-side env overrides too — there is no AI side in two-party
+    # mode; the counterparty's constraints live in their own APOA token.
+    if shared_session:
+        cmd.extend(["--role", user_role])
+    else:
+        for env_key_suffix, flag_suffix in ai_flag_suffixes.items():
+            val = os.environ.get(f"{ai_env_prefix}{env_key_suffix}")
+            if val:
+                cmd.extend([f"{ai_flag_prefix}{flag_suffix}", val])
 
     result = subprocess.run(cmd, cwd=repo, capture_output=True, text=True)
     if result.returncode != 0:
@@ -279,16 +338,29 @@ def run_mint(output_dir: str, config: dict) -> int:
         "mode": (constraints.get("mode") or "demo").lower(),
     }
 
-    # Two-party mode: register the signing session with sshsign and record
-    # the resulting session_code in mint.json so downstream code (waiting
-    # loop, invitation card, cancellation flow) can reference it.
+    # Two-party mode: register (creator) or join (joiner) the signing
+    # session with sshsign. Creator flow (no shared_session in config)
+    # creates a fresh session and gets a shareable code. Joiner flow
+    # publishes the joiner's APOA pubkey to the existing session.
     if mint_output["mode"] == "two_party":
-        session_registered = _register_signing_session(
-            mint_output, constraints, user_role, neg_dir,
-        )
-        if session_registered is None:
-            return 3  # registration failure; caller surfaces to user
-        mint_output.update(session_registered)
+        if shared_session:
+            joined = _join_signing_session(
+                mint_output=mint_output,
+                shared_session=shared_session,
+                user_role=user_role,
+                neg_dir=neg_dir,
+                repo=repo,
+            )
+            if joined is None:
+                return 3
+            mint_output.update(joined)
+        else:
+            session_registered = _register_signing_session(
+                mint_output, constraints, user_role, neg_dir,
+            )
+            if session_registered is None:
+                return 3
+            mint_output.update(session_registered)
 
     (out / "mint.json").write_text(json.dumps(mint_output, indent=2))
 
@@ -336,10 +408,16 @@ def _register_signing_session(
         sys.stderr.write(f"reading {pubkey_path}: {e}\n")
         return None
 
+    # company_name lives in metadata_public so a prospective investor can see
+    # "you're joining a negotiation for Acme Corp" BEFORE committing to join
+    # (join-session requires a PUT; pre-join the investor only has get-session
+    # which hides metadata_member). Founder chose to share the code with this
+    # investor, so the company identity is already public-between-them.
     metadata_public = {"use_case": "safe", "version": 1}
+    if constraints.get("company_name"):
+        metadata_public["company_name"] = constraints["company_name"]
     metadata_member = {
         k: v for k, v in {
-            "company_name": constraints.get("company_name"),
             "founder_name": constraints.get("founder_name"),
             "founder_title": constraints.get("founder_title"),
             "investor_name": constraints.get("investor_name"),
@@ -799,22 +877,31 @@ def run_negotiate(output_dir: str, chat_id_flag: str | None = None) -> int:
         )
         return 2
 
-    # Two-party mode: push the invitation card and wait for the
-    # counterparty to join before firing the stream. In demo mode both
-    # paths are skipped and we go straight to streaming.
+    # Two-party mode: the founder waits for the investor to join; the
+    # investor (who just joined) goes straight to streaming. Demo mode
+    # skips both paths.
     try:
         mint = json.loads((out / "mint.json").read_text())
     except (OSError, json.JSONDecodeError):
         mint = {}
     if mint.get("mode") == "two_party":
-        wait_rc = _founder_two_party_gate(
-            out=out,
-            chat_id=chat_id,
-            mint=mint,
-            constraints=config.get("constraints") or {},
-        )
-        if wait_rc != 0:
-            return wait_rc
+        if mint.get("user_role") == "founder":
+            wait_rc = _founder_two_party_gate(
+                out=out,
+                chat_id=chat_id,
+                mint=mint,
+                constraints=config.get("constraints") or {},
+            )
+            if wait_rc != 0:
+                return wait_rc
+        elif mint.get("user_role") == "investor":
+            # Investor just joined — push a short "joined; starting" card
+            # so they know the flow is progressing before upstream's first
+            # offer lands.
+            sender = send_telegram
+            sender(chat_id, message=(
+                "\u2705 Joined the negotiation. Starting now\u2026"  # ✅
+            ))
 
     bot_username = os.environ.get("TELEGRAM_BOT_USERNAME", "AgenticPOA_bot")
     stream_rc, signing_event = _stream_to_telegram(
@@ -837,6 +924,170 @@ def run_negotiate(output_dir: str, chat_id_flag: str | None = None) -> int:
         sshsign_host=sshsign_host,
         pending_id=pending_id,
     )
+
+
+def _join_signing_session(
+    mint_output: dict,
+    shared_session: dict,
+    user_role: str,
+    neg_dir: Path,
+    repo: Path,
+    session_client=None,
+) -> dict | None:
+    """Call sshsign join-session with the joiner's APOA pubkey, then
+    re-fetch the session (now member-authenticated) to retrieve the
+    counterparty's APOA pubkey and write it to disk so the stream helper
+    can reference it.
+
+    On success, returns a dict of session fields to merge into mint.json
+    (session_code, status, counterparty pubkey path). On failure, None.
+    """
+    pubkey_path = neg_dir / "keys" / f"{user_role}_public.pem"
+    if not pubkey_path.exists():
+        sys.stderr.write(
+            f"Cannot join: APOA pubkey for role={user_role} not found at {pubkey_path}\n"
+        )
+        return None
+
+    try:
+        our_pubkey_pem = pubkey_path.read_text()
+    except OSError as e:
+        sys.stderr.write(f"reading {pubkey_path}: {e}\n")
+        return None
+
+    session_code = shared_session.get("session_code")
+    if not session_code:
+        sys.stderr.write("Cannot join: shared_session has no session_code\n")
+        return None
+
+    client = session_client or SshsignSession(
+        host=os.environ.get("SSHSIGN_HOST", "sshsign.dev"),
+    )
+
+    try:
+        join_result = client.join_session(
+            session_code=session_code,
+            role=user_role,
+            apoa_pubkey_pem=our_pubkey_pem,
+            party_did=os.environ.get("USER_DID") or None,
+        )
+    except SshsignSessionError as e:
+        sys.stderr.write(f"join-session failed: {e}\n")
+        return None
+
+    # Re-fetch as member to pick up the counterparty's pubkey.
+    try:
+        member_view = client.get_session(session_code=session_code)
+    except SshsignSessionError as e:
+        sys.stderr.write(f"post-join get-session failed: {e}\n")
+        # Non-fatal — we joined successfully; stream helper can work without
+        # the counterparty pubkey for the distributed flow since sshsign
+        # validates offers by envelope signature at submission time.
+        member_view = join_result
+
+    counterparty_role = "investor" if user_role == "founder" else "founder"
+    counterparty_pubkey_pem = ""
+    for m in (member_view.get("members") or []):
+        if m.get("role") == counterparty_role:
+            counterparty_pubkey_pem = m.get("apoa_pubkey_pem") or ""
+            break
+
+    # Write counterparty pubkey to the mint dir so _stream_negotiate can
+    # reference it via its usual founder.json/investor.json path.
+    counterparty_pubkey_path = neg_dir / "keys" / f"{counterparty_role}_public.pem"
+    if counterparty_pubkey_pem:
+        try:
+            counterparty_pubkey_path.write_text(counterparty_pubkey_pem)
+        except OSError as e:
+            sys.stderr.write(f"writing counterparty pubkey: {e}\n")
+
+    return {
+        "session_code": session_code,
+        "session_created_at": member_view.get("created_at"),
+        "session_expires_at": member_view.get("expires_at"),
+        "session_status": member_view.get("status"),
+        "counterparty_pubkey_path": (
+            str(counterparty_pubkey_path) if counterparty_pubkey_pem else ""
+        ),
+    }
+
+
+def _fetch_session_for_join(
+    session_code: str,
+    session_client=None,
+) -> tuple[dict | None, str | None]:
+    """Call sshsign get-session to validate a join-code and pull founder's
+    APOA pubkey + member metadata.
+
+    Returns (session_payload, error_message). Exactly one is non-None.
+    """
+    client = session_client or SshsignSession(
+        host=os.environ.get("SSHSIGN_HOST", "sshsign.dev"),
+    )
+    try:
+        sess = client.get_session(session_code=session_code)
+    except SshsignSessionError as e:
+        return None, f"Couldn't look up session: {e}"
+
+    status = (sess.get("status") or "").lower()
+    if status in ("canceled", "rescinded_after_sign"):
+        return None, "That negotiation was canceled. Ask your counterparty for a new code."
+    if status == "expired":
+        return None, "That negotiation expired. Ask your counterparty for a new code."
+    if status == "completed":
+        return None, "That negotiation has already completed."
+    if status not in ("open", "joined"):
+        return None, f"Can't join a session in state: {status}"
+
+    # When a session already has a member in each expected role (specifically
+    # the role we're about to claim), sshsign's join-session will reject us.
+    # Surfacing it here gives a clearer message than letting the rejection
+    # bubble up as a generic error from sshsign.
+    members = sess.get("members") or []
+    if members:  # membership-gated — we only see this list if we're already a member
+        return sess, None
+    # Non-member view: members list omitted. Proceed; join-session will
+    # reject on role conflict if one exists.
+    return sess, None
+
+
+def _enrich_constraints_from_session(
+    constraints: dict,
+    session_payload: dict,
+) -> dict:
+    """Merge founder-side metadata from the session into the investor's
+    parsed constraints. Investor-supplied fields always win — the merge
+    only fills gaps.
+
+    Reads from metadata_public always (company_name lives there so
+    non-members can see it on the confirm card). Reads from metadata_member
+    if the caller is a session member (founder-side view, or investor
+    after join-session).
+    """
+    out = dict(constraints)
+
+    def _parse(raw):
+        if raw is None:
+            return {}
+        if isinstance(raw, dict):
+            return raw
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+
+    public_md = _parse(session_payload.get("metadata_public"))
+    member_md = _parse(session_payload.get("metadata_member"))
+
+    for key in ("company_name", "founder_name", "founder_title",
+                "investor_name", "investor_firm"):
+        if out.get(key):
+            continue
+        if public_md.get(key):
+            out[key] = public_md[key]
+        elif member_md.get(key):
+            out[key] = member_md[key]
+    return out
 
 
 def _founder_two_party_gate(
