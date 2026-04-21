@@ -1226,6 +1226,68 @@ class TestStreamToTelegram:
             )
         fake_loop.stop.assert_called_once()
 
+    def test_max_rounds_outcome_triggers_propose_new_terms_followup(self, tmp_path, sample_constraints):
+        """No-ZOPA: after a max_rounds outcome lands, push a 'try again'
+        follow-up card. Renders on both sides symmetrically."""
+        events = [
+            {"type": "offer", "round": 1, "party": "founder",
+             "terms": {"valuation_cap": 20_000_000}},
+            {"type": "counter", "round": 2, "party": "investor",
+             "terms": {"valuation_cap": 5_000_000}},
+            {"type": "outcome", "result": "max_rounds"},
+        ]
+        lines = [json.dumps(e) + "\n" for e in events]
+        popen_mock = MagicMock(return_value=self._fake_proc(lines))
+        sender = MagicMock()
+
+        rs._stream_to_telegram(
+            output_dir=tmp_path, chat_id="1", constraints=sample_constraints,
+            bot_username="B", popen=popen_mock, sender=sender,
+        )
+
+        msgs = [c.kwargs.get("message", "") for c in sender.call_args_list]
+        assert any("didn't overlap" in m.lower() for m in msgs)
+        assert any("try again" in m.lower() for m in msgs)
+        # Ordering: propose-new-terms lands AFTER the outcome card
+        outcome_idx = next(i for i, m in enumerate(msgs) if "didn't overlap" in m.lower())
+        follow_idx = next(i for i, m in enumerate(msgs) if "try again" in m.lower())
+        assert outcome_idx < follow_idx
+
+    def test_accepted_outcome_does_not_trigger_followup(self, tmp_path, sample_constraints):
+        events = [
+            {"type": "accept", "round": 3, "party": "founder",
+             "terms": {"valuation_cap": 10_000_000, "discount_rate": 0.20}},
+            {"type": "outcome", "result": "accepted",
+             "terms": {"valuation_cap": 10_000_000}},
+        ]
+        lines = [json.dumps(e) + "\n" for e in events]
+        popen_mock = MagicMock(return_value=self._fake_proc(lines))
+        sender = MagicMock()
+        rs._stream_to_telegram(
+            output_dir=tmp_path, chat_id="1", constraints=sample_constraints,
+            bot_username="B", popen=popen_mock, sender=sender,
+        )
+        msgs = [c.kwargs.get("message", "") for c in sender.call_args_list]
+        assert not any("try again" in m.lower() for m in msgs)
+
+
+class TestCounterpartyLabelFromConstraints:
+    def test_founder_sees_investor_label(self):
+        c = {"role": "founder", "investor_name": "Alex", "investor_firm": "Blue"}
+        assert rs._counterparty_label_from_constraints(c) == "Alex, Blue"
+
+    def test_investor_sees_founder_and_company(self):
+        c = {"role": "investor", "founder_name": "Jane", "company_name": "Acme"}
+        assert rs._counterparty_label_from_constraints(c) == "Jane, Acme"
+
+    def test_default_role_is_founder(self):
+        """Missing role defaults to founder's perspective (investor label)."""
+        c = {"investor_name": "Alex"}
+        assert rs._counterparty_label_from_constraints(c) == "Alex"
+
+    def test_empty_returns_empty(self):
+        assert rs._counterparty_label_from_constraints({}) == ""
+
 
 class TestEnvelopeStatus:
     def _result(self, returncode: int, stdout: str, stderr: str = ""):

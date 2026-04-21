@@ -274,7 +274,10 @@ def _format_accept(event: dict[str, Any]) -> str:
     )
 
 
-def format_outcome(event: dict[str, Any]) -> str | None:
+def format_outcome(
+    event: dict[str, Any],
+    constraints: dict[str, Any] | None = None,
+) -> str | None:
     """Render only failure outcomes.
 
     For `result=accepted`, return None so the caller skips it — the preceding
@@ -282,16 +285,58 @@ def format_outcome(event: dict[str, Any]) -> str | None:
     header, and the upcoming `signing` event is the next clear action. Emitting
     a redundant "Deal!" card between them just adds a ~second of delay with no
     new information.
+
+    For `result=max_rounds`, we're in a no-ZOPA case: the two parties' ranges
+    didn't overlap. Spell that out in plain English so the user understands
+    WHY we stopped and knows the next move is to revisit their bounds.
     """
     result = event.get("result")
 
     if result == "accepted":
         return None
     if result == "max_rounds":
-        return "No agreement reached after the maximum rounds."
+        cap_min = (constraints or {}).get("valuation_cap_min") if constraints else None
+        cap_max = (constraints or {}).get("valuation_cap_max") if constraints else None
+        lines = ["\U0001f937 **No agreement reached.**"]  # 🤷
+        if cap_min is not None and cap_max is not None:
+            lines.append("")
+            lines.append(
+                "Your range and your counterparty's didn't overlap enough "
+                "to close on terms."
+            )
+            lines.append(
+                f"Your cap range was **{fmt_dollars(cap_min)} – "
+                f"{fmt_dollars(cap_max)}**."
+            )
+        else:
+            lines.append("")
+            lines.append(
+                "Your range and your counterparty's didn't overlap. "
+                "No SAFE was executed."
+            )
+        return "\n".join(lines)
     if result == "rejected":
         return "Negotiation rejected. No agreement reached."
     return None
+
+
+def format_propose_new_terms(event: dict[str, Any]) -> str:
+    """Follow-up card pushed after a no-ZOPA outcome.
+
+    Invites the user to try again with updated bounds. Kept intentionally
+    short — the outcome card did the explaining; this one just points at
+    the next action.
+    """
+    counterparty = (event.get("counterparty_label") or "").strip()
+    if counterparty:
+        with_line = f" with {counterparty}"
+    else:
+        with_line = ""
+    return (
+        "\U0001f504 **Try again?**\n\n"  # 🔄
+        f"Reply with updated terms and I'll start a new negotiation{with_line}. "
+        "Example: \"Negotiate again, cap $15M-$25M, 15% discount.\""
+    )
 
 
 def format_signing(event: dict[str, Any]) -> str:
@@ -545,6 +590,7 @@ FORMATTERS = {
     "rescinded_after_sign_initiator": format_rescinded_after_sign_initiator,
     "rescinded_after_sign_observer": format_rescinded_after_sign_observer,
     "cancel_completed_refused": format_cancel_completed_deal_refused,
+    "propose_new_terms": format_propose_new_terms,
 }
 
 
@@ -563,6 +609,8 @@ def format_event(
         return None
     if formatter is format_offer:
         return format_offer(event, constraints)
+    if formatter is format_outcome:
+        return format_outcome(event, constraints)
     return formatter(event)
 
 

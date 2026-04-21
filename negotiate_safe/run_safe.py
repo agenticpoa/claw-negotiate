@@ -617,6 +617,20 @@ def _stream_to_telegram(
             if message:
                 sender(chat_id, message=message)
 
+            # No-ZOPA follow-up: right after a max_rounds outcome, invite
+            # the user to propose new terms. Renders on both sides
+            # symmetrically (both OCs consume the same outcome event
+            # independently from their own upstream runs).
+            if (event.get("type") == "outcome"
+                    and event.get("result") == "max_rounds"):
+                cp_label = _counterparty_label_from_constraints(constraints or {})
+                follow = format_event({
+                    "type": "propose_new_terms",
+                    "counterparty_label": cp_label,
+                })
+                if follow:
+                    sender(chat_id, message=follow)
+
         proc.wait()
     finally:
         typing.stop()
@@ -631,6 +645,27 @@ def _stream_to_telegram(
 
     signing_event = next((e for e in events if e.get("type") == "signing"), None)
     return proc.returncode or 0, signing_event
+
+
+def _counterparty_label_from_constraints(constraints: dict) -> str:
+    """Human label for the counterparty, used in propose-new-terms follow-up.
+
+    From the user's perspective: if they're the founder, label is the
+    investor's name/firm; if investor, it's the founder + company.
+    Returns empty string when we can't build a useful label.
+    """
+    role = (constraints.get("role") or "founder").lower()
+    if role == "founder":
+        parts = [p for p in (
+            constraints.get("investor_name"),
+            constraints.get("investor_firm"),
+        ) if p]
+        return ", ".join(parts)
+    parts = [p for p in (
+        constraints.get("founder_name"),
+        constraints.get("company_name"),
+    ) if p]
+    return ", ".join(parts)
 
 
 # ─── Post-stream: envelope polling + finalize + PDF push ────────────────────

@@ -33,6 +33,7 @@ class TestFormatters:
             "canceled_after_deal_initiator", "canceled_after_deal_observer",
             "rescinded_after_sign_initiator", "rescinded_after_sign_observer",
             "cancel_completed_refused",
+            "propose_new_terms",
         }
 
     # ---- confirm (our emit) ----
@@ -282,6 +283,17 @@ class TestFormatters:
     def test_outcome_max_rounds(self):
         out = fe.format_outcome({"type": "outcome", "result": "max_rounds"})
         assert "No agreement reached" in out
+        assert "didn't overlap" in out.lower()
+
+    def test_outcome_max_rounds_with_constraints_includes_range(self, sample_constraints):
+        """No-ZOPA copy should cite the user's own cap range so they know
+        which side of the gap was theirs."""
+        out = fe.format_outcome(
+            {"type": "outcome", "result": "max_rounds"},
+            constraints=sample_constraints,
+        )
+        assert "$8M – $12M" in out
+        assert "didn't overlap" in out.lower()
 
     def test_outcome_rejected(self):
         out = fe.format_outcome({"type": "outcome", "result": "rejected"})
@@ -507,6 +519,35 @@ class TestDispatcher:
     def test_dispatch_outcome(self):
         out = fe.format_event({"type": "outcome", "result": "max_rounds"})
         assert "No agreement" in out
+
+    def test_dispatch_outcome_forwards_constraints(self, sample_constraints):
+        out = fe.format_event(
+            {"type": "outcome", "result": "max_rounds"},
+            constraints=sample_constraints,
+        )
+        assert "$8M – $12M" in out
+
+    def test_dispatch_propose_new_terms(self):
+        out = fe.format_event({
+            "type": "propose_new_terms",
+            "counterparty_label": "Jane Doe",
+        })
+        assert "Try again" in out
+        assert "Jane Doe" in out
+
+
+class TestProposeNewTerms:
+    def test_copy_basic(self):
+        out = fe.format_propose_new_terms({"counterparty_label": "Jane Doe"})
+        assert "Try again" in out
+        assert "Jane Doe" in out
+        assert "Negotiate again" in out  # example line
+
+    def test_no_counterparty_label(self):
+        out = fe.format_propose_new_terms({})
+        assert "Try again" in out
+        # Should not have a trailing " with ..."
+        assert "I'll start a new negotiation." in out
 
     def test_dispatch_signing(self):
         out = fe.format_event({
