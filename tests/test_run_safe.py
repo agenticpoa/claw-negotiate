@@ -699,6 +699,10 @@ class TestRunMintRoleFlipping:
         assert cmd[cmd.index("--company-name") + 1] == "Acme Labs"
 
     def test_literal_fallback_when_no_env_no_nl(self, tmp_path, monkeypatch):
+        """In demo mode, counterparty gets a descriptive 'Demo Investor' /
+        'Demo Capital' preset rather than the generic 'Investor' fallback.
+        Only the user's OWN side (founder here) falls through to the
+        bare literal."""
         for var in ("FOUNDER_NAME", "FOUNDER_TITLE", "INVESTOR_NAME",
                     "INVESTOR_FIRM", "COMPANY_NAME"):
             monkeypatch.delenv(var, raising=False)
@@ -707,8 +711,40 @@ class TestRunMintRoleFlipping:
             "investor_name": None, "investor_firm": None,
         })
         cmd = self._run_and_capture_cmd(tmp_path, config, monkeypatch)
-        # Generic placeholders so the AI agent and the PDF don't show null
+        # User side (founder): generic literal since user is playing this role
         assert cmd[cmd.index("--founder-name") + 1] == "Founder"
+        # Counterparty side (investor): demo preset kicks in
+        assert cmd[cmd.index("--investor-name") + 1] == "Demo Investor"
+        assert cmd[cmd.index("--investor-firm") + 1] == "Demo Capital"
+
+    def test_two_party_mode_skips_demo_presets(self, tmp_path, monkeypatch):
+        """In two_party mode there IS no AI counterparty — don't inject
+        the 'Demo Investor' preset on the other side. Use generic labels
+        as the last-resort fallback."""
+        for var in ("FOUNDER_NAME", "FOUNDER_TITLE", "INVESTOR_NAME",
+                    "INVESTOR_FIRM", "COMPANY_NAME"):
+            monkeypatch.delenv(var, raising=False)
+        config = self._config("founder", {
+            "founder_name": None, "investor_name": None, "investor_firm": None,
+            "company_name": None, "mode": "two_party",
+        })
+        cmd = self._run_and_capture_cmd(tmp_path, config, monkeypatch)
+        assert cmd[cmd.index("--investor-name") + 1] == "Investor"
+        assert cmd[cmd.index("--investor-firm") + 1] == "Investor Firm"
+
+    def test_demo_investor_preset_for_investor_user(self, tmp_path, monkeypatch):
+        """When user plays investor in demo, the FOUNDER side gets the
+        demo preset (their side is the AI)."""
+        for var in ("FOUNDER_NAME", "FOUNDER_TITLE", "INVESTOR_NAME",
+                    "INVESTOR_FIRM", "COMPANY_NAME"):
+            monkeypatch.delenv(var, raising=False)
+        config = self._config("investor", {
+            "founder_name": None, "founder_title": None, "investor_name": None,
+            "investor_firm": None, "company_name": None,
+        })
+        cmd = self._run_and_capture_cmd(tmp_path, config, monkeypatch)
+        assert cmd[cmd.index("--founder-name") + 1] == "Demo Founder"
+        # User side (investor): generic literal since user is playing this role
         assert cmd[cmd.index("--investor-name") + 1] == "Investor"
 
     def test_user_did_env_used_as_principal(self, tmp_path, monkeypatch):
@@ -2184,6 +2220,21 @@ class TestAuthorizationCardOnRunNegotiate:
         auth_msgs = [m for m in msgs if "authorization is set" in m.lower()]
         assert auth_msgs
         assert "2 hours" in auth_msgs[0]
+
+
+class TestBuildInviteUrl:
+    def test_default_base(self):
+        url = rs._build_invite_url("INV-7K3X9")
+        assert url == "https://provision.agenticpoa.dev/join/INV-7K3X9"
+
+    def test_custom_base_env(self, monkeypatch):
+        monkeypatch.setenv("PROVISION_BASE_URL", "https://staging.example.com/")
+        url = rs._build_invite_url("INV-X")
+        assert url == "https://staging.example.com/join/INV-X"
+
+    def test_empty_code_returns_empty(self):
+        assert rs._build_invite_url("") == ""
+        assert rs._build_invite_url("   ") == ""
 
 
 class TestBuildArtifactUri:

@@ -228,8 +228,18 @@ def format_offer(
     cap = terms.get("valuation_cap")
     discount = terms.get("discount_rate")
 
+    # In solo-demo (user plays one role, AI plays the other), clearly
+    # label the AI side as "(AI)" so no one mistakes the agent's counter
+    # for a real person. In two_party mode both sides are humans; no
+    # suffix. `user_role` comes from the constraints/mint context.
+    mode = (constraints or {}).get("mode") if constraints else None
+    user_role = ((constraints or {}).get("role") or "").lower() if constraints else ""
+    ai_suffix = ""
+    if mode == "demo" and user_role and party_raw and party_raw != user_role:
+        ai_suffix = " (AI)"
+
     header_prefix = f"{icon} " if icon else ""
-    header = f"{header_prefix}**Round {round_num} — {party}**"
+    header = f"{header_prefix}**Round {round_num} — {party}{ai_suffix}**"
     lines = [header]
 
     message = (event.get("message") or "").strip()
@@ -451,9 +461,12 @@ def format_invitation(event: dict[str, Any]) -> str:
 
     The code (`session_code`) is the only piece the user must share — copy
     is optimized for "paste this into Signal / SMS / email and send to your
-    investor." Expiration is shown in relative terms.
+    investor." If a one-click invite URL is provided, it's surfaced alongside
+    the code so the investor can onboard in <5 minutes (the URL points at
+    the provisioning service that spins up an OC instance per click).
     """
     code = (event.get("session_code") or "").strip()
+    invite_url = (event.get("invite_url") or "").strip()
     expires_at = event.get("expires_at") or ""
     ttl_h = event.get("ttl_hours") or 24
     counterparty = (event.get("counterparty_label") or "your investor").strip()
@@ -465,10 +478,22 @@ def format_invitation(event: dict[str, Any]) -> str:
         "",
         f"    **{code}**",
         "",
-        "They'll reply to their own bot with something like:",
-        f"> Join negotiation {code} as investor. Cap up to $X, $Y% discount, \u2026",
-        "",
     ]
+    if invite_url:
+        lines.extend([
+            "Or send them a one-click join link:",
+            "",
+            f"    {invite_url}",
+            "",
+            "If they don't have the skill yet, the link will set them up.",
+            "",
+        ])
+    else:
+        lines.extend([
+            "They'll reply to their own bot with something like:",
+            f"> Join negotiation {code} as investor. Cap up to $X, $Y% discount, \u2026",
+            "",
+        ])
     if expires_at:
         lines.append(f"Expires in ~{ttl_h} hours. I'll wait for them to join.")
     else:

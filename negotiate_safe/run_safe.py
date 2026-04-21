@@ -243,29 +243,44 @@ def run_mint(output_dir: str, config: dict) -> int:
     ai_env_prefix = "INVESTOR_" if user_role == "founder" else "FOUNDER_"
 
     # Identity resolution — aligned with upstream agenticpoa/negotiate
-    # `.env.example`. Precedence per field: NL > env > literal fallback.
-    # Upstream convention: FOUNDER_* describes the founder side of the deal
+    # `.env.example`. Precedence per field: NL > env > demo-preset > literal
+    # fallback. Upstream convention: FOUNDER_* describes the founder side
     # (regardless of who the user is), INVESTOR_* describes the investor
     # side. In demo mode the user's own identity ends up in whichever set
-    # matches their role.
+    # matches their role; the OTHER side gets demo-flavored presets (e.g.
+    # "Demo Investor, Demo Fund") so the AI counterparty has a name that
+    # reads as intentional rather than placeholder-y in the HN screenshot.
+    mode = (constraints.get("mode") or "demo").lower()
+    is_demo = mode == "demo"
+
+    # Demo presets apply only to the side the user ISN'T playing.
+    demo_founder_name = "Demo Founder" if is_demo and user_role == "investor" else ""
+    demo_founder_title = "CEO" if is_demo and user_role == "investor" else ""
+    demo_investor_name = "Demo Investor" if is_demo and user_role == "founder" else ""
+    demo_investor_firm = "Demo Capital" if is_demo and user_role == "founder" else ""
+
     founder_name = (
         constraints.get("founder_name")
         or os.environ.get("FOUNDER_NAME")
+        or demo_founder_name
         or "Founder"
     )
     founder_title = (
         constraints.get("founder_title")
         or os.environ.get("FOUNDER_TITLE")
+        or demo_founder_title
         or "CEO"
     )
     investor_name = (
         constraints.get("investor_name")
         or os.environ.get("INVESTOR_NAME")
+        or demo_investor_name
         or "Investor"
     )
     investor_firm = (
         constraints.get("investor_firm")
         or os.environ.get("INVESTOR_FIRM")
+        or demo_investor_firm
         or "Investor Firm"
     )
     company = (
@@ -1429,6 +1444,7 @@ def _founder_two_party_gate(
     invitation_body = format_event({
         "type": "invitation",
         "session_code": session_code,
+        "invite_url": _build_invite_url(session_code),
         "expires_at": mint.get("session_expires_at") or "",
         "ttl_hours": 24,
         "counterparty_label": counterparty_label,
@@ -1460,6 +1476,26 @@ def _founder_two_party_gate(
         "Your session still exists; try the command again."
     ))
     return 3
+
+
+def _build_invite_url(session_code: str) -> str:
+    """Generate a one-click invite URL for the given session code.
+
+    The base points at the provisioning service that (eventually) spins up
+    a fresh OpenClaw instance for the joiner, pre-configures the skill,
+    and lands them on a join-confirmation card. Until that service is
+    deployed, the URL is a stable marker that founder can still share by
+    hand — the code is embedded so a recipient with an existing OC can
+    use it manually.
+
+    Environment:
+      PROVISION_BASE_URL — overrides the default host (e.g. for staging).
+    """
+    code = (session_code or "").strip()
+    if not code:
+        return ""
+    base = os.environ.get("PROVISION_BASE_URL") or "https://provision.agenticpoa.dev"
+    return f"{base.rstrip('/')}/join/{code}"
 
 
 _IDENTITY_TO_ENV: list[tuple[str, str]] = [

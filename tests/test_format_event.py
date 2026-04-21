@@ -205,6 +205,29 @@ class TestFormatters:
         out = fe.format_offer(event)
         assert out.startswith("\U0001f4bc **Round 3 — Investor**")  # 💼
 
+    def test_demo_mode_labels_ai_counterparty_as_ai(self):
+        """Solo-demo: the AI side of the negotiation gets a '(AI)' suffix
+        in the offer header so the user never mistakes it for a real
+        counterparty. The user's own side does NOT get the suffix."""
+        event = {"type": "offer", "round": 2, "party": "investor",
+                 "terms": {"valuation_cap": 9_000_000, "discount_rate": 0.20}}
+        # User is playing founder → investor side is AI
+        out = fe.format_offer(event, constraints={"role": "founder", "mode": "demo"})
+        assert "**Round 2 — Investor (AI)**" in out
+
+        # User is playing investor → investor side is the human user
+        out = fe.format_offer(event, constraints={"role": "investor", "mode": "demo"})
+        assert "**Round 2 — Investor**" in out
+        assert "(AI)" not in out
+
+    def test_two_party_mode_never_shows_ai_suffix(self):
+        """Both sides are real humans in two_party mode — no AI suffix
+        regardless of party."""
+        event = {"type": "counter", "round": 3, "party": "investor",
+                 "terms": {"valuation_cap": 8_000_000, "discount_rate": 0.15}}
+        out = fe.format_offer(event, constraints={"role": "founder", "mode": "two_party"})
+        assert "(AI)" not in out
+
     def test_accept_renders_deal_celebration(self):
         event = {"type": "accept", "round": 5, "party": "founder",
                  "terms": {"valuation_cap": 9_000_000, "discount_rate": 0.20,
@@ -372,10 +395,26 @@ class TestFormatInvitation:
 
     def test_example_join_phrasing_included(self):
         """The card tells the user what the other side should reply with,
-        so copy-paste onboarding is frictionless."""
+        so copy-paste onboarding is frictionless. Only when no invite URL
+        is provided — the URL replaces the example phrasing."""
         out = fe.format_invitation({"type": "invitation", "session_code": "INV-X"})
         assert "Join negotiation" in out or "join negotiation" in out.lower()
         assert "as investor" in out.lower()
+
+    def test_invite_url_displayed_when_provided(self):
+        """With a one-click URL, the card surfaces it alongside the code so
+        the founder can share either ('or both')."""
+        out = fe.format_invitation({
+            "type": "invitation",
+            "session_code": "INV-7K3X9",
+            "invite_url": "https://provision.example.com/join/INV-7K3X9",
+            "counterparty_label": "Alex",
+        })
+        assert "INV-7K3X9" in out
+        assert "https://provision.example.com/join/INV-7K3X9" in out
+        assert "one-click" in out.lower()
+        # The fallback "Join negotiation" example is dropped when URL is present
+        assert "as investor" not in out.lower()
 
 
 class TestFormatWaiting:
