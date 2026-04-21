@@ -34,6 +34,8 @@ from sshsign_session import (
     SshsignSessionError,
     SessionTerminalError,
     SessionExpiredError,
+    SessionNotFoundError,
+    SessionRoleConflictError,
 )
 
 
@@ -1035,8 +1037,9 @@ def _joiner_await_sign_and_finalize(
                     return 3
                 sender(chat_id, message=(
                     "\u26a0\ufe0f Counterparty didn't finalize in time. "  # ⚠
-                    "You can check the session status on sshsign.dev; the "
-                    "executed PDF will be available once both sides complete."
+                    "Check sshsign.dev/audit/" + session_id
+                    + " for the latest session status. The executed PDF "
+                    "will be available there once both sides complete."
                 ))
                 return 1
             try:
@@ -1048,6 +1051,11 @@ def _joiner_await_sign_and_finalize(
             status = (sess.get("status") or "").lower()
             if status == "completed":
                 break
+            if status == "expired":
+                body = format_event({"type": "session_expired"})
+                if body:
+                    sender(chat_id, message=body)
+                return 2
             if status == "rescinded_after_sign":
                 body = format_event({
                     "type": "rescinded_after_sign_observer",
@@ -1305,6 +1313,16 @@ def _fetch_session_for_join(
     )
     try:
         sess = client.get_session(session_code=session_code)
+    except SessionNotFoundError:
+        return None, (
+            "That code doesn't match a current negotiation. "
+            "Double-check the code with your counterparty — "
+            "it should look like INV-XXXXX."
+        )
+    except SessionExpiredError:
+        return None, (
+            "That negotiation expired. Ask your counterparty for a new code."
+        )
     except SshsignSessionError as e:
         return None, f"Couldn't look up session: {e}"
 
@@ -1315,18 +1333,20 @@ def _fetch_session_for_join(
         return None, "That negotiation expired. Ask your counterparty for a new code."
     if status == "completed":
         return None, "That negotiation has already completed."
-    if status not in ("open", "joined"):
+    if status == "joined":
+        # Counterparty role already has a member. We'd be a third wheel —
+        # sshsign will reject join-session anyway, but this lets us surface
+        # a clearer message before minting wasted tokens.
+        return None, (
+            "That negotiation has already started with someone else. "
+            "Ask your counterparty if they meant to share a different code."
+        )
+    if status != "open":
         return None, f"Can't join a session in state: {status}"
 
-    # When a session already has a member in each expected role (specifically
-    # the role we're about to claim), sshsign's join-session will reject us.
-    # Surfacing it here gives a clearer message than letting the rejection
-    # bubble up as a generic error from sshsign.
-    members = sess.get("members") or []
-    if members:  # membership-gated — we only see this list if we're already a member
-        return sess, None
-    # Non-member view: members list omitted. Proceed; join-session will
-    # reject on role conflict if one exists.
+    # status=open — session is joinable. (We used to accept joined here and
+    # defer role-conflict detection to join-session; now the joined branch
+    # above short-circuits with a clearer error.)
     return sess, None
 
 

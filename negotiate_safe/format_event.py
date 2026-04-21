@@ -476,18 +476,35 @@ def format_invitation(event: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _fmt_hhmm(total_seconds: float) -> str:
+    """Render a duration as HH:MM (e.g., '23:47')."""
+    total = max(0, int(total_seconds))
+    hours = total // 3600
+    minutes = (total % 3600) // 60
+    return f"{hours:02d}:{minutes:02d}"
+
+
 def format_waiting(event: dict[str, Any]) -> str:
     """Periodic status card while the founder waits for their counterparty.
 
     Not fired on every poll — only when the wait has crossed a notable
     threshold (e.g., 1h, 6h, 12h elapsed) so the user doesn't get spammed.
+    Shows a countdown to expiration so the user knows how much runway is
+    left on the invitation.
     """
     elapsed_minutes = int(event.get("elapsed_minutes") or 0)
     remaining_hours = event.get("remaining_hours")
-    msg = f"\u23f3 Still waiting for your counterparty to join ({elapsed_minutes} min elapsed)."  # ⏳
+    lines = [
+        f"\u23f3 Still waiting for your counterparty to join."  # ⏳
+        f" ({elapsed_minutes} min elapsed)",
+    ]
     if remaining_hours is not None:
-        msg += f" Invitation expires in ~{int(remaining_hours)}h."
-    return msg
+        rem_seconds = float(remaining_hours) * 3600
+        lines.append(
+            f"Invitation expires in **{_fmt_hhmm(rem_seconds)}**. "
+            "Share the code soon."
+        )
+    return "\n".join(lines)
 
 
 def format_counterparty_joined(event: dict[str, Any]) -> str:
@@ -501,6 +518,21 @@ def format_invitation_expired(event: dict[str, Any]) -> str:
     return (
         "\u23f0 Your invitation expired before anyone joined.\n\n"  # ⏰
         "Say \"negotiate my SAFE with \u2026\" again to create a new one."
+    )
+
+
+def format_session_expired(event: dict[str, Any]) -> str:
+    """Mid-negotiation APOA/session expiration.
+
+    Distinct from invitation_expired (which fires before the counterparty
+    joins) — this one fires after things were in flight but the session
+    ran out of time before both parties signed.
+    """
+    return (
+        "\u23f0 Your negotiation session expired mid-flight.\n\n"  # ⏰
+        "No SAFE was executed. Your APOA authorization is no longer valid "
+        "for this session. To pick up where you left off, say \"negotiate "
+        "my SAFE with \u2026\" again."
     )
 
 
@@ -583,6 +615,7 @@ FORMATTERS = {
     "waiting": format_waiting,
     "counterparty_joined": format_counterparty_joined,
     "invitation_expired": format_invitation_expired,
+    "session_expired": format_session_expired,
     "canceled_before_deal_initiator": format_canceled_before_deal_initiator,
     "canceled_before_deal_observer": format_canceled_before_deal_observer,
     "canceled_after_deal_initiator": format_canceled_after_deal_initiator,

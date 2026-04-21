@@ -1545,16 +1545,34 @@ class TestFetchSessionForJoin:
         assert sess is None
         assert "ssh boom" in err
 
-    def test_joined_status_is_valid(self):
-        """A session that already has one member (status=joined) is still
-        joinable up until the second counterparty is in — don't reject early."""
+    def test_joined_status_rejected_as_already_started(self):
+        """status=joined means the counterparty slot is already filled —
+        a late joiner would be a third wheel. Reject early with a clear
+        message rather than let sshsign's join-session bounce us."""
         client = MagicMock()
         client.get_session.return_value = {
             "session_code": "INV-X", "status": "joined",
         }
         sess, err = rs._fetch_session_for_join("INV-X", session_client=client)
-        assert err is None
-        assert sess["status"] == "joined"
+        assert sess is None
+        assert "already started" in err.lower()
+
+    def test_not_found_error_maps_to_clear_message(self):
+        from sshsign_session import SessionNotFoundError
+        client = MagicMock()
+        client.get_session.side_effect = SessionNotFoundError("no session")
+        sess, err = rs._fetch_session_for_join("INV-XYZ", session_client=client)
+        assert sess is None
+        assert "doesn't match" in err.lower()
+        assert "INV-XXXXX" in err
+
+    def test_expired_error_maps_to_clear_message(self):
+        from sshsign_session import SessionExpiredError
+        client = MagicMock()
+        client.get_session.side_effect = SessionExpiredError("expired")
+        sess, err = rs._fetch_session_for_join("INV-X", session_client=client)
+        assert sess is None
+        assert "expired" in err.lower()
 
 
 class TestEnrichConstraintsFromSession:
@@ -2356,6 +2374,31 @@ class TestJoinerAwaitSignAndFinalize:
         assert rc == 2
         msgs = [c.kwargs.get("message", "") for c in sender.call_args_list]
         assert any("revoked" in m.lower() for m in msgs)
+
+    def test_expired_mid_wait_returns_2_with_session_expired_copy(self, tmp_path):
+        """Session TTL elapsed while the joiner was waiting — distinct from
+        a completion_timeout (which means sshsign is fine, the creator is
+        just slow)."""
+        client = MagicMock()
+        client.get_session.return_value = {"status": "expired"}
+        now_iter = iter([0.0, 1.0, 2.0])
+        sender = MagicMock()
+        rc = rs._joiner_await_sign_and_finalize(
+            output_dir=tmp_path, chat_id="1", sshsign_host="h",
+            pending_id="pnd_i", session_id="neg_1",
+            sender=sender,
+            poll_fn=lambda **kw: True,
+            finalize_fn=MagicMock(),
+            is_active_fn=lambda _o: True,
+            session_client=client,
+            sleep_fn=MagicMock(),
+            now_fn=lambda: next(now_iter),
+            typing_factory=lambda _c: self._fake_loop(),
+        )
+        assert rc == 2
+        msgs = [c.kwargs.get("message", "") for c in sender.call_args_list]
+        assert any("mid-flight" in m.lower() for m in msgs)
+        assert any("APOA" in m for m in msgs)
 
     def test_rescinded_during_wait_returns_2_with_rescinded_copy(self, tmp_path):
         """If the creator rescinds after signing (different terminal state

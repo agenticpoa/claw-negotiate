@@ -34,6 +34,7 @@ class TestFormatters:
             "rescinded_after_sign_initiator", "rescinded_after_sign_observer",
             "cancel_completed_refused",
             "propose_new_terms",
+            "session_expired",
         }
 
     # ---- confirm (our emit) ----
@@ -378,15 +379,47 @@ class TestFormatInvitation:
 
 
 class TestFormatWaiting:
-    def test_shows_elapsed_minutes(self):
+    def test_shows_elapsed_minutes_and_countdown(self):
         out = fe.format_waiting({"elapsed_minutes": 15, "remaining_hours": 23.75})
         assert "15 min" in out
         assert "expires" in out.lower()
-        assert "23h" in out or "24h" in out
+        # Countdown shown as HH:MM rather than the old "~Xh" rough hours
+        assert "23:" in out  # 23:45
 
     def test_omits_remaining_when_missing(self):
         out = fe.format_waiting({"elapsed_minutes": 30})
         assert "30 min" in out
+        assert "expires" not in out.lower()
+
+    def test_countdown_near_expiration(self):
+        """Small remaining time should still render meaningfully."""
+        out = fe.format_waiting({"elapsed_minutes": 1435, "remaining_hours": 0.083})
+        # 5 minutes remaining → "00:04" or "00:05"
+        assert "00:0" in out
+
+
+class TestFmtHhmm:
+    def test_basic(self):
+        assert fe._fmt_hhmm(0) == "00:00"
+        assert fe._fmt_hhmm(59) == "00:00"
+        assert fe._fmt_hhmm(60) == "00:01"
+        assert fe._fmt_hhmm(3600) == "01:00"
+        assert fe._fmt_hhmm(3661) == "01:01"
+        assert fe._fmt_hhmm(23.5 * 3600) == "23:30"
+
+    def test_negative_clamps_to_zero(self):
+        assert fe._fmt_hhmm(-100) == "00:00"
+
+
+class TestFormatSessionExpired:
+    def test_distinguished_from_invitation_expired(self):
+        """Mid-flight expiration differs from pre-join: the user already
+        had a counterparty, negotiated, maybe even signed."""
+        out = fe.format_session_expired({})
+        assert "expired" in out.lower()
+        assert "mid-flight" in out.lower()
+        assert "APOA" in out  # cite that authorization is what expired
+        assert "No SAFE was executed" in out
 
 
 class TestFormatCounterpartyJoined:
