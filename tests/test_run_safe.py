@@ -2471,6 +2471,143 @@ class TestNegotiateInvestorBranch:
                    for m in joined_msgs)
 
 
+class TestK3InvestorGroupRouting:
+    """Phase 8 K3: the investor's bot resolves group_chat_id from the
+    session (bound by founder's /bind in K1) and streams into the same
+    group as the founder. Signing URL stays in the investor's DM via
+    the structural primitive from K2."""
+
+    def _write_cfg(self, tmp_path):
+        tmp_path.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "config.json").write_text(json.dumps({
+            "constraints": {"role": "investor", "mode": "two_party"},
+            "founder_name": "F", "founder_title": "CEO", "message": "join",
+        }))
+
+    def _fake_mint_investor(self, tmp_path):
+        def fake_mint(output_dir, config, **kwargs):
+            (Path(output_dir) / "mint.json").write_text(json.dumps({
+                "negotiation_id": "neg_k3",
+                "mode": "two_party",
+                "user_role": "investor",
+                "session_code": "INV-K3",
+            }))
+            return 0
+        return fake_mint
+
+    def test_investor_resolves_group_and_passes_to_stream(self, tmp_path):
+        """When the founder has bound a group, the investor's run_negotiate
+        must pick up group_chat_id and thread it into _stream_to_telegram."""
+        self._write_cfg(tmp_path)
+        mock_stream = MagicMock(return_value=(0, None))
+
+        with patch.object(rs, "run_mint", side_effect=self._fake_mint_investor(tmp_path)), \
+             patch.object(rs, "_resolve_group_chat_id", return_value="-1001234567890"), \
+             patch.object(rs, "_stream_to_telegram", mock_stream), \
+             patch.object(rs, "resolve_chat_id", return_value="222222"), \
+             patch.object(rs, "send_telegram", MagicMock()):
+            rs.run_negotiate(str(tmp_path), chat_id_flag="222222")
+
+        mock_stream.assert_called_once()
+        assert mock_stream.call_args.kwargs["group_chat_id"] == "-1001234567890"
+        # investor's DM chat_id threaded as primary
+        assert mock_stream.call_args.kwargs["chat_id"] == "222222"
+
+    def test_investor_kickoff_card_targets_group_when_bound(self, tmp_path):
+        """Investor's 'joined — both sides live' card posts to the
+        bound group, not the investor's DM."""
+        self._write_cfg(tmp_path)
+        sender = MagicMock()
+
+        with patch.object(rs, "run_mint", side_effect=self._fake_mint_investor(tmp_path)), \
+             patch.object(rs, "_resolve_group_chat_id", return_value="-1001234567890"), \
+             patch.object(rs, "_stream_to_telegram", return_value=(0, None)), \
+             patch.object(rs, "resolve_chat_id", return_value="222222"), \
+             patch.object(rs, "send_telegram", sender):
+            rs.run_negotiate(str(tmp_path), chat_id_flag="222222")
+
+        group_sends = [c for c in sender.call_args_list
+                       if c.args and c.args[0] == "-1001234567890"]
+        assert group_sends, "investor must announce arrival in the group"
+        # Use a role-distinct copy so both sides don't read the SAME kickoff
+        # ("founder ready" vs "investor joined").
+        body = group_sends[0].kwargs.get("message", "")
+        assert "investor" in body.lower(), f"kickoff not role-specific: {body!r}"
+
+    def test_investor_kickoff_absent_when_not_bound(self, tmp_path):
+        """When no group is bound, the investor's flow stays Phase-7:
+        only the DM 'Joined — starting now' card fires."""
+        self._write_cfg(tmp_path)
+        sender = MagicMock()
+
+        with patch.object(rs, "run_mint", side_effect=self._fake_mint_investor(tmp_path)), \
+             patch.object(rs, "_resolve_group_chat_id", return_value=None), \
+             patch.object(rs, "_stream_to_telegram", return_value=(0, None)), \
+             patch.object(rs, "resolve_chat_id", return_value="222222"), \
+             patch.object(rs, "send_telegram", sender):
+            rs.run_negotiate(str(tmp_path), chat_id_flag="222222")
+
+        targets = [c.args[0] for c in sender.call_args_list if c.args]
+        # No send should target any negative chat id.
+        assert all(not t.startswith("-") for t in targets), \
+            f"unexpected group send: {targets}"
+
+    def test_investor_joiner_finalize_gets_group_chat_id(self, tmp_path):
+        """The investor's joiner-await path must also receive
+        group_chat_id so the PDF double-posts to both the group AND
+        the investor's DM, not only the DM."""
+        self._write_cfg(tmp_path)
+        mock_joiner = MagicMock(return_value=0)
+        signing = {"type": "signing", "pending_id": "pnd_i"}
+
+        with patch.object(rs, "run_mint", side_effect=self._fake_mint_investor(tmp_path)), \
+             patch.object(rs, "_resolve_group_chat_id", return_value="-1001234567890"), \
+             patch.object(rs, "_stream_to_telegram", return_value=(0, signing)), \
+             patch.object(rs, "_joiner_await_sign_and_finalize", mock_joiner), \
+             patch.object(rs, "resolve_chat_id", return_value="222222"), \
+             patch.object(rs, "send_telegram", MagicMock()):
+            rs.run_negotiate(str(tmp_path), chat_id_flag="222222")
+
+        mock_joiner.assert_called_once()
+        assert mock_joiner.call_args.kwargs["group_chat_id"] == "-1001234567890"
+
+    def test_founder_kickoff_is_distinct_from_investor(self, tmp_path):
+        """Founder's kickoff copy must NOT say 'investor' — otherwise
+        the two roles produce identical cards and the group sees a
+        duplicate when both bots run."""
+        (tmp_path / "config.json").write_text(json.dumps({
+            "constraints": {"role": "founder", "mode": "two_party"},
+            "founder_name": "F", "founder_title": "CEO", "message": "m",
+        }))
+
+        def fake_mint(output_dir, config, **kwargs):
+            (Path(output_dir) / "mint.json").write_text(json.dumps({
+                "negotiation_id": "neg_k3",
+                "mode": "two_party",
+                "user_role": "founder",
+                "session_code": "INV-K3",
+            }))
+            return 0
+
+        sender = MagicMock()
+        with patch.object(rs, "run_mint", side_effect=fake_mint), \
+             patch.object(rs, "_founder_two_party_gate", return_value=0), \
+             patch.object(rs, "_resolve_group_chat_id", return_value="-1001234567890"), \
+             patch.object(rs, "_stream_to_telegram", return_value=(0, None)), \
+             patch.object(rs, "resolve_chat_id", return_value="111111"), \
+             patch.object(rs, "send_telegram", sender):
+            rs.run_negotiate(str(tmp_path), chat_id_flag="111111")
+
+        group_sends = [c for c in sender.call_args_list
+                       if c.args and c.args[0] == "-1001234567890"]
+        assert group_sends
+        founder_kickoff = group_sends[0].kwargs.get("message", "").lower()
+        assert "founder" in founder_kickoff
+        # Crucial: founder's kickoff must not claim the investor just joined
+        assert "investor" not in founder_kickoff, \
+            f"founder kickoff misnames the role: {founder_kickoff!r}"
+
+
 class TestAuthorizationCardOnRunNegotiate:
     def _write_config(self, tmp_path, sample_constraints):
         (tmp_path / "config.json").write_text(json.dumps({

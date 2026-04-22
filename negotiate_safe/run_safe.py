@@ -1530,11 +1530,17 @@ def run_negotiate(output_dir: str, chat_id_flag: str | None = None) -> int:
         #   🔐 setup → 🔒 auth → 🤝 invite | ✅ joined → rounds
         send_telegram(chat_id, message="\U0001f680 Starting negotiation\u2026")  # 🚀
 
-    # Phase 8 K2: if the session has been bound to a Telegram group via
-    # /bind (K1), route rounds / outcome / status cards / the PDF to the
-    # group; keep signing URL + personal errors in the DM. A None here
-    # means demo mode or a two-party session the founder never bound —
-    # behavior stays identical to Phase 7.
+    # Phase 8 K2/K3: if the session has been bound to a Telegram group
+    # via /bind (K1), route rounds / outcome / status cards / the PDF to
+    # the group; keep signing URL + personal errors in the DM. A None
+    # here means demo mode or a two-party session the founder never
+    # bound — behavior stays identical to Phase 7.
+    #
+    # K3 detail: this block fires for BOTH roles, so the investor's bot
+    # picks up the same group_chat_id the founder bound and streams into
+    # the same venue. The kickoff card is role-aware so the group sees
+    # one distinct arrival message per side (instead of two identical
+    # "starting" cards).
     sshsign_host = os.environ.get("SSHSIGN_HOST", "sshsign.dev")
     group_chat_id: str | None = None
     if mint.get("mode") == "two_party":
@@ -1542,11 +1548,20 @@ def run_negotiate(output_dir: str, chat_id_flag: str | None = None) -> int:
             _sshsign_session_id(mint.get("negotiation_id") or ""),
         )
         if group_chat_id:
-            # Acknowledge the group is the venue. Short, single card —
-            # both parties will see rounds show up here next.
-            send_telegram(group_chat_id, message=(
-                "\U0001f3ac Live negotiation starting — watch here."  # 🎬
-            ))
+            role = (mint.get("user_role") or "").lower()
+            if role == "founder":
+                kickoff = (
+                    "\U0001f3ac Founder's agent is live — rounds start next."  # 🎬
+                )
+            elif role == "investor":
+                kickoff = (
+                    "\U0001f4bc Investor's agent joined — both sides live now."  # 💼
+                )
+            else:
+                kickoff = (
+                    "\U0001f3ac Live negotiation starting — watch here."  # 🎬
+                )
+            send_telegram(group_chat_id, message=kickoff)
 
     bot_username = os.environ.get("TELEGRAM_BOT_USERNAME", "AgenticPOA_bot")
     stream_rc, signing_event = _stream_to_telegram(
