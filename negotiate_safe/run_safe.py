@@ -1479,22 +1479,25 @@ def _founder_two_party_gate(
 
 
 def _build_invite_url(session_code: str) -> str:
-    """Generate a one-click invite URL for the given session code.
+    """Generate a one-click invite URL for the given session code, or
+    empty when the provisioning service isn't available.
 
-    The base points at the provisioning service that (eventually) spins up
-    a fresh OpenClaw instance for the joiner, pre-configures the skill,
-    and lands them on a join-confirmation card. Until that service is
-    deployed, the URL is a stable marker that founder can still share by
-    hand — the code is embedded so a recipient with an existing OC can
-    use it manually.
+    The one-click flow depends on an external provisioning service that
+    spins up a fresh OpenClaw instance for the joiner. Until that service
+    is deployed, we return an empty URL so the invitation card falls back
+    to the "reply to your own bot with 'Join INV-XXXXX'" instructions
+    (better than a broken link).
 
     Environment:
-      PROVISION_BASE_URL — overrides the default host (e.g. for staging).
+      PROVISION_BASE_URL — opt-in base URL for the provisioning service.
+        Only when set does the invitation card include a join URL.
     """
     code = (session_code or "").strip()
     if not code:
         return ""
-    base = os.environ.get("PROVISION_BASE_URL") or "https://provision.agenticpoa.dev"
+    base = (os.environ.get("PROVISION_BASE_URL") or "").strip()
+    if not base:
+        return ""
     return f"{base.rstrip('/')}/join/{code}"
 
 

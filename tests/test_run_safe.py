@@ -2223,16 +2223,20 @@ class TestAuthorizationCardOnRunNegotiate:
 
 
 class TestBuildInviteUrl:
-    def test_default_base(self):
-        url = rs._build_invite_url("INV-7K3X9")
-        assert url == "https://provision.agenticpoa.dev/join/INV-7K3X9"
+    def test_default_is_empty_when_provisioning_not_configured(self, monkeypatch):
+        """No PROVISION_BASE_URL set → empty URL. The invitation card
+        falls back to 'reply to your own bot with Join INV-XXXXX'
+        instructions (better UX than a broken link)."""
+        monkeypatch.delenv("PROVISION_BASE_URL", raising=False)
+        assert rs._build_invite_url("INV-7K3X9") == ""
 
-    def test_custom_base_env(self, monkeypatch):
+    def test_base_env_opts_into_one_click(self, monkeypatch):
         monkeypatch.setenv("PROVISION_BASE_URL", "https://staging.example.com/")
         url = rs._build_invite_url("INV-X")
         assert url == "https://staging.example.com/join/INV-X"
 
-    def test_empty_code_returns_empty(self):
+    def test_empty_code_returns_empty(self, monkeypatch):
+        monkeypatch.setenv("PROVISION_BASE_URL", "https://x/")
         assert rs._build_invite_url("") == ""
         assert rs._build_invite_url("   ") == ""
 
