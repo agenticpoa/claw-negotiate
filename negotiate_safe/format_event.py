@@ -459,11 +459,14 @@ def format_profile(event: dict[str, Any]) -> str:
 def format_invitation(event: dict[str, Any]) -> str:
     """Founder-side card shown after a two-party session is created.
 
-    The code (`session_code`) is the only piece the user must share — copy
-    is optimized for "paste this into Signal / SMS / email and send to your
-    investor." If a one-click invite URL is provided, it's surfaced alongside
-    the code so the investor can onboard in <5 minutes (the URL points at
-    the provisioning service that spins up an OC instance per click).
+    The user has a session code and needs two pieces of guidance:
+    (1) what to do with it (share via any channel — Signal, SMS, email,
+    or paste into an existing conversation), and (2) what the recipient
+    should do on their end (paste into their own instance of the skill).
+    Without that framing the card feels like a dead-end.
+
+    When a one-click invite URL is provided (via PROVISION_BASE_URL), we
+    surface that instead of the manual "reply to your own bot" fallback.
     """
     code = (event.get("session_code") or "").strip()
     invite_url = (event.get("invite_url") or "").strip()
@@ -474,30 +477,41 @@ def format_invitation(event: dict[str, Any]) -> str:
     lines = [
         "\U0001f91d **Live negotiation started.**",  # 🤝
         "",
-        f"Share this code with {counterparty} so they can join:",
+        "**Next step — send this code to " + counterparty + "** "
+        "(via Signal, SMS, email, or any channel you already use):",
         "",
         f"    **{code}**",
         "",
     ]
     if invite_url:
         lines.extend([
-            "Or send them a one-click join link:",
+            "**Or send them this one-click join link** "
+            "(sets them up if they don't have the skill):",
             "",
             f"    {invite_url}",
-            "",
-            "If they don't have the skill yet, the link will set them up.",
             "",
         ])
     else:
         lines.extend([
-            "They'll reply to their own bot with something like:",
-            f"> Join negotiation {code} as investor. Cap up to $X, $Y% discount, \u2026",
+            "**What they'll do on their side:** reply to their own "
+            "AgenticPOA bot with something like:",
+            "",
+            f"> Join negotiation {code} as investor, cap up to "
+            "$X, $Y% discount, pro-rata required",
+            "",
+            "(They'll need the skill installed and their own AgenticPOA bot.)",
             "",
         ])
+
+    lines.append("**While you wait:**")
     if expires_at:
-        lines.append(f"Expires in ~{ttl_h} hours. I'll wait for them to join.")
+        lines.append(
+            f"• I'll notify you the moment they join. The code is valid "
+            f"for {ttl_h} hours."
+        )
     else:
-        lines.append("I'll wait for them to join.")
+        lines.append("• I'll notify you the moment they join.")
+    lines.append("• Reply \"cancel\" anytime to revoke and tear it down.")
     return "\n".join(lines)
 
 

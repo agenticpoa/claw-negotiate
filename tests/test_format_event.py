@@ -387,7 +387,14 @@ class TestFormatInvitation:
         assert "INV-7K3X9" in out
         assert "**INV-7K3X9**" in out
         assert "Alex Smith, Central Park Labs" in out
-        assert "Share this code" in out or "share this code" in out.lower()
+        # Copy explicitly frames the next step so the user isn't stuck
+        # wondering what to do with the code.
+        assert "Next step" in out
+        assert "send this code" in out.lower()
+        # Should hint at sharing channels, not just "copy this"
+        assert any(ch in out for ch in ("Signal", "SMS", "email"))
+        # Should tell the user what they can do while waiting
+        assert "cancel" in out.lower()
 
     def test_generic_counterparty_label_when_missing(self):
         out = fe.format_invitation({"type": "invitation", "session_code": "INV-X"})

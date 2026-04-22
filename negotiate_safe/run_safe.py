@@ -1130,11 +1130,22 @@ def run_negotiate(output_dir: str, chat_id_flag: str | None = None) -> int:
     except OSError:
         pass
 
+    # Push an interstitial so the user knows we're alive during the slow
+    # mint step. run_mint does: generate APOA key pair → mint founder+
+    # investor tokens via create_tokens.py → register signing session via
+    # sshsign (two-party). That's several subprocess calls totaling
+    # 15-30s; without this the chat sits silent between "🚀 Starting
+    # negotiation" and the authorization card.
+    chat_id = resolve_chat_id(chat_id_flag)
+    if chat_id:
+        send_telegram(chat_id, message=(
+            "\U0001f510 Setting up your secure session\u2026"  # 🔐
+        ))
+
     rc = run_mint(output_dir, config)
     if rc != 0:
         return rc
 
-    chat_id = resolve_chat_id(chat_id_flag)
     if not chat_id:
         sys.stderr.write(
             "No chat_id: pass --chat-id or ensure /root/.openclaw/agents/main/sessions/sessions.json has a telegram:direct entry.\n"
