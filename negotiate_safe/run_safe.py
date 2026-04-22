@@ -61,6 +61,24 @@ SKILL_DIR = Path(__file__).resolve().parent
 STREAM_HELPER = SKILL_DIR / "_stream_negotiate.py"
 
 
+def _sshsign_session_id(negotiation_id: str) -> str:
+    """Return the session_id we use when talking to sshsign session APIs.
+
+    Upstream agenticpoa/negotiate derives its session_id as
+    ``f"session_{negotiation_id}"`` inside auto_setup, and passes THAT
+    value as --session-id on sign calls. For sshsign's cross-party
+    get-envelope ACL (which matches pending_signatures.signing_session_id
+    against the signing_sessions row's session_id) to let members read
+    each other's pendings, we have to use the SAME prefixed form when
+    create-session / join-session / get-session etc.
+    """
+    if not negotiation_id:
+        return ""
+    if negotiation_id.startswith("session_"):
+        return negotiation_id
+    return f"session_{negotiation_id}"
+
+
 def run_prepare(
     message: str,
     output_dir: str,
@@ -452,7 +470,7 @@ def _register_signing_session(
     )
     try:
         sess = client.create_session(
-            session_id=mint_output["negotiation_id"],
+            session_id=_sshsign_session_id(mint_output["negotiation_id"]),
             role=user_role,
             apoa_pubkey_pem=apoa_pubkey_pem,
             party_did=os.environ.get("USER_DID") or None,
@@ -935,7 +953,7 @@ def _build_artifact_uri(
 
 def _write_counterparty_pending(
     output_dir: Path,
-    session_id: str,
+    session_id: str,  # noqa: ARG001 — kept for signature compat; neg_id comes from mint.json
     role: str,
     pending_id: str,
 ) -> None:
@@ -946,18 +964,23 @@ def _write_counterparty_pending(
     Without this, the joiner's finalize call only sees its own role's
     pending file and produces a single-signature PDF instead of the
     executed (both-signatures) version.
+
+    Uses the raw negotiation_id from mint.json for the filename (NOT
+    the sshsign-prefixed session_id form) so it matches what upstream
+    writes on its side.
     """
     try:
         mint = json.loads((output_dir / "mint.json").read_text())
+        neg_id = mint.get("negotiation_id") or ""
         founder_cfg = mint.get("founder_config_path") or ""
         investor_cfg = mint.get("investor_config_path") or ""
         anchor = founder_cfg or investor_cfg
-        if not anchor:
+        if not anchor or not neg_id:
             return
         neg_dir = Path(anchor).parent
         neg_output = neg_dir / "output"
         neg_output.mkdir(parents=True, exist_ok=True)
-        pending_file = neg_output / f"{session_id}_{role}_pending.txt"
+        pending_file = neg_output / f"{neg_id}_{role}_pending.txt"
         pending_file.write_text(pending_id.strip() + "\n")
     except (OSError, json.JSONDecodeError, KeyError) as e:
         sys.stderr.write(f"writing counterparty pending: {e}\n")
@@ -1023,8 +1046,12 @@ def _creator_await_sign_and_finalize(
     try:
         mint = json.loads((output_dir / "mint.json").read_text())
         creator_role = mint.get("user_role", "")
+        neg_id = mint.get("negotiation_id", "")
         neg_dir = Path(mint["founder_config_path"]).parent
-        pdf_path = neg_dir / "output" / f"{session_id}_executed.pdf"
+        # Upstream writes the executed PDF as "<neg_id>_executed.pdf"
+        # (NOT "<session_id>_executed.pdf") — session_id is the prefixed
+        # form we use for sshsign session APIs, not for file layout.
+        pdf_path = neg_dir / "output" / f"{neg_id}_executed.pdf"
     except (OSError, json.JSONDecodeError, KeyError):
         pdf_path = output_dir / "executed.pdf"
 
@@ -1313,14 +1340,14 @@ def run_negotiate(output_dir: str, chat_id_flag: str | None = None) -> int:
                 chat_id=chat_id,
                 sshsign_host=sshsign_host,
                 pending_id=pending_id,
-                session_id=mint.get("negotiation_id") or "",
+                session_id=_sshsign_session_id(mint.get("negotiation_id") or ""),
             )
         return _joiner_await_sign_and_finalize(
             output_dir=out,
             chat_id=chat_id,
             sshsign_host=sshsign_host,
             pending_id=pending_id,
-            session_id=mint.get("negotiation_id") or "",
+            session_id=_sshsign_session_id(mint.get("negotiation_id") or ""),
         )
 
     return _await_sign_and_push(
@@ -1526,7 +1553,7 @@ def _founder_two_party_gate(
     rc=3    → missing session_code or persistent sshsign error
     """
     session_code = mint.get("session_code")
-    session_id = mint.get("negotiation_id")
+    session_id = _sshsign_session_id(mint.get("negotiation_id") or "")
     if not session_code or not session_id:
         sender(chat_id, message=(
             "\u26a0\ufe0f Internal error: two-party session was not registered. "  # ⚠️
@@ -1811,7 +1838,7 @@ def run_cancel(
     except json.JSONDecodeError:
         return 2
 
-    session_id = mint.get("negotiation_id")
+    session_id = _sshsign_session_id(mint.get("negotiation_id") or "")
     if not session_id:
         if chat_id:
             sender(chat_id, message=(

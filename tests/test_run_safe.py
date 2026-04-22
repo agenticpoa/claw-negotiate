@@ -821,7 +821,10 @@ class TestRegisterSigningSession:
         }
         client.create_session.assert_called_once()
         call = client.create_session.call_args
-        assert call.kwargs["session_id"] == "neg_123"
+        # Prefixed with "session_" so it matches what upstream agenticpoa
+        # /negotiate uses for --session-id on sign calls (session row and
+        # pending.signing_session_id must agree for the cross-party ACL).
+        assert call.kwargs["session_id"] == "session_neg_123"
         assert call.kwargs["role"] == "founder"
         assert "FOUNDER_FAKE_KEY" in call.kwargs["apoa_pubkey_pem"]
         assert call.kwargs["party_did"] == "did:apoa:juan"
@@ -2083,7 +2086,8 @@ class TestNegotiateInvestorBranch:
         mock_creator.assert_called_once()
         mock_joiner.assert_not_called()
         mock_demo_await.assert_not_called()
-        assert mock_creator.call_args.kwargs["session_id"] == "neg_1"
+        # Sshsign session APIs use prefixed form
+        assert mock_creator.call_args.kwargs["session_id"] == "session_neg_1"
 
     def test_two_party_joiner_uses_joiner_await_path(self, tmp_path, sample_constraints):
         """Investor in two-party mode routes through the joiner helper
@@ -2653,9 +2657,10 @@ class TestRunCancel:
             rc = rs.run_cancel(str(tmp_path), sender=sender, session_client=client)
 
         assert rc == 0
-        # Cancel called without rescind flag
+        # Cancel called without rescind flag. session_id uses the
+        # sshsign-prefixed form to match signing_session rows.
         call = client.cancel_session.call_args
-        assert call.kwargs["session_id"] == "neg_1"
+        assert call.kwargs["session_id"] == "session_neg_1"
         assert call.kwargs["rescind"] is False
         # Initiator card pushed
         msgs = [c.kwargs.get("message", "") for c in sender.call_args_list]
