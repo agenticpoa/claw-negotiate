@@ -28,7 +28,12 @@ from pathlib import Path
 from parse_constraints import extract_constraints
 from parse_identity import extract_identity
 from format_event import format_event
-from telegram_push import resolve_chat_id, send_telegram
+from telegram_push import (
+    resolve_chat_id,
+    send_telegram,
+    send_signing_url_to_dm,
+    SigningUrlTargetError,
+)
 from typing_loop import TypingLoop, get_bot_token
 from sshsign_session import (
     SshsignSession,
@@ -95,6 +100,44 @@ def _negotiation_id_from_sshsign_session_id(sshsign_session_id: str) -> str:
     if sshsign_session_id.startswith("session_"):
         return sshsign_session_id[len("session_"):]
     return sshsign_session_id
+
+
+def _resolve_group_chat_id(
+    session_id: str,
+    session_client=None,
+) -> str | None:
+    """Read the session's bound Telegram group chat_id, or None if unbound.
+
+    Phase 8 uses sshsign's `group_chat_id` column (set via the K0
+    `bind-group` RPC) to pin the "live negotiation" venue. If the session
+    has been bound to a group, returns the chat_id as a string (negative
+    int); otherwise returns None and the caller keeps streaming to the
+    user's DM.
+
+    Defensive: any error talking to sshsign (missing session, network
+    problem, malformed response) returns None rather than raising, so a
+    momentary sshsign hiccup never prevents the user from seeing their
+    own DM stream.
+    """
+    if not session_id:
+        return None
+    client = session_client or SshsignSession(
+        host=os.environ.get("SSHSIGN_HOST", "sshsign.dev"),
+    )
+    try:
+        sess = client.get_session(session_id=session_id)
+    except (SshsignSessionError, Exception):  # noqa: BLE001 — defensive
+        return None
+    raw = sess.get("group_chat_id")
+    if raw in (None, 0, "0", ""):
+        return None
+    try:
+        as_int = int(raw)
+    except (TypeError, ValueError):
+        return None
+    if as_int == 0:
+        return None
+    return str(as_int)
 
 
 def run_prepare(
@@ -644,23 +687,41 @@ def _stream_to_telegram(
     sender=send_telegram,
     popen=subprocess.Popen,
     typing_factory=None,
+    group_chat_id: str | None = None,
+    dm_sender=send_signing_url_to_dm,
 ) -> tuple[int, dict | None]:
     """Spawn the streaming helper; push each event to Telegram as it fires.
 
+    Target routing (Phase 8 K2):
+      - `chat_id` is the user's DM (always required). When there is no
+        bound group, everything goes to chat_id (Phase 7 behavior).
+      - `group_chat_id`, when set, is the Telegram group the session is
+        bound to (via K0/K1 /bind). All stream-of-consciousness events
+        (rounds, outcome, propose_new_terms, signed) go to the GROUP so
+        both parties watch live.
+      - The SIGNING URL is the exception: it always goes to the DM via
+        the `send_signing_url_to_dm` primitive. Structural privacy —
+        the primitive's type signature refuses a group target. The group
+        receives a placeholder ("⏳ [Party] signing — check your DM")
+        so both observers see the state without the URL leaking.
+
     Returns 0 on clean exit, the subprocess returncode otherwise.
-    `sender` and `popen` are injectable for testing.
+    `sender`, `popen`, and `dm_sender` are injectable for testing.
     """
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
 
     cmd = [sys.executable, "-u", str(stream_helper), "--output-dir", str(output_dir)]
 
-    # Typing loop covers the gap between each round (upstream agents take
-    # ~6-8s per turn, during which nothing is posted to the chat).
+    # Stream-target = group if bound, else DM. Typing indicator follows the
+    # stream target (that's where rounds appear; the DM stays quiet during
+    # negotiation once we've gone group-mode).
+    stream_target = group_chat_id or chat_id
+
     if typing_factory is None:
-        typing = TypingLoop(chat_id=chat_id, bot_token=get_bot_token())
+        typing = TypingLoop(chat_id=stream_target, bot_token=get_bot_token())
     else:
-        typing = typing_factory(chat_id)
+        typing = typing_factory(stream_target)
     typing.start()
 
     try:
@@ -692,7 +753,28 @@ def _stream_to_telegram(
 
             message = format_event(event, constraints=constraints)
             if message:
-                sender(chat_id, message=message)
+                if event.get("type") == "signing":
+                    # Signing URL → DM always (structural privacy).
+                    # Group receives a placeholder so observers see
+                    # state transitioning without the URL itself.
+                    try:
+                        dm_sender(chat_id, message=message)
+                    except SigningUrlTargetError:
+                        # chat_id isn't a positive DM id — this shouldn't
+                        # happen in normal operation, but if it does
+                        # (e.g. misconfig), fail closed: don't send.
+                        sys.stderr.write(
+                            f"stream: refusing to send signing URL to "
+                            f"non-DM target chat_id={chat_id!r}\n"
+                        )
+                    if group_chat_id:
+                        placeholder = (
+                            "⏳ Signing… check your own DM for the "  # ⏳
+                            "signing link. Never share this link."
+                        )
+                        sender(stream_target, message=placeholder)
+                else:
+                    sender(stream_target, message=message)
 
             # No-ZOPA follow-up: right after a max_rounds outcome, invite
             # the user to propose new terms. Renders on both sides
@@ -706,7 +788,7 @@ def _stream_to_telegram(
                     "counterparty_label": cp_label,
                 })
                 if follow:
-                    sender(chat_id, message=follow)
+                    sender(stream_target, message=follow)
 
         proc.wait()
     finally:
@@ -971,18 +1053,21 @@ def _await_sign_and_push(
     finalize_fn=_finalize_executed_pdf,
     is_active_fn=_is_still_active_session,
     typing_factory=None,
+    group_chat_id: str | None = None,
 ) -> int:
     """Wait for signature, finalize PDF, push confirmation + attachment.
 
     Returns 0 if the user received the executed PDF, 1 on timeout, 2 on
     finalize failure, 3 if this process was superseded by a newer session.
     """
-    # Typing covers the gap between "Almost done — sign here" and either
-    # "Signed ✓" (user signed quickly) or the eventual PDF generation.
+    # Typing covers the gap between "Almost done — sign here" and
+    # "Signed ✓" or the eventual PDF generation. Follows the visible
+    # venue — status cards go there, so the typing indicator belongs there.
+    ui_target = group_chat_id or chat_id
     if typing_factory is None:
-        typing = TypingLoop(chat_id=chat_id, bot_token=get_bot_token())
+        typing = TypingLoop(chat_id=ui_target, bot_token=get_bot_token())
     else:
-        typing = typing_factory(chat_id)
+        typing = typing_factory(ui_target)
     typing.start()
 
     try:
@@ -1007,15 +1092,15 @@ def _await_sign_and_push(
         # Confirm signature receipt immediately, then let the user know the
         # PDF is coming. Finalize (upstream pdf generation) takes a few
         # seconds; posting "Generating executed file\u2026" fills that gap.
-        sender(chat_id, message="\u2705 Confirmed signature.")  # ✅
+        sender(ui_target, message="\u2705 Confirmed signature.")  # ✅
         _mark_signed(output_dir)
-        sender(chat_id, message="\U0001f4c4 Generating executed file\u2026")  # 📄
+        sender(ui_target, message="\U0001f4c4 Generating executed file\u2026")  # 📄
 
         pdf_path = finalize_fn(output_dir, pending_id, sshsign_host)
         if not pdf_path:
             if not is_active_fn(output_dir):
                 return 3
-            sender(chat_id, message=(
+            sender(ui_target, message=(
                 "Signature received but I couldn't generate the executed PDF. "
                 "Check the negotiation output directory on the server."
             ))
@@ -1024,7 +1109,12 @@ def _await_sign_and_push(
         if not is_active_fn(output_dir):
             return 3
 
-        sender(chat_id, media_path=str(pdf_path))
+        # PDF is the final artifact; post to the visible venue AND the
+        # DM for archival. When no group is bound the two targets collapse
+        # to one — guard against double-posting.
+        sender(ui_target, media_path=str(pdf_path))
+        if group_chat_id and str(group_chat_id) != str(chat_id):
+            sender(chat_id, media_path=str(pdf_path))
         return 0
     finally:
         typing.stop()
@@ -1119,9 +1209,13 @@ def _creator_await_sign_and_finalize(
     is_active_fn=_is_still_active_session,
     session_client=None,
     typing_factory=None,
+    group_chat_id: str | None = None,
 ) -> int:
     """Creator-finalizes flow. Same as the demo path, plus a trailing
     `complete-session` call that unblocks the non-creator's poll loop.
+
+    group_chat_id, when set, forwards to _await_sign_and_push so status
+    cards + PDF double-post into the bound Telegram group.
 
     Returns 0 on success (PDF pushed + session marked complete), non-zero
     for partial failures. A failed complete-session is NOT treated as
@@ -1140,6 +1234,7 @@ def _creator_await_sign_and_finalize(
         finalize_fn=finalize_fn,
         is_active_fn=is_active_fn,
         typing_factory=typing_factory,
+        group_chat_id=group_chat_id,
     )
     if rc != 0 or not session_id:
         return rc
@@ -1194,6 +1289,7 @@ def _joiner_await_sign_and_finalize(
     sleep_fn=None,
     now_fn=None,
     typing_factory=None,
+    group_chat_id: str | None = None,
 ) -> int:
     """Joiner-finalizes flow. The investor signs their own envelope, then
     waits for the creator to finalize (status=completed) before running
@@ -1214,12 +1310,13 @@ def _joiner_await_sign_and_finalize(
         import time as _time
         now_fn = _time.time
 
-    # Typing indicator spans the whole wait — user just sees "…" between
-    # clicking sign and the PDF landing.
+    # Typing indicator spans the whole wait — between clicking sign and
+    # the PDF landing. Follows the visible venue (group if bound).
+    ui_target = group_chat_id or chat_id
     if typing_factory is None:
-        typing = TypingLoop(chat_id=chat_id, bot_token=get_bot_token())
+        typing = TypingLoop(chat_id=ui_target, bot_token=get_bot_token())
     else:
-        typing = typing_factory(chat_id)
+        typing = typing_factory(ui_target)
     typing.start()
 
     try:
@@ -1241,9 +1338,9 @@ def _joiner_await_sign_and_finalize(
         if not is_active_fn(output_dir):
             return 3
 
-        sender(chat_id, message="\u2705 Confirmed signature.")  # ✅
+        sender(ui_target, message="\u2705 Confirmed signature.")  # ✅
         _mark_signed(output_dir)
-        sender(chat_id, message=(
+        sender(ui_target, message=(
             "\u23f3 Waiting for your counterparty to sign\u2026"  # ⏳
         ))
 
@@ -1255,7 +1352,7 @@ def _joiner_await_sign_and_finalize(
             if elapsed > completion_timeout:
                 if not is_active_fn(output_dir):
                     return 3
-                sender(chat_id, message=(
+                sender(ui_target, message=(
                     "\u26a0\ufe0f Counterparty didn't finalize in time. "  # ⚠
                     "Check sshsign.dev/audit/" + session_id
                     + " for the latest session status. The executed PDF "
@@ -1286,7 +1383,7 @@ def _joiner_await_sign_and_finalize(
             if status == "expired":
                 body = format_event({"type": "session_expired"})
                 if body:
-                    sender(chat_id, message=body)
+                    sender(ui_target, message=body)
                 return 2
             if status == "rescinded_after_sign":
                 body = format_event({
@@ -1294,7 +1391,7 @@ def _joiner_await_sign_and_finalize(
                     "by": "Your counterparty",
                 })
                 if body:
-                    sender(chat_id, message=body)
+                    sender(ui_target, message=body)
                 return 2
             if status == "canceled":
                 body = format_event({
@@ -1302,19 +1399,19 @@ def _joiner_await_sign_and_finalize(
                     "by": "Your counterparty",
                 })
                 if body:
-                    sender(chat_id, message=body)
+                    sender(ui_target, message=body)
                 return 2
             sleep_fn(completion_poll_interval)
 
         if not is_active_fn(output_dir):
             return 3
 
-        sender(chat_id, message="\U0001f4c4 Generating executed file\u2026")  # 📄
+        sender(ui_target, message="\U0001f4c4 Generating executed file\u2026")  # 📄
         pdf_path = finalize_fn(output_dir, pending_id, sshsign_host)
         if not pdf_path:
             if not is_active_fn(output_dir):
                 return 3
-            sender(chat_id, message=(
+            sender(ui_target, message=(
                 "Signature received but I couldn't generate the executed PDF. "
                 "Check the session on sshsign.dev for the shared artifact."
             ))
@@ -1323,7 +1420,10 @@ def _joiner_await_sign_and_finalize(
         if not is_active_fn(output_dir):
             return 3
 
-        sender(chat_id, media_path=str(pdf_path))
+        # Final artifact: post to the visible venue AND the DM for archival.
+        sender(ui_target, media_path=str(pdf_path))
+        if group_chat_id and str(group_chat_id) != str(chat_id):
+            sender(chat_id, media_path=str(pdf_path))
         return 0
     finally:
         typing.stop()
@@ -1430,12 +1530,31 @@ def run_negotiate(output_dir: str, chat_id_flag: str | None = None) -> int:
         #   🔐 setup → 🔒 auth → 🤝 invite | ✅ joined → rounds
         send_telegram(chat_id, message="\U0001f680 Starting negotiation\u2026")  # 🚀
 
+    # Phase 8 K2: if the session has been bound to a Telegram group via
+    # /bind (K1), route rounds / outcome / status cards / the PDF to the
+    # group; keep signing URL + personal errors in the DM. A None here
+    # means demo mode or a two-party session the founder never bound —
+    # behavior stays identical to Phase 7.
+    sshsign_host = os.environ.get("SSHSIGN_HOST", "sshsign.dev")
+    group_chat_id: str | None = None
+    if mint.get("mode") == "two_party":
+        group_chat_id = _resolve_group_chat_id(
+            _sshsign_session_id(mint.get("negotiation_id") or ""),
+        )
+        if group_chat_id:
+            # Acknowledge the group is the venue. Short, single card —
+            # both parties will see rounds show up here next.
+            send_telegram(group_chat_id, message=(
+                "\U0001f3ac Live negotiation starting — watch here."  # 🎬
+            ))
+
     bot_username = os.environ.get("TELEGRAM_BOT_USERNAME", "AgenticPOA_bot")
     stream_rc, signing_event = _stream_to_telegram(
         output_dir=out,
         chat_id=chat_id,
         constraints=config.get("constraints"),
         bot_username=bot_username,
+        group_chat_id=group_chat_id,
     )
     if stream_rc != 0 or not signing_event:
         return stream_rc
@@ -1443,8 +1562,6 @@ def run_negotiate(output_dir: str, chat_id_flag: str | None = None) -> int:
     pending_id = signing_event.get("pending_id") or ""
     if not pending_id:
         return 0
-
-    sshsign_host = os.environ.get("SSHSIGN_HOST", "sshsign.dev")
 
     # Two-party mode: role determines who finalizes.
     #   Creator (founder): wait for own sig, finalize locally, push PDF,
@@ -1461,6 +1578,7 @@ def run_negotiate(output_dir: str, chat_id_flag: str | None = None) -> int:
                 sshsign_host=sshsign_host,
                 pending_id=pending_id,
                 session_id=_sshsign_session_id(mint.get("negotiation_id") or ""),
+                group_chat_id=group_chat_id,
             )
         return _joiner_await_sign_and_finalize(
             output_dir=out,
@@ -1468,6 +1586,7 @@ def run_negotiate(output_dir: str, chat_id_flag: str | None = None) -> int:
             sshsign_host=sshsign_host,
             pending_id=pending_id,
             session_id=_sshsign_session_id(mint.get("negotiation_id") or ""),
+            group_chat_id=group_chat_id,
         )
 
     return _await_sign_and_push(

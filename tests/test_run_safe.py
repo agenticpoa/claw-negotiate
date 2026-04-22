@@ -1173,6 +1173,9 @@ class TestStreamToTelegram:
         assert sender.call_count == 1
 
     def test_signing_event_gets_callback_augmented(self, tmp_path):
+        # Phase 8 K2: the signing URL flows through dm_sender
+        # (send_signing_url_to_dm), not the general `sender`. This
+        # structural privacy property is what K2 introduced.
         signing = {
             "type": "signing",
             "pending_id": "pnd_xyz",
@@ -1181,14 +1184,20 @@ class TestStreamToTelegram:
         lines = [json.dumps(signing) + "\n"]
         popen_mock = MagicMock(return_value=self._fake_proc(lines))
         sender = MagicMock()
+        dm_sender = MagicMock()
 
         rs._stream_to_telegram(
             output_dir=tmp_path, chat_id="1", constraints=None,
-            bot_username="MyBot", popen=popen_mock, sender=sender,
+            bot_username="MyBot", popen=popen_mock,
+            sender=sender, dm_sender=dm_sender,
         )
 
-        assert sender.call_count == 1
-        msg = sender.call_args.kwargs.get("message") or sender.call_args.args[1]
+        # DM-only mode (no group_chat_id): signing URL goes via dm_sender,
+        # and NO placeholder is posted anywhere else (there's no group).
+        assert dm_sender.call_count == 1
+        assert sender.call_count == 0
+        msg = dm_sender.call_args.kwargs.get("message")
+        assert msg is not None
         assert "callback=" in msg
         assert "MyBot" in msg
 
@@ -1406,6 +1415,287 @@ class TestPollEnvelopeApproval:
             status_fn=status_fn, sleep_fn=sleep_fn,
         )
         assert ok is True
+
+
+class TestStreamToTelegramGroupRouting:
+    """Phase 8 K2: when group_chat_id is provided, rounds/outcome go to
+    the group; signing URL stays in the DM via send_signing_url_to_dm."""
+
+    def _fake_proc(self, stdout_lines: list[str], returncode: int = 0):
+        proc = MagicMock()
+        proc.stdout = iter(stdout_lines)
+        proc.wait = MagicMock(return_value=returncode)
+        proc.returncode = returncode
+        return proc
+
+    def test_rounds_and_outcome_route_to_group_when_bound(self, tmp_path):
+        events = [
+            {"type": "offer", "round": 1, "party": "founder",
+             "terms": {"valuation_cap": 20_000_000}},
+            {"type": "outcome", "result": "accepted",
+             "terms": {"valuation_cap": 15_000_000}},
+        ]
+        lines = [json.dumps(e) + "\n" for e in events]
+        popen_mock = MagicMock(return_value=self._fake_proc(lines))
+        sender = MagicMock()
+        dm_sender = MagicMock()
+
+        rs._stream_to_telegram(
+            output_dir=tmp_path, chat_id="111", constraints=None,
+            bot_username="B", popen=popen_mock,
+            sender=sender, dm_sender=dm_sender,
+            group_chat_id="-1001234567890",
+        )
+
+        # Every non-signing message lands on the group, not the DM.
+        targets = [c.args[0] for c in sender.call_args_list]
+        assert targets, "expected at least one stream card"
+        assert all(t == "-1001234567890" for t in targets), \
+            f"rounds leaked outside group: {targets}"
+        # DM had no stream traffic because there was no signing event here.
+        dm_sender.assert_not_called()
+
+    def test_signing_url_routes_to_dm_with_group_placeholder(self, tmp_path):
+        signing = {
+            "type": "signing",
+            "pending_id": "pnd_x",
+            "approval_url": "https://sshsign.dev/approve/pnd_x",
+        }
+        lines = [json.dumps(signing) + "\n"]
+        popen_mock = MagicMock(return_value=self._fake_proc(lines))
+        sender = MagicMock()
+        dm_sender = MagicMock()
+
+        rs._stream_to_telegram(
+            output_dir=tmp_path, chat_id="111", constraints=None,
+            bot_username="B", popen=popen_mock,
+            sender=sender, dm_sender=dm_sender,
+            group_chat_id="-1001234567890",
+        )
+
+        # Signing URL → DM via the structural primitive.
+        dm_sender.assert_called_once()
+        dm_args, dm_kwargs = dm_sender.call_args
+        assert dm_args[0] == "111"  # positive DM id
+        dm_msg = dm_kwargs.get("message") or ""
+        assert "sshsign.dev/approve/pnd_x" in dm_msg
+
+        # Group → placeholder only; URL itself never appears.
+        group_msgs = [c.kwargs.get("message", "") for c in sender.call_args_list
+                      if c.args and c.args[0] == "-1001234567890"]
+        assert group_msgs, "expected a group placeholder"
+        for m in group_msgs:
+            assert "sshsign.dev/approve" not in m, \
+                f"signing URL leaked to group: {m!r}"
+            assert "check your own DM" in m.lower() or "signing" in m.lower()
+
+    def test_signing_url_never_to_group_even_when_unbound(self, tmp_path):
+        """DM-only mode: signing URL uses dm_sender and lands on chat_id;
+        nothing goes to `sender` because there's no group."""
+        signing = {
+            "type": "signing",
+            "pending_id": "pnd_x",
+            "approval_url": "https://sshsign.dev/approve/pnd_x",
+        }
+        lines = [json.dumps(signing) + "\n"]
+        popen_mock = MagicMock(return_value=self._fake_proc(lines))
+        sender = MagicMock()
+        dm_sender = MagicMock()
+
+        rs._stream_to_telegram(
+            output_dir=tmp_path, chat_id="111", constraints=None,
+            bot_username="B", popen=popen_mock,
+            sender=sender, dm_sender=dm_sender,
+            # group_chat_id omitted (None) → DM-only
+        )
+
+        dm_sender.assert_called_once()
+        sender.assert_not_called()
+
+    def test_dm_sender_refuses_negative_chat_id_logs_and_continues(
+        self, tmp_path, capsys,
+    ):
+        """If the caller accidentally passes a negative chat_id and a
+        signing event arrives, send_signing_url_to_dm raises — the
+        stream loop MUST NOT swallow it as a generic sender call."""
+        from telegram_push import SigningUrlTargetError
+
+        def bad_dm_sender(target, **kwargs):
+            raise SigningUrlTargetError("positive DM chat_id required")
+
+        signing = {
+            "type": "signing",
+            "pending_id": "pnd_x",
+            "approval_url": "https://sshsign.dev/approve/pnd_x",
+        }
+        lines = [json.dumps(signing) + "\n"]
+        popen_mock = MagicMock(return_value=self._fake_proc(lines))
+        sender = MagicMock()
+
+        # Use an invalid chat_id so the DM primitive rejects.
+        rs._stream_to_telegram(
+            output_dir=tmp_path, chat_id="-1", constraints=None,
+            bot_username="B", popen=popen_mock,
+            sender=sender, dm_sender=bad_dm_sender,
+            group_chat_id="-1001",
+        )
+
+        # sender (group) should still get the placeholder — the DM failure
+        # is logged and the loop moves on, NOT retried against the group
+        # (which would leak the URL).
+        group_calls = [c for c in sender.call_args_list
+                       if c.args and str(c.args[0]) == "-1001"]
+        # None of the group calls should contain the raw signing URL.
+        for c in group_calls:
+            body = c.kwargs.get("message", "")
+            assert "sshsign.dev/approve" not in body
+
+    def test_typing_loop_follows_group_when_bound(self, tmp_path):
+        """When group_chat_id is set the typing indicator targets the
+        group — that's where rounds appear; the DM should stay quiet."""
+        lines = [json.dumps({"type": "outcome", "result": "max_rounds"}) + "\n"]
+        popen_mock = MagicMock(return_value=self._fake_proc(lines))
+        fake_loop = MagicMock()
+        factory = MagicMock(return_value=fake_loop)
+
+        rs._stream_to_telegram(
+            output_dir=tmp_path, chat_id="111", constraints=None,
+            bot_username="B", popen=popen_mock, sender=MagicMock(),
+            typing_factory=factory,
+            group_chat_id="-1001",
+        )
+
+        factory.assert_called_once_with("-1001")
+        fake_loop.start.assert_called_once()
+        fake_loop.stop.assert_called_once()
+
+
+class TestResolveGroupChatId:
+    def test_returns_group_chat_id_when_set(self):
+        client = MagicMock()
+        client.get_session.return_value = {
+            "session_id": "session_neg_x",
+            "group_chat_id": -1001234567890,
+        }
+        result = rs._resolve_group_chat_id("session_neg_x", session_client=client)
+        assert result == "-1001234567890"
+
+    def test_returns_none_when_group_chat_id_zero(self):
+        client = MagicMock()
+        client.get_session.return_value = {"session_id": "x", "group_chat_id": 0}
+        assert rs._resolve_group_chat_id("x", session_client=client) is None
+
+    def test_returns_none_when_group_chat_id_missing(self):
+        client = MagicMock()
+        client.get_session.return_value = {"session_id": "x"}
+        assert rs._resolve_group_chat_id("x", session_client=client) is None
+
+    def test_returns_none_on_ssh_error(self):
+        from sshsign_session import SshsignSessionError
+        client = MagicMock()
+        client.get_session.side_effect = SshsignSessionError("transport")
+        # Defensive: a momentary sshsign hiccup must not block the
+        # negotiation from continuing on the DM-only path.
+        assert rs._resolve_group_chat_id("x", session_client=client) is None
+
+    def test_empty_session_id_returns_none_without_call(self):
+        client = MagicMock()
+        assert rs._resolve_group_chat_id("", session_client=client) is None
+        client.get_session.assert_not_called()
+
+    def test_accepts_string_id_representation(self):
+        client = MagicMock()
+        client.get_session.return_value = {"group_chat_id": "-1001"}
+        assert rs._resolve_group_chat_id("x", session_client=client) == "-1001"
+
+
+class TestAwaitSignAndPushGroupRouting:
+    """_await_sign_and_push routes status cards to the bound group and
+    double-posts the final PDF to both group and DM."""
+
+    def test_pdf_posted_to_group_and_dm_when_bound(self, tmp_path):
+        pdf = tmp_path / "executed.pdf"
+        pdf.write_bytes(b"%PDF-1.4")
+        sender = MagicMock()
+
+        rc = rs._await_sign_and_push(
+            output_dir=tmp_path,
+            chat_id="111",
+            sshsign_host="sshsign.dev",
+            pending_id="pnd_x",
+            sender=sender,
+            poll_fn=lambda **kw: True,
+            finalize_fn=lambda *a, **kw: pdf,
+            is_active_fn=lambda *a, **kw: True,
+            typing_factory=lambda cid: MagicMock(),
+            group_chat_id="-1001",
+        )
+        assert rc == 0
+        # PDF must land on BOTH group and DM (two distinct media_path calls).
+        media_targets = [c.args[0] for c in sender.call_args_list
+                         if c.kwargs.get("media_path")]
+        assert set(media_targets) == {"-1001", "111"}, media_targets
+
+    def test_pdf_single_post_when_unbound(self, tmp_path):
+        pdf = tmp_path / "executed.pdf"
+        pdf.write_bytes(b"%PDF-1.4")
+        sender = MagicMock()
+
+        rs._await_sign_and_push(
+            output_dir=tmp_path,
+            chat_id="111",
+            sshsign_host="sshsign.dev",
+            pending_id="pnd_x",
+            sender=sender,
+            poll_fn=lambda **kw: True,
+            finalize_fn=lambda *a, **kw: pdf,
+            is_active_fn=lambda *a, **kw: True,
+            typing_factory=lambda cid: MagicMock(),
+        )
+        media_targets = [c.args[0] for c in sender.call_args_list
+                         if c.kwargs.get("media_path")]
+        assert media_targets == ["111"], media_targets
+
+    def test_status_cards_go_to_group(self, tmp_path):
+        pdf = tmp_path / "executed.pdf"
+        pdf.write_bytes(b"%PDF-1.4")
+        sender = MagicMock()
+
+        rs._await_sign_and_push(
+            output_dir=tmp_path,
+            chat_id="111",
+            sshsign_host="sshsign.dev",
+            pending_id="pnd_x",
+            sender=sender,
+            poll_fn=lambda **kw: True,
+            finalize_fn=lambda *a, **kw: pdf,
+            is_active_fn=lambda *a, **kw: True,
+            typing_factory=lambda cid: MagicMock(),
+            group_chat_id="-1001",
+        )
+        msg_calls = [c for c in sender.call_args_list if c.kwargs.get("message")]
+        for c in msg_calls:
+            assert c.args[0] == "-1001", \
+                f"status card leaked to {c.args[0]}: {c.kwargs.get('message')!r}"
+
+    def test_timeout_error_stays_in_dm(self, tmp_path):
+        sender = MagicMock()
+        rc = rs._await_sign_and_push(
+            output_dir=tmp_path,
+            chat_id="111",
+            sshsign_host="sshsign.dev",
+            pending_id="pnd_x",
+            sender=sender,
+            poll_fn=lambda **kw: False,  # timeout path
+            finalize_fn=lambda *a, **kw: None,
+            is_active_fn=lambda *a, **kw: True,
+            typing_factory=lambda cid: MagicMock(),
+            group_chat_id="-1001",
+        )
+        assert rc == 1
+        # Timeout is personal — DM only.
+        assert sender.call_args.args[0] == "111"
+        assert "not received" in sender.call_args.kwargs["message"].lower()
 
 
 class TestAwaitSignAndPush:

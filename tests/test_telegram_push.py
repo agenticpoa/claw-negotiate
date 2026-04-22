@@ -199,3 +199,58 @@ class TestSendTelegram:
         result = tp.send_telegram("12345", message="x", runner=runner)
         assert result.ok is True
         assert result.message_id is None
+
+
+# ---- send_signing_url_to_dm ----
+
+
+class TestSendSigningUrlToDm:
+    """Structural privacy: the signing URL primitive rejects non-DM
+    targets BEFORE any subprocess call. Replaces the runtime
+    substring-guard design from the earlier K4 plan."""
+
+    def test_happy_path_positive_int_delivers(self):
+        runner = MagicMock(return_value=_ok_result(_ok_stdout(42)))
+        result = tp.send_signing_url_to_dm(
+            123456789,
+            message="Sign here: https://sshsign.dev/approve/pnd_X",
+            runner=runner,
+        )
+        assert result.ok is True
+        cmd = runner.call_args[0][0]
+        assert cmd[cmd.index("--target") + 1] == "123456789"
+        assert cmd[cmd.index("--message") + 1].startswith("Sign here:")
+
+    def test_string_positive_int_accepted(self):
+        runner = MagicMock(return_value=_ok_result(_ok_stdout(42)))
+        result = tp.send_signing_url_to_dm("123", message="x", runner=runner)
+        assert result.ok is True
+
+    def test_negative_target_raises_before_send(self):
+        runner = MagicMock()
+        with pytest.raises(tp.SigningUrlTargetError, match="positive"):
+            tp.send_signing_url_to_dm(-1001234567890, message="x", runner=runner)
+        runner.assert_not_called()
+
+    def test_zero_target_raises(self):
+        runner = MagicMock()
+        with pytest.raises(tp.SigningUrlTargetError, match="positive"):
+            tp.send_signing_url_to_dm(0, message="x", runner=runner)
+        runner.assert_not_called()
+
+    def test_non_integer_target_raises(self):
+        runner = MagicMock()
+        with pytest.raises(tp.SigningUrlTargetError, match="integer"):
+            tp.send_signing_url_to_dm("not-a-number", message="x", runner=runner)
+        runner.assert_not_called()
+
+    def test_none_target_raises(self):
+        runner = MagicMock()
+        with pytest.raises(tp.SigningUrlTargetError):
+            tp.send_signing_url_to_dm(None, message="x", runner=runner)
+        runner.assert_not_called()
+
+    def test_whitespace_stripped(self):
+        runner = MagicMock(return_value=_ok_result(_ok_stdout(42)))
+        result = tp.send_signing_url_to_dm("  123456  ", message="x", runner=runner)
+        assert result.ok is True
