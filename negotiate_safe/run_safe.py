@@ -79,6 +79,21 @@ def _sshsign_session_id(negotiation_id: str) -> str:
     return f"session_{negotiation_id}"
 
 
+def _negotiation_id_from_sshsign_session_id(sshsign_session_id: str) -> str:
+    """Inverse of _sshsign_session_id. sshsign's get-session returns the
+    prefixed form (e.g. 'session_neg_X'); upstream agenticpoa/negotiate
+    and our on-disk layout both key off the RAW negotiation_id
+    ('neg_X'). Called by the joiner to recover the raw id after fetching
+    a session by code. Tolerates an already-unprefixed input so it's
+    safe to apply twice.
+    """
+    if not sshsign_session_id:
+        return ""
+    if sshsign_session_id.startswith("session_"):
+        return sshsign_session_id[len("session_"):]
+    return sshsign_session_id
+
+
 def run_prepare(
     message: str,
     output_dir: str,
@@ -234,7 +249,12 @@ def run_mint(output_dir: str, config: dict) -> int:
     # sides' APOA tokens, pending_signatures, and offer logs correlate.
     shared_session = config.get("session")
     if shared_session and shared_session.get("session_id"):
-        negotiation_id = shared_session["session_id"]
+        # Sshsign's get-session returns the prefixed form; strip it so
+        # upstream, create_tokens.py, and our on-disk layout all use
+        # the same raw negotiation_id as the founder's side.
+        negotiation_id = _negotiation_id_from_sshsign_session_id(
+            shared_session["session_id"]
+        )
     else:
         negotiation_id = f"neg_{uuid.uuid4().hex[:12]}"
     neg_dir = repo / "negotiations" / negotiation_id
