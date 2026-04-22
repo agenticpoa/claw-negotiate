@@ -640,6 +640,103 @@ def format_cancel_completed_deal_refused(event: dict[str, Any]) -> str:
     )
 
 
+def format_go_live(event: dict[str, Any]) -> str:
+    """DM card pushed after two-party mint: instructs the founder to
+    create a Telegram group with both bots + the investor, then paste
+    `/bind INV-XXXXX` in the group.
+
+    Design note: the code and the /bind payload are wrapped in backtick
+    inline-code spans because Telegram surfaces long-press-to-copy
+    (mobile) and click-to-copy (desktop) on inline code entities. Do NOT
+    render `/bind INV-...` as a highlighted bot_command entity — tapping
+    a highlighted /command re-sends it FROM THE CURRENT CHAT (the DM),
+    which would re-trigger the go-live card in the DM instead of
+    binding the group.
+    """
+    code = (event.get("session_code") or "").strip()
+    founder_bot = (event.get("founder_bot") or "@AgenticPOA_bot").strip()
+    investor_bot = (event.get("investor_bot") or "@AgenticPOAInvestor_bot").strip()
+    counterparty = (event.get("counterparty_handle") or "").strip()
+
+    members = [
+        f"  • {founder_bot}  (me)",
+        f"  • {investor_bot}  (your investor's agent)",
+    ]
+    if counterparty:
+        members.append(f"  • {counterparty}  (your investor)")
+    else:
+        members.append("  • your investor (add their @username here)")
+
+    bind_payload = f"/bind {code}" if code else "/bind INV-XXXXX"
+
+    lines = [
+        "\U0001f3ac **Want to see both agents negotiate in one chat?**",  # 🎬
+        "",
+        "Create a new Telegram group with these three members:",
+        "",
+        *members,
+        "",
+        "Then paste this in the new group:",
+        "",
+        f"    `{bind_payload}`",
+        "",
+        f"_Or share the code_ `{code}` _with your investor via any other "
+        "channel to stick with DM-only mode._",
+    ]
+    return "\n".join(lines)
+
+
+def format_group_bound(event: dict[str, Any]) -> str:
+    """Confirmation card posted IN the group after a successful /bind.
+    Tells the founder and investor the venue is set up and what happens
+    next."""
+    code = (event.get("session_code") or "").strip()
+    counterparty = (event.get("counterparty_label") or "your investor").strip()
+
+    lines = [
+        f"✅ **Negotiation {code} bound to this group.**",  # ✅
+        "",
+        f"Both agents will post their offers here so you and {counterparty} "
+        "can watch the rounds live.",
+        "",
+        "_Signing stays private — when it's time to sign, each of you "
+        "will get a private link in your own DM._",
+    ]
+    return "\n".join(lines)
+
+
+def format_bind_wrong_user(event: dict[str, Any]) -> str:
+    """Error reply when someone other than the session founder types /bind."""
+    return (
+        "⛔ Only the founder of this negotiation can bind it to a group.\n\n"  # ⛔
+        "If you're the investor, ask the founder to paste /bind here instead."
+    )
+
+
+def format_bind_wrong_chat_type(event: dict[str, Any]) -> str:
+    """Error reply when /bind is typed in a DM instead of a group."""
+    return (
+        "ℹ️ The `/bind` command only works in a group chat.\n\n"  # ℹ️
+        "Create a new Telegram group with the two bots + your investor, "
+        "then paste `/bind INV-XXXXX` there."
+    )
+
+
+def format_bind_unknown_code(event: dict[str, Any]) -> str:
+    return (
+        "❓ That code doesn't match a current negotiation. "  # ❓
+        "Double-check the code with your founder."
+    )
+
+
+def format_bind_already_bound(event: dict[str, Any]) -> str:
+    return (
+        "⚠️ This negotiation is already bound to another group.\n\n"  # ⚠️
+        "Cancel with `/cancel_negotiation` in your DM first "
+        "if you need to start over."
+    )
+
+
 FORMATTERS = {
     "confirm": format_confirm,
     "authorized": format_authorized,
@@ -663,6 +760,12 @@ FORMATTERS = {
     "rescinded_after_sign_observer": format_rescinded_after_sign_observer,
     "cancel_completed_refused": format_cancel_completed_deal_refused,
     "propose_new_terms": format_propose_new_terms,
+    "go_live": format_go_live,
+    "group_bound": format_group_bound,
+    "bind_wrong_user": format_bind_wrong_user,
+    "bind_wrong_chat_type": format_bind_wrong_chat_type,
+    "bind_unknown_code": format_bind_unknown_code,
+    "bind_already_bound": format_bind_already_bound,
 }
 
 

@@ -26,7 +26,13 @@ python3 /root/.agents/skills/negotiate_safe/run_safe.py setup --message-file /tm
 ```
 End your turn. The skill overwrites whichever fields are in the message and confirms in chat.
 
-**C. Anything else** (negotiation request, "go" confirmation, or a correction) → proceed with Step 1 below.
+**C. `/bind INV-XXXXX` (in a Telegram group):** the user is binding a two-party negotiation to this group. Pass the raw inbound envelope fields straight through:
+```
+python3 /root/.agents/skills/negotiate_safe/run_safe.py bind --message "<the full /bind message text>" --chat-id <chat.id> --from-id <from.id>
+```
+The skill performs the ACL check (only the founder may bind), calls sshsign's `bind-group` RPC, and posts a confirmation card in the group. End your turn. Do not relay anything.
+
+**D. Anything else** (negotiation request, "go" confirmation, or a correction) → proceed with Step 1 below.
 
 ## Step 1: Parse and confirm
 

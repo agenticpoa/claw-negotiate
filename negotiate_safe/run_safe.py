@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.parse
@@ -36,6 +37,8 @@ from sshsign_session import (
     SessionExpiredError,
     SessionNotFoundError,
     SessionRoleConflictError,
+    SessionNotMemberError,
+    GroupAlreadyBoundError,
 )
 
 
@@ -229,8 +232,13 @@ def _extract_counterparty_pubkey(session_payload: dict) -> str:
     return ""
 
 
-def run_mint(output_dir: str, config: dict) -> int:
-    """Mint APOA tokens using the constraints from config.json."""
+def run_mint(output_dir: str, config: dict, telegram_user_id: int | None = None) -> int:
+    """Mint APOA tokens using the constraints from config.json.
+
+    telegram_user_id, when provided (founder two-party path), is stashed on
+    the sshsign session's metadata_member so the Phase 8 /bind handler can
+    verify that the caller of /bind matches the session creator.
+    """
     repo = os.environ.get("NEGOTIATE_REPO_PATH", "")
     if not repo:
         sys.stderr.write("NEGOTIATE_REPO_PATH not set.\n")
@@ -417,6 +425,7 @@ def run_mint(output_dir: str, config: dict) -> int:
         else:
             session_registered = _register_signing_session(
                 mint_output, constraints, user_role, neg_dir,
+                telegram_user_id=telegram_user_id,
             )
             if session_registered is None:
                 return 3
@@ -443,6 +452,7 @@ def _register_signing_session(
     user_role: str,
     neg_dir: Path,
     session_client=None,
+    telegram_user_id: int | None = None,
 ) -> dict | None:
     """Call sshsign.dev create-session for a two-party negotiation.
 
@@ -484,6 +494,13 @@ def _register_signing_session(
             "investor_firm": constraints.get("investor_firm"),
         }.items() if v
     }
+    # Phase 8 /bind ACL: stash the founder's Telegram user_id so the
+    # bind handler can verify the caller of /bind in a group matches
+    # the session creator. In DMs, Telegram's chat_id equals the user's
+    # numeric user_id by convention, so the caller passes chat_id here.
+    # Investors (joiners) don't need this stored — only the founder binds.
+    if telegram_user_id and user_role == "founder":
+        metadata_member["telegram"] = {"founder_user_id": int(telegram_user_id)}
 
     client = session_client or SshsignSession(
         host=os.environ.get("SSHSIGN_HOST", "sshsign.dev"),
@@ -1342,7 +1359,21 @@ def run_negotiate(output_dir: str, chat_id_flag: str | None = None) -> int:
             "\U0001f510 Setting up your secure session\u2026"  # 🔐
         ))
 
-    rc = run_mint(output_dir, config)
+    # In a Telegram DM, chat_id == user_id (positive int). Thread it through
+    # run_mint → _register_signing_session so the founder's user_id gets
+    # stashed on the sshsign session's metadata_member for Phase 8 /bind ACL.
+    # Positive-only: group chat_ids are negative; we don't want a group id
+    # here even if the skill were somehow invoked from a group.
+    tg_user_id: int | None = None
+    if chat_id:
+        try:
+            cid = int(chat_id)
+            if cid > 0:
+                tg_user_id = cid
+        except ValueError:
+            tg_user_id = None
+
+    rc = run_mint(output_dir, config, telegram_user_id=tg_user_id)
     if rc != 0:
         return rc
 
@@ -1671,6 +1702,23 @@ def _founder_two_party_gate(
     if invitation_body:
         sender(chat_id, message=invitation_body)
 
+    # Phase 8 opt-in: go-live card offers group-mode as an alternative to
+    # DM-only. Non-breaking — ignoring it keeps the existing flow intact.
+    # K2 will replace this "secondary card" pattern with a fully restructured
+    # flow; K1 ships it additively so it can be verified in isolation.
+    bot_username = os.environ.get("TELEGRAM_BOT_USERNAME", "AgenticPOA_bot").lstrip("@")
+    investor_bot = os.environ.get("TELEGRAM_BOT_USERNAME_INVESTOR", "AgenticPOAInvestor_bot").lstrip("@")
+    investor_handle = (os.environ.get("INVESTOR_TELEGRAM_HANDLE") or "").lstrip("@")
+    go_live_body = format_event({
+        "type": "go_live",
+        "session_code": session_code,
+        "founder_bot": f"@{bot_username}",
+        "investor_bot": f"@{investor_bot}",
+        "counterparty_handle": f"@{investor_handle}" if investor_handle else "",
+    })
+    if go_live_body:
+        sender(chat_id, message=go_live_body)
+
     status = wait_fn(
         session_id=session_id,
         session_code=session_code,
@@ -1787,6 +1835,139 @@ def _persist_env_updates(updates: dict[str, str], runner=subprocess.run) -> list
         if result.returncode != 0:
             failures.append(key)
     return failures
+
+
+_BIND_CODE_RE = re.compile(r"(INV-[A-Z0-9]+)", re.IGNORECASE)
+
+
+def _extract_bind_code(message: str) -> str | None:
+    """Pull the INV-XXXXX code out of a `/bind ...` message body.
+
+    Tolerates `/bind INV-XYZ`, `/bind@Bot INV-XYZ`, extra whitespace, or
+    the code being the only token. Case-insensitive match; returned code
+    is upper-cased since the server stores codes upper-case.
+    """
+    if not message:
+        return None
+    m = _BIND_CODE_RE.search(message)
+    if not m:
+        return None
+    return m.group(1).upper()
+
+
+def run_bind(
+    session_code: str,
+    group_chat_id: int,
+    from_user_id: int,
+    dm_chat_id_flag: str | None = None,
+    sender=send_telegram,
+    session_client=None,
+) -> int:
+    """Phase 8 /bind handler.
+
+    Invoked when the founder types `/bind INV-XXXXX` in a Telegram group.
+    Verifies the caller is the session founder (via metadata_member's
+    telegram.founder_user_id, captured at create-session time), then
+    calls sshsign `bind-group` to associate the group_chat_id with the
+    session. Write-once on the server side, so a second /bind to a
+    different group returns a typed error.
+
+    Parameters are all plumbed from the OC Telegram envelope by the
+    caller (SKILL.md instructs the model to supply them as flags).
+
+    Return codes:
+      0  success (bind applied)
+      1  already bound to a different group (idempotent same-group ok)
+      2  non-founder tried to bind / unknown code / bad chat type
+      3  ssh/transport error
+
+    Reply target: errors that need to reach the founder explicitly go
+    to their DM (if dm_chat_id_flag resolves); generic group-context
+    errors and the success confirmation go to the group. The wrong-chat
+    error prefers DM because /bind in a DM means "I haven't created
+    a group yet" — the user is still in the DM.
+    """
+    if group_chat_id >= 0:
+        # Positive or zero chat_id means this wasn't a group — either a
+        # DM (positive) or an invalid value. Steer the user to a group.
+        body = format_event({"type": "bind_wrong_chat_type"})
+        if body:
+            target = group_chat_id if group_chat_id > 0 else (
+                int(dm_chat_id_flag) if dm_chat_id_flag else 0
+            )
+            if target:
+                sender(str(target), message=body)
+        return 2
+
+    client = session_client or SshsignSession(
+        host=os.environ.get("SSHSIGN_HOST", "sshsign.dev"),
+    )
+
+    try:
+        sess = client.get_session(session_code=session_code)
+    except SessionNotFoundError:
+        body = format_event({"type": "bind_unknown_code"})
+        if body:
+            sender(str(group_chat_id), message=body)
+        return 2
+    except SshsignSessionError as e:
+        sys.stderr.write(f"bind: get-session failed: {e}\n")
+        return 3
+
+    # Pull founder_user_id from metadata_member. Best-effort: if it's
+    # missing (older session minted before K1), we refuse the bind —
+    # safer to fail closed than to let anyone in the group bind it.
+    meta_raw = sess.get("metadata_member") or "{}"
+    try:
+        meta = json.loads(meta_raw) if isinstance(meta_raw, str) else (meta_raw or {})
+    except (json.JSONDecodeError, TypeError):
+        meta = {}
+    expected_user_id = (meta.get("telegram") or {}).get("founder_user_id")
+    if not expected_user_id or int(expected_user_id) != int(from_user_id):
+        body = format_event({"type": "bind_wrong_user"})
+        if body:
+            sender(str(group_chat_id), message=body)
+        return 2
+
+    session_id = sess.get("session_id") or _sshsign_session_id(
+        _negotiation_id_from_sshsign_session_id(sess.get("session_id", ""))
+    )
+    if not session_id:
+        sys.stderr.write("bind: get-session returned no session_id\n")
+        return 3
+
+    try:
+        client.bind_group(session_id, int(group_chat_id))
+    except GroupAlreadyBoundError:
+        body = format_event({"type": "bind_already_bound"})
+        if body:
+            sender(str(group_chat_id), message=body)
+        return 1
+    except SessionNotMemberError:
+        # Creator IS a member, so this shouldn't fire unless the stored
+        # user_id doesn't match a sshsign member row. Treat as auth failure.
+        body = format_event({"type": "bind_wrong_user"})
+        if body:
+            sender(str(group_chat_id), message=body)
+        return 2
+    except SshsignSessionError as e:
+        sys.stderr.write(f"bind-group failed: {e}\n")
+        return 3
+
+    # Success: post confirmation IN THE GROUP (not the DM).
+    counterparty_label = (
+        (meta.get("investor_name") or "") + (
+            (", " + meta["investor_firm"]) if meta.get("investor_firm") else ""
+        )
+    ).strip(", ") or "your investor"
+    body = format_event({
+        "type": "group_bound",
+        "session_code": sess.get("session_code") or session_code,
+        "counterparty_label": counterparty_label,
+    })
+    if body:
+        sender(str(group_chat_id), message=body)
+    return 0
 
 
 def run_setup(
@@ -2056,6 +2237,40 @@ def main() -> int:
     cancel.add_argument("--output-dir", required=True)
     cancel.add_argument("--chat-id", default="")
 
+    bind = sub.add_parser(
+        "bind",
+        help="Phase 8: bind a two-party negotiation to the current "
+             "Telegram group. Invoked by OC when the founder types "
+             "/bind INV-XXXXX in a group.",
+    )
+    bind.add_argument(
+        "--message",
+        default="",
+        help="The full /bind message body; the code is extracted from it.",
+    )
+    bind.add_argument(
+        "--session-code",
+        default="",
+        help="Explicit INV-XXXXX (overrides --message parsing).",
+    )
+    bind.add_argument(
+        "--chat-id",
+        required=True,
+        help="The GROUP chat_id where /bind was typed (negative int).",
+    )
+    bind.add_argument(
+        "--from-id",
+        required=True,
+        help="The Telegram user_id of the sender of /bind.",
+    )
+    bind.add_argument(
+        "--dm-chat-id",
+        default="",
+        help="Founder's DM chat_id (positive int). Used to steer the "
+             "wrong-chat-type error back to the DM when /bind is typed "
+             "in the DM by mistake.",
+    )
+
     args = parser.parse_args()
 
     if args.command == "prepare":
@@ -2086,6 +2301,25 @@ def main() -> int:
         return run_profile(chat_id_flag=args.chat_id or None)
     elif args.command == "cancel":
         return run_cancel(args.output_dir, chat_id_flag=args.chat_id or None)
+    elif args.command == "bind":
+        code = (args.session_code or "").strip().upper()
+        if not code:
+            code = _extract_bind_code(args.message) or ""
+        if not code:
+            sys.stderr.write("bind: no INV-XXXXX code found in --session-code or --message.\n")
+            return 2
+        try:
+            group_chat_id = int(args.chat_id)
+            from_user_id = int(args.from_id)
+        except ValueError as e:
+            sys.stderr.write(f"bind: --chat-id and --from-id must be integers: {e}\n")
+            return 2
+        return run_bind(
+            session_code=code,
+            group_chat_id=group_chat_id,
+            from_user_id=from_user_id,
+            dm_chat_id_flag=args.dm_chat_id or None,
+        )
     else:
         parser.print_help()
         return 2

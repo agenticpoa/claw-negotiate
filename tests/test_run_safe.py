@@ -404,7 +404,7 @@ class TestNegotiate:
         run_negotiate must call the founder gate before firing the stream."""
         self._write_config(tmp_path, sample_constraints)
 
-        def fake_mint(output_dir, config):
+        def fake_mint(output_dir, config, **kwargs):
             (Path(output_dir) / "mint.json").write_text(json.dumps({
                 "negotiation_id": "neg_1",
                 "mode": "two_party",
@@ -428,7 +428,7 @@ class TestNegotiate:
     def test_two_party_mode_skips_stream_when_gate_fails(self, tmp_path, sample_constraints):
         self._write_config(tmp_path, sample_constraints)
 
-        def fake_mint(output_dir, config):
+        def fake_mint(output_dir, config, **kwargs):
             (Path(output_dir) / "mint.json").write_text(json.dumps({
                 "negotiation_id": "neg_1",
                 "mode": "two_party",
@@ -451,7 +451,7 @@ class TestNegotiate:
         """Demo mode (default) must go straight to streaming — no gate."""
         self._write_config(tmp_path, sample_constraints)
 
-        def fake_mint(output_dir, config):
+        def fake_mint(output_dir, config, **kwargs):
             (Path(output_dir) / "mint.json").write_text(json.dumps({
                 "negotiation_id": "neg_1",
                 "mode": "demo",
@@ -2061,7 +2061,7 @@ class TestNegotiateInvestorBranch:
             "founder_name": "F", "founder_title": "CEO", "message": "m",
         }))
 
-        def fake_mint(output_dir, config):
+        def fake_mint(output_dir, config, **kwargs):
             (Path(output_dir) / "mint.json").write_text(json.dumps({
                 "negotiation_id": "neg_1", "mode": "two_party",
                 "user_role": "founder", "session_code": "INV-X",
@@ -2097,7 +2097,7 @@ class TestNegotiateInvestorBranch:
             "founder_name": "F", "founder_title": "CEO", "message": "m",
         }))
 
-        def fake_mint(output_dir, config):
+        def fake_mint(output_dir, config, **kwargs):
             (Path(output_dir) / "mint.json").write_text(json.dumps({
                 "negotiation_id": "neg_1", "mode": "two_party",
                 "user_role": "investor", "session_code": "INV-X",
@@ -2126,7 +2126,7 @@ class TestNegotiateInvestorBranch:
             "founder_name": "F", "founder_title": "CEO", "message": "m",
         }))
 
-        def fake_mint(output_dir, config):
+        def fake_mint(output_dir, config, **kwargs):
             (Path(output_dir) / "mint.json").write_text(json.dumps({
                 "negotiation_id": "neg_1", "mode": "demo",
             }))
@@ -2152,7 +2152,7 @@ class TestNegotiateInvestorBranch:
     def test_investor_two_party_skips_gate_and_pushes_joined_card(self, tmp_path):
         self._write_config(tmp_path)
 
-        def fake_mint(output_dir, config):
+        def fake_mint(output_dir, config, **kwargs):
             (Path(output_dir) / "mint.json").write_text(json.dumps({
                 "negotiation_id": "neg_1",
                 "mode": "two_party",
@@ -2759,3 +2759,339 @@ class TestRunCancel:
         assert rc == 0
         mock_cancel.assert_called_once()
         assert mock_cancel.call_args.args[0] == str(tmp_path)
+
+
+# ─── Phase 8 K1: bind handler ───────────────────────────────────────
+
+
+class TestExtractBindCode:
+    def test_extracts_from_plain_bind(self):
+        assert rs._extract_bind_code("/bind INV-7K3X9") == "INV-7K3X9"
+
+    def test_extracts_with_bot_suffix(self):
+        assert rs._extract_bind_code("/bind@AgenticPOA_bot INV-ABC1") == "INV-ABC1"
+
+    def test_lowercase_input_uppercased(self):
+        assert rs._extract_bind_code("/bind inv-zzz9") == "INV-ZZZ9"
+
+    def test_standalone_code(self):
+        assert rs._extract_bind_code("INV-FOO") == "INV-FOO"
+
+    def test_returns_none_on_no_code(self):
+        assert rs._extract_bind_code("/bind") is None
+        assert rs._extract_bind_code("") is None
+        assert rs._extract_bind_code("random text") is None
+
+
+class TestRunBind:
+    @staticmethod
+    def _founder_session(session_code="INV-TEST1", founder_user_id=111, session_id=None):
+        return {
+            "session_id": session_id or "session_neg_abc",
+            "session_code": session_code,
+            "metadata_member": json.dumps({
+                "investor_name": "Alex",
+                "investor_firm": "Blue",
+                "telegram": {"founder_user_id": founder_user_id},
+            }),
+        }
+
+    def test_happy_path_posts_confirmation_to_group(self):
+        client = MagicMock()
+        client.get_session.return_value = self._founder_session(
+            session_code="INV-7K3X9", founder_user_id=111,
+        )
+        client.bind_group.return_value = {"status": "joined"}
+
+        sender = MagicMock()
+        rc = rs.run_bind(
+            session_code="INV-7K3X9",
+            group_chat_id=-1001234,
+            from_user_id=111,
+            sender=sender,
+            session_client=client,
+        )
+
+        assert rc == 0
+        client.bind_group.assert_called_once_with("session_neg_abc", -1001234)
+        # Confirmation must land in the GROUP, not the DM.
+        assert sender.call_args_list[0].args[0] == "-1001234"
+        msg = sender.call_args_list[0].kwargs["message"]
+        assert "INV-7K3X9" in msg
+        assert "bound to this group" in msg
+
+    def test_wrong_user_refuses(self):
+        client = MagicMock()
+        client.get_session.return_value = self._founder_session(
+            founder_user_id=111,
+        )
+
+        sender = MagicMock()
+        rc = rs.run_bind(
+            session_code="INV-TEST1",
+            group_chat_id=-1001234,
+            from_user_id=222,  # not the founder
+            sender=sender,
+            session_client=client,
+        )
+
+        assert rc == 2
+        client.bind_group.assert_not_called()
+        msg = sender.call_args_list[0].kwargs["message"]
+        assert "Only the founder" in msg
+        assert sender.call_args_list[0].args[0] == "-1001234"
+
+    def test_unknown_code_refuses(self):
+        from sshsign_session import SessionNotFoundError
+        client = MagicMock()
+        client.get_session.side_effect = SessionNotFoundError("nope")
+
+        sender = MagicMock()
+        rc = rs.run_bind(
+            session_code="INV-UNKNOWN",
+            group_chat_id=-1001234,
+            from_user_id=111,
+            sender=sender,
+            session_client=client,
+        )
+
+        assert rc == 2
+        client.bind_group.assert_not_called()
+        msg = sender.call_args_list[0].kwargs["message"]
+        assert "doesn't match" in msg
+
+    def test_already_bound_surfaces_error(self):
+        from sshsign_session import GroupAlreadyBoundError
+        client = MagicMock()
+        client.get_session.return_value = self._founder_session(
+            founder_user_id=111,
+        )
+        client.bind_group.side_effect = GroupAlreadyBoundError("group_already_bound")
+
+        sender = MagicMock()
+        rc = rs.run_bind(
+            session_code="INV-TEST1",
+            group_chat_id=-1001234,
+            from_user_id=111,
+            sender=sender,
+            session_client=client,
+        )
+
+        assert rc == 1
+        msg = sender.call_args_list[0].kwargs["message"]
+        assert "already bound" in msg
+
+    def test_same_group_idempotent_success(self):
+        # Server returns the session row (no exception) when the same
+        # group is re-bound; client sees the same success path as first
+        # bind.
+        client = MagicMock()
+        client.get_session.return_value = self._founder_session(
+            founder_user_id=111,
+        )
+        client.bind_group.return_value = {"status": "joined", "group_chat_id": -1001234}
+
+        sender = MagicMock()
+        rc = rs.run_bind(
+            session_code="INV-TEST1",
+            group_chat_id=-1001234,
+            from_user_id=111,
+            sender=sender,
+            session_client=client,
+        )
+
+        assert rc == 0
+        client.bind_group.assert_called_once()
+
+    def test_positive_chat_id_rejected_as_wrong_chat_type(self):
+        client = MagicMock()
+        sender = MagicMock()
+        rc = rs.run_bind(
+            session_code="INV-TEST1",
+            group_chat_id=111,            # positive = DM, not group
+            from_user_id=111,
+            dm_chat_id_flag="111",
+            sender=sender,
+            session_client=client,
+        )
+
+        assert rc == 2
+        client.get_session.assert_not_called()
+        msg = sender.call_args_list[0].kwargs["message"]
+        assert "group chat" in msg.lower()
+
+    def test_missing_founder_user_id_in_metadata_fails_closed(self):
+        # Older session minted before K1 won't have telegram.founder_user_id.
+        # Safer to refuse than to let anyone bind.
+        client = MagicMock()
+        client.get_session.return_value = {
+            "session_id": "session_neg_abc",
+            "session_code": "INV-OLD",
+            "metadata_member": json.dumps({"investor_name": "X"}),
+        }
+
+        sender = MagicMock()
+        rc = rs.run_bind(
+            session_code="INV-OLD",
+            group_chat_id=-1001234,
+            from_user_id=111,
+            sender=sender,
+            session_client=client,
+        )
+
+        assert rc == 2
+        client.bind_group.assert_not_called()
+
+    def test_ssh_transport_error_returns_3(self):
+        from sshsign_session import SshsignSessionError
+        client = MagicMock()
+        client.get_session.side_effect = SshsignSessionError("connection refused")
+
+        sender = MagicMock()
+        rc = rs.run_bind(
+            session_code="INV-TEST1",
+            group_chat_id=-1001234,
+            from_user_id=111,
+            sender=sender,
+            session_client=client,
+        )
+
+        assert rc == 3
+
+    def test_cli_dispatches_bind_extracting_code_from_message(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(sys, "argv", [
+            "run_safe.py", "bind",
+            "--message", "/bind INV-7K3X9",
+            "--chat-id", "-1001234",
+            "--from-id", "111",
+        ])
+        with patch.object(rs, "run_bind", return_value=0) as mock_bind:
+            rc = rs.main()
+        assert rc == 0
+        mock_bind.assert_called_once()
+        kwargs = mock_bind.call_args.kwargs
+        assert kwargs["session_code"] == "INV-7K3X9"
+        assert kwargs["group_chat_id"] == -1001234
+        assert kwargs["from_user_id"] == 111
+
+    def test_cli_rejects_bind_with_no_code(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setattr(sys, "argv", [
+            "run_safe.py", "bind",
+            "--message", "/bind",
+            "--chat-id", "-1001234",
+            "--from-id", "111",
+        ])
+        with patch.object(rs, "run_bind") as mock_bind:
+            rc = rs.main()
+        assert rc == 2
+        mock_bind.assert_not_called()
+
+    def test_explicit_session_code_wins_over_message_parse(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(sys, "argv", [
+            "run_safe.py", "bind",
+            "--message", "ignored",
+            "--session-code", "INV-EXPLICIT",
+            "--chat-id", "-1001234",
+            "--from-id", "111",
+        ])
+        with patch.object(rs, "run_bind", return_value=0) as mock_bind:
+            rc = rs.main()
+        assert rc == 0
+        assert mock_bind.call_args.kwargs["session_code"] == "INV-EXPLICIT"
+
+
+class TestGoLiveCardOnTwoPartyMint:
+    """The go-live card is pushed in _founder_two_party_gate after the
+    existing invitation card. K1 ships it additively (non-breaking);
+    K2 will restructure the flow."""
+
+    def test_go_live_card_pushed_after_invitation(self, tmp_path):
+        mint = {
+            "negotiation_id": "neg_1",
+            "session_code": "INV-7K3X9",
+            "session_expires_at": "",
+        }
+        sender = MagicMock()
+        wait_fn = MagicMock(return_value="joined")
+        rc = rs._founder_two_party_gate(
+            out=tmp_path,
+            chat_id="111",
+            mint=mint,
+            constraints={"investor_name": "Alex"},
+            sender=sender,
+            wait_fn=wait_fn,
+        )
+        assert rc == 0
+        messages = [c.kwargs.get("message", "") for c in sender.call_args_list]
+        # Invitation card must come BEFORE the go-live card.
+        inv_idx = next((i for i, m in enumerate(messages)
+                        if "Live negotiation started" in m), -1)
+        go_idx = next((i for i, m in enumerate(messages)
+                       if "Want to see both agents" in m), -1)
+        assert inv_idx >= 0, f"missing invitation card; msgs={messages}"
+        assert go_idx >= 0, f"missing go-live card; msgs={messages}"
+        assert inv_idx < go_idx
+        # Go-live card must contain the bind payload as a code span.
+        go = messages[go_idx]
+        assert "`/bind INV-7K3X9`" in go
+        assert "`INV-7K3X9`" in go
+
+
+class TestRegisterSigningSessionTelegramUserId:
+    """Verifies the founder's Telegram user_id lands in metadata_member
+    so the /bind handler can ACL it later."""
+
+    def test_telegram_user_id_in_metadata_member_for_founder(self, tmp_path):
+        # Arrange: write a pubkey file where _register_signing_session expects it.
+        keys_dir = tmp_path / "keys"
+        keys_dir.mkdir()
+        (keys_dir / "founder_public.pem").write_text("-----BEGIN APOA-----\nFAKE\n-----END APOA-----\n")
+
+        captured = {}
+
+        def fake_create_session(**kwargs):
+            captured.update(kwargs)
+            return {
+                "session_code": "INV-ABC1",
+                "created_at": "t", "expires_at": "t", "status": "open",
+            }
+
+        client = MagicMock()
+        client.create_session.side_effect = fake_create_session
+
+        rs._register_signing_session(
+            mint_output={"negotiation_id": "neg_abc"},
+            constraints={"founder_name": "Juan", "company_name": "Acme"},
+            user_role="founder",
+            neg_dir=tmp_path,
+            session_client=client,
+            telegram_user_id=123456789,
+        )
+
+        mm = captured["metadata_member"]
+        assert mm.get("telegram", {}).get("founder_user_id") == 123456789
+
+    def test_investor_role_does_not_store_user_id(self, tmp_path):
+        keys_dir = tmp_path / "keys"
+        keys_dir.mkdir()
+        (keys_dir / "investor_public.pem").write_text("-----BEGIN APOA-----\nFAKE\n-----END APOA-----\n")
+
+        captured = {}
+
+        def fake_create_session(**kwargs):
+            captured.update(kwargs)
+            return {"session_code": "INV-X", "created_at": "t", "expires_at": "t", "status": "open"}
+
+        client = MagicMock()
+        client.create_session.side_effect = fake_create_session
+        rs._register_signing_session(
+            mint_output={"negotiation_id": "neg_def"},
+            constraints={},
+            user_role="investor",
+            neg_dir=tmp_path,
+            session_client=client,
+            telegram_user_id=999,
+        )
+
+        mm = captured["metadata_member"]
+        assert "telegram" not in mm

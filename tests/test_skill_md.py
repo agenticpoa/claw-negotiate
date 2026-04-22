@@ -101,6 +101,15 @@ class TestTwoCommandArchitecture:
     def test_mentions_output_dir(self, skill_content):
         assert "--output-dir" in skill_content
 
+    def test_has_bind_shortcut(self, skill_content):
+        """Phase 8: /bind must be listed as an intent shortcut so the model
+        routes it straight to run_safe.py bind instead of the prepare path."""
+        assert "/bind" in skill_content
+        assert "run_safe.py bind" in skill_content
+        # Must pass through the envelope flags so the skill can do the ACL check.
+        assert "--chat-id" in skill_content
+        assert "--from-id" in skill_content
+
 
 class TestCrossFileConsistency:
     def test_all_formatter_types_reachable_from_skill(self, skill_content):

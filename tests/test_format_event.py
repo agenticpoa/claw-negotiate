@@ -35,6 +35,10 @@ class TestFormatters:
             "cancel_completed_refused",
             "propose_new_terms",
             "session_expired",
+            # Phase 8 (K1): group-mode bind UX
+            "go_live", "group_bound",
+            "bind_wrong_user", "bind_wrong_chat_type",
+            "bind_unknown_code", "bind_already_bound",
         }
 
     # ---- confirm (our emit) ----
