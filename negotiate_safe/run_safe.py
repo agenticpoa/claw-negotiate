@@ -793,10 +793,24 @@ def _finalize_executed_pdf(
     repo = Path(repo_str).resolve()
 
     mint = json.loads((output_dir / "mint.json").read_text())
-    f_cfg = json.loads(Path(mint["founder_config_path"]).read_text())
-    i_cfg = json.loads(Path(mint["investor_config_path"]).read_text())
+
+    # In two-party join mode only the joiner's config exists locally; the
+    # counterparty's was minted on the other OC. Load what exists, fall
+    # back to {} so we can stitch kwargs from env / constraints below.
+    def _maybe_load_cfg(path_field: str) -> dict:
+        path = mint.get(path_field, "")
+        if not path:
+            return {}
+        try:
+            return json.loads(Path(path).read_text())
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    f_cfg = _maybe_load_cfg("founder_config_path")
+    i_cfg = _maybe_load_cfg("investor_config_path")
     neg_id = mint["negotiation_id"]
-    neg_dir = Path(mint["founder_config_path"]).parent
+    config_anchor = mint.get("founder_config_path") or mint.get("investor_config_path") or ""
+    neg_dir = Path(config_anchor).parent if config_anchor else output_dir
     neg_output = neg_dir / "output"
 
     spec = importlib.util.spec_from_file_location("negotiate_upstream_fin", repo / "negotiate.py")
@@ -811,24 +825,79 @@ def _finalize_executed_pdf(
         return None
 
     user_role = mint.get("user_role", "founder")
+
+    # Load the user's own prepared constraints so we can fall back to
+    # NL-derived values (or env) for any identity field the local cfg
+    # doesn't have — the joiner doesn't mint the counterparty's config.
+    try:
+        constraints = json.loads((output_dir / "config.json").read_text()).get("constraints") or {}
+    except (OSError, json.JSONDecodeError):
+        constraints = {}
+
+    def _pick(cfg_keys, constraint_key, env_key, default=""):
+        for cfg, k in cfg_keys:
+            if cfg.get(k):
+                return cfg[k]
+        if constraints.get(constraint_key):
+            return constraints[constraint_key]
+        return os.environ.get(env_key) or default
+
+    # Counterparty pubkey path: when joining, _join_signing_session
+    # writes the founder's pubkey to neg_dir/keys/founder_public.pem
+    # (stashed in mint.counterparty_pubkey_path). Fall back to that.
+    counterparty_pubkey = mint.get("counterparty_pubkey_path", "")
+
+    founder_pubkey = f_cfg.get("pubkey") or (
+        counterparty_pubkey if user_role == "investor" else ""
+    )
+    investor_pubkey = i_cfg.get("pubkey") or (
+        counterparty_pubkey if user_role == "founder" else ""
+    )
+
     kwargs = dict(
         negotiate_repo=repo,
         negotiation_id=neg_id,
-        founder_token_path=mint["founder_token_path"],
-        investor_token_path=mint["investor_token_path"],
-        founder_pubkey_path=f_cfg["pubkey"],
-        investor_pubkey_path=i_cfg["pubkey"],
-        company_name=f_cfg["company_name"],
-        founder_name=f_cfg["name"],
-        founder_title=f_cfg.get("title", ""),
-        investor_name=i_cfg["name"],
-        investor_firm=i_cfg.get("firm", ""),
-        investment_amount=f_cfg["investment_amount"],
+        founder_token_path=mint.get("founder_token_path", ""),
+        investor_token_path=mint.get("investor_token_path", ""),
+        founder_pubkey_path=founder_pubkey,
+        investor_pubkey_path=investor_pubkey,
+        company_name=_pick(
+            [(f_cfg, "company_name")], "company_name", "COMPANY_NAME", "Company",
+        ),
+        founder_name=_pick(
+            [(f_cfg, "name"), (f_cfg, "founder_name")],
+            "founder_name", "FOUNDER_NAME", "Founder",
+        ),
+        founder_title=_pick(
+            [(f_cfg, "title")], "founder_title", "FOUNDER_TITLE", "",
+        ),
+        investor_name=_pick(
+            [(i_cfg, "name"), (i_cfg, "investor_name")],
+            "investor_name", "INVESTOR_NAME", "Investor",
+        ),
+        investor_firm=_pick(
+            [(i_cfg, "firm")], "investor_firm", "INVESTOR_FIRM", "",
+        ),
+        investment_amount=(
+            f_cfg.get("investment_amount")
+            or i_cfg.get("investment_amount")
+            or constraints.get("investment_amount")
+            or 500_000.0
+        ),
         sshsign_host=sshsign_host,
         output_dir=str(neg_output),
-        signing_key_id=f_cfg.get("founder_signing_key_id") or f_cfg.get("signing_key_id", ""),
-        founder_signing_key_id=f_cfg.get("founder_signing_key_id") or f_cfg.get("signing_key_id", ""),
-        investor_signing_key_id=i_cfg.get("investor_signing_key_id") or i_cfg.get("signing_key_id", ""),
+        signing_key_id=(
+            f_cfg.get("founder_signing_key_id")
+            or i_cfg.get("investor_signing_key_id")
+            or f_cfg.get("signing_key_id")
+            or i_cfg.get("signing_key_id", "")
+        ),
+        founder_signing_key_id=(
+            f_cfg.get("founder_signing_key_id") or f_cfg.get("signing_key_id", "")
+        ),
+        investor_signing_key_id=(
+            i_cfg.get("investor_signing_key_id") or i_cfg.get("signing_key_id", "")
+        ),
         json_events=False,
         poll=False,
     )
