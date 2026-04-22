@@ -68,9 +68,9 @@ Set `timeout` to 1200. The command will auto-background after ~10 seconds. That 
 
 ## Step 3: Relay the launch to the user
 
-Reply with **NO_REPLY** — the skill pushes its own status cards (🔐 setup, 🔒 authorization, 🚀 starting / 🤝 invitation / ✅ joined) directly to the chat. Adding your own reply just duplicates them.
+Your output at this step MUST be the literal string `NO_REPLY` and nothing else. Do not add a preamble, an emoji, a "starting" line, a confirmation, or a sign-off. The skill pushes every user-visible card itself (setup, authorization, invitation, joined, round-by-round, signing URL, signed confirmation, executed PDF). If you emit your own text here, the user sees it in addition to the skill's cards — duplication and ordering bugs follow.
 
-**DO NOT** poll, run further commands, or describe the rounds yourself. The script sends every round, the signing URL, the "Signed & sealed" confirmation, and the executed PDF directly to the chat via the host. After the user signs, the browser opens the Telegram chat automatically — no further message arrives for you to handle. Your job for this skill is done.
+**DO NOT** poll, run further commands, or describe the rounds yourself. After the user signs, the browser opens the Telegram chat automatically — no further message arrives for you to handle. Your job for this skill is done.
 
 ## Invariants
 
