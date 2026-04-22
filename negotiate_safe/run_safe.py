@@ -906,14 +906,74 @@ def _await_sign_and_push(
         typing.stop()
 
 
-def _build_artifact_uri(session_id: str, pdf_path: Path) -> str:
-    """Deterministic sshsign:// URI referring to the executed PDF for this
-    session. Content-addressed uploading lives in J7 — for now the URI is
-    a marker that tells the non-creator's OC "this is done, finalize on
-    your side too." Both sides have the same envelope signatures, so each
-    can reproduce the PDF locally.
+def _build_artifact_uri(
+    session_id: str,
+    pdf_path: Path,
+    creator_pending_id: str = "",
+    creator_role: str = "",
+) -> str:
+    """URI that marks the session as finalized AND carries the creator's
+    pending_id so the joiner can reproduce the PDF locally.
+
+    Content-addressed artifact hosting is deferred to a future sshsign
+    change. Until then, both OCs reconstruct the PDF from their own
+    envelope + sshsign's get-envelope for the OTHER side. To do that
+    the joiner needs the creator's pending_id, which we embed here as
+    a query param. Format: sshsign://session/<id>/executed.pdf?
+    creator_pending=<pid>&creator_role=<role>.
     """
-    return f"sshsign://session/{session_id}/executed.pdf"
+    base = f"sshsign://session/{session_id}/executed.pdf"
+    params = []
+    if creator_pending_id:
+        params.append(f"creator_pending={urllib.parse.quote(creator_pending_id)}")
+    if creator_role:
+        params.append(f"creator_role={urllib.parse.quote(creator_role)}")
+    if params:
+        return base + "?" + "&".join(params)
+    return base
+
+
+def _write_counterparty_pending(
+    output_dir: Path,
+    session_id: str,
+    role: str,
+    pending_id: str,
+) -> None:
+    """Write the counterparty's pending_id to the local negotiate output
+    dir in the format upstream's finalize expects:
+      <neg_dir>/output/<neg_id>_<role>_pending.txt
+
+    Without this, the joiner's finalize call only sees its own role's
+    pending file and produces a single-signature PDF instead of the
+    executed (both-signatures) version.
+    """
+    try:
+        mint = json.loads((output_dir / "mint.json").read_text())
+        founder_cfg = mint.get("founder_config_path") or ""
+        investor_cfg = mint.get("investor_config_path") or ""
+        anchor = founder_cfg or investor_cfg
+        if not anchor:
+            return
+        neg_dir = Path(anchor).parent
+        neg_output = neg_dir / "output"
+        neg_output.mkdir(parents=True, exist_ok=True)
+        pending_file = neg_output / f"{session_id}_{role}_pending.txt"
+        pending_file.write_text(pending_id.strip() + "\n")
+    except (OSError, json.JSONDecodeError, KeyError) as e:
+        sys.stderr.write(f"writing counterparty pending: {e}\n")
+
+
+def _parse_artifact_uri(uri: str) -> tuple[str, str]:
+    """Extract (creator_pending_id, creator_role) from a session artifact
+    URI. Returns ("", "") for unparseable or missing params."""
+    if "?" not in uri:
+        return "", ""
+    query = uri.split("?", 1)[1]
+    params = urllib.parse.parse_qs(query)
+    return (
+        params.get("creator_pending", [""])[0],
+        params.get("creator_role", [""])[0],
+    )
 
 
 def _creator_await_sign_and_finalize(
@@ -956,10 +1016,13 @@ def _creator_await_sign_and_finalize(
         return rc
 
     # Locate the executed PDF so we can cite a stable URI back to the
-    # non-creator. The session's artifact URI points at it even when
-    # sshsign doesn't host the bytes yet — J7 will upload.
+    # non-creator. We also embed our own pending_id in the URI so the
+    # joiner can reconstruct the PDF locally (upstream's finalize needs
+    # a pending file for each role, and the joiner has only its own).
+    creator_role = ""
     try:
         mint = json.loads((output_dir / "mint.json").read_text())
+        creator_role = mint.get("user_role", "")
         neg_dir = Path(mint["founder_config_path"]).parent
         pdf_path = neg_dir / "output" / f"{session_id}_executed.pdf"
     except (OSError, json.JSONDecodeError, KeyError):
@@ -969,7 +1032,11 @@ def _creator_await_sign_and_finalize(
     try:
         client.complete_session(
             session_id=session_id,
-            executed_artifact=_build_artifact_uri(session_id, pdf_path),
+            executed_artifact=_build_artifact_uri(
+                session_id, pdf_path,
+                creator_pending_id=pending_id,
+                creator_role=creator_role,
+            ),
         )
     except SshsignSessionError as e:
         sys.stderr.write(f"complete-session failed (non-fatal): {e}\n")
@@ -1070,6 +1137,18 @@ def _joiner_await_sign_and_finalize(
                 continue
             status = (sess.get("status") or "").lower()
             if status == "completed":
+                # Write the creator's pending_id locally so upstream's
+                # finalize can find both envelopes (upstream's
+                # _collect_all_signatures reads <neg>/output/
+                # <neg>_<role>_pending.txt for each role; we only have
+                # our own — extract the creator's from the session's
+                # executed_artifact URI).
+                artifact_uri = sess.get("executed_artifact") or ""
+                creator_pid, creator_role = _parse_artifact_uri(artifact_uri)
+                if creator_pid and creator_role:
+                    _write_counterparty_pending(
+                        output_dir, session_id, creator_role, creator_pid,
+                    )
                 break
             if status == "expired":
                 body = format_event({"type": "session_expired"})
@@ -1195,6 +1274,14 @@ def run_negotiate(output_dir: str, chat_id_flag: str | None = None) -> int:
             sender(chat_id, message=(
                 "\u2705 Joined the negotiation. Starting now\u2026"  # ✅
             ))
+    else:
+        # Demo (solo) mode: push the "starting" card directly from the
+        # script now that SKILL.md tells the model not to emit its own
+        # preamble. This ensures the order is always
+        #   🔐 setup → 🔒 auth → 🚀 starting → rounds
+        # matching the two-party flow's
+        #   🔐 setup → 🔒 auth → 🤝 invite | ✅ joined → rounds
+        send_telegram(chat_id, message="\U0001f680 Starting negotiation\u2026")  # 🚀
 
     bot_username = os.environ.get("TELEGRAM_BOT_USERNAME", "AgenticPOA_bot")
     stream_rc, signing_event = _stream_to_telegram(

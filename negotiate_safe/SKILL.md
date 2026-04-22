@@ -68,7 +68,7 @@ Set `timeout` to 1200. The command will auto-background after ~10 seconds. That 
 
 ## Step 3: Relay the launch to the user
 
-Reply exactly once: "🚀 Starting negotiation"
+Reply with **NO_REPLY** — the skill pushes its own status cards (🔐 setup, 🔒 authorization, 🚀 starting / 🤝 invitation / ✅ joined) directly to the chat. Adding your own reply just duplicates them.
 
 **DO NOT** poll, run further commands, or describe the rounds yourself. The script sends every round, the signing URL, the "Signed & sealed" confirmation, and the executed PDF directly to the chat via the host. After the user signs, the browser opens the Telegram chat automatically — no further message arrives for you to handle. Your job for this skill is done.
 

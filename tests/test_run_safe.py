@@ -2252,6 +2252,67 @@ class TestBuildArtifactUri:
         uri = rs._build_artifact_uri("neg_abc", Path("/secret/path/file.pdf"))
         assert "/secret/path" not in uri
 
+    def test_embeds_creator_pending_id_for_joiner_finalize(self, tmp_path):
+        """Creator's pending_id goes into the URI so the joiner can
+        reconstruct the executed PDF locally — upstream's finalize needs
+        a pending file for each role, and the joiner only has its own."""
+        uri = rs._build_artifact_uri(
+            "neg_xyz", tmp_path / "x.pdf",
+            creator_pending_id="pnd_f123",
+            creator_role="founder",
+        )
+        assert "creator_pending=pnd_f123" in uri
+        assert "creator_role=founder" in uri
+
+
+class TestParseArtifactUri:
+    def test_parses_creator_pending_and_role(self):
+        pid, role = rs._parse_artifact_uri(
+            "sshsign://session/neg_xyz/executed.pdf"
+            "?creator_pending=pnd_abc&creator_role=founder"
+        )
+        assert pid == "pnd_abc"
+        assert role == "founder"
+
+    def test_missing_params_returns_empty(self):
+        pid, role = rs._parse_artifact_uri("sshsign://session/neg_x/executed.pdf")
+        assert pid == ""
+        assert role == ""
+
+    def test_only_creator_pending_partial(self):
+        pid, role = rs._parse_artifact_uri(
+            "sshsign://session/neg/executed.pdf?creator_pending=pnd_1"
+        )
+        assert pid == "pnd_1"
+        assert role == ""
+
+
+class TestWriteCounterpartyPending:
+    def test_writes_to_expected_path(self, tmp_path):
+        neg_dir = tmp_path / "negotiations" / "neg_abc"
+        (neg_dir / "keys").mkdir(parents=True)
+        (neg_dir / "founder.json").write_text("{}")
+        (tmp_path / "mint.json").write_text(json.dumps({
+            "negotiation_id": "neg_abc",
+            "founder_config_path": str(neg_dir / "founder.json"),
+        }))
+
+        rs._write_counterparty_pending(
+            tmp_path, session_id="neg_abc", role="founder", pending_id="pnd_f1",
+        )
+
+        expected = neg_dir / "output" / "neg_abc_founder_pending.txt"
+        assert expected.exists()
+        assert expected.read_text().strip() == "pnd_f1"
+
+    def test_no_mint_json_is_silent(self, tmp_path):
+        """When mint.json is missing, just log and continue — don't
+        crash the finalize path over a best-effort write."""
+        rs._write_counterparty_pending(
+            tmp_path, session_id="neg_x", role="founder", pending_id="pnd_x",
+        )
+        # No assertion — should complete without raising
+
 
 class TestCreatorAwaitSignAndFinalize:
     def _write_mint(self, tmp_path, neg_id: str = "neg_1"):
@@ -2288,7 +2349,12 @@ class TestCreatorAwaitSignAndFinalize:
         client.complete_session.assert_called_once()
         kwargs = client.complete_session.call_args.kwargs
         assert kwargs["session_id"] == "neg_1"
-        assert kwargs["executed_artifact"].startswith("sshsign://session/neg_1/")
+        uri = kwargs["executed_artifact"]
+        assert uri.startswith("sshsign://session/neg_1/")
+        # Creator's pending_id embedded so the joiner's finalize can find
+        # both envelopes — without this the joiner produces a single-
+        # signature PDF (or none, if finalize needs both to proceed).
+        assert "creator_pending=pnd_f" in uri
 
         # PDF delivered
         pdf_calls = [c for c in sender.call_args_list
@@ -2374,6 +2440,47 @@ class TestJoinerAwaitSignAndFinalize:
         msgs = [c.kwargs.get("message", "") for c in sender.call_args_list]
         assert any("counterparty" in m.lower() and "sign" in m.lower()
                    for m in msgs)
+
+    def test_completion_writes_creator_pending_from_artifact(self, tmp_path):
+        """When status=completed, the joiner must stash the creator's
+        pending_id to disk so upstream's finalize sees both envelopes."""
+        neg_dir = tmp_path / "negotiations" / "neg_1"
+        (neg_dir).mkdir(parents=True)
+        (neg_dir / "founder.json").write_text("{}")
+        (tmp_path / "mint.json").write_text(json.dumps({
+            "negotiation_id": "neg_1",
+            "founder_config_path": str(neg_dir / "founder.json"),
+        }))
+        pdf = tmp_path / "executed.pdf"
+        pdf.write_bytes(b"PDF")
+
+        client = MagicMock()
+        client.get_session.return_value = {
+            "status": "completed",
+            "executed_artifact": (
+                "sshsign://session/neg_1/executed.pdf"
+                "?creator_pending=pnd_founder_xyz&creator_role=founder"
+            ),
+        }
+
+        now_calls = iter([0.0, 1.0, 2.0, 3.0])
+        rs._joiner_await_sign_and_finalize(
+            output_dir=tmp_path, chat_id="1", sshsign_host="h",
+            pending_id="pnd_investor", session_id="neg_1",
+            sender=MagicMock(),
+            poll_fn=lambda **kw: True,
+            finalize_fn=lambda *a, **kw: pdf,
+            is_active_fn=lambda _o: True,
+            session_client=client,
+            sleep_fn=MagicMock(),
+            now_fn=lambda: next(now_calls),
+            typing_factory=lambda _c: self._fake_loop(),
+        )
+
+        # Creator's pending_id written where upstream finalize expects it
+        pending_file = neg_dir / "output" / "neg_1_founder_pending.txt"
+        assert pending_file.exists()
+        assert pending_file.read_text().strip() == "pnd_founder_xyz"
 
     def test_sign_timeout_returns_1(self, tmp_path):
         rc = rs._joiner_await_sign_and_finalize(
