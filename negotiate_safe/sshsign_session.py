@@ -42,6 +42,12 @@ class SessionNotMemberError(SshsignSessionError):
     """Operation requires the caller to be a member of the session."""
 
 
+class GroupAlreadyBoundError(SshsignSessionError):
+    """bind-group: this session is already bound to a different group_chat_id.
+    Write-once: the caller must cancel and start a new session if they want
+    to change the binding."""
+
+
 # Map sshsign's error strings back to Python exception classes. sshsign
 # returns plain-text error strings via JSON {"error": "..."}, so we match
 # on substrings. Brittle-ish but gives callers useful types.
@@ -59,6 +65,8 @@ def _error_from_message(msg: str) -> SshsignSessionError:
         return SessionNotMemberError(msg)
     if "terminal" in m or "already completed" in m or "already canceled" in m:
         return SessionTerminalError(msg)
+    if "group_already_bound" in m:
+        return GroupAlreadyBoundError(msg)
     return SshsignSessionError(msg)
 
 
@@ -199,6 +207,22 @@ class SshsignSession:
             "complete-session",
             "--session-id", session_id,
             "--executed-artifact", executed_artifact,
+        )
+
+    def bind_group(self, session_id: str, group_chat_id: int) -> dict[str, Any]:
+        """Bind a session to a chat venue (Telegram group chat_id or equivalent).
+
+        Write-once: if the session already has a binding that matches, this
+        is an idempotent no-op and returns the current session. If the
+        existing binding differs, raises GroupAlreadyBoundError — the caller
+        must cancel and start a new session to re-bind.
+
+        Any member may bind; rejected if the session is in a terminal state.
+        """
+        return self._run(
+            "bind-group",
+            "--session-id", session_id,
+            "--group-chat-id", str(int(group_chat_id)),
         )
 
     def audit_session(self, session_id: str) -> list[dict[str, Any]]:

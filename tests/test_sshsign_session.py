@@ -210,6 +210,53 @@ class TestTransportErrors:
             client.get_session(session_id="x")
 
 
+class TestBindGroup:
+    def test_builds_correct_argv(self):
+        runner = MagicMock(return_value=_cp(0, json.dumps({
+            "session_id": "neg_1", "status": "joined", "group_chat_id": -1001234567890,
+        })))
+        client = ss.SshsignSession(runner=runner)
+
+        result = client.bind_group("neg_1", -1001234567890)
+
+        assert result["group_chat_id"] == -1001234567890
+        argv = runner.call_args[0][0]
+        assert argv[:3] == ["ssh", "sshsign.dev", "bind-group"]
+        assert argv[argv.index("--session-id") + 1] == "neg_1"
+        assert argv[argv.index("--group-chat-id") + 1] == "-1001234567890"
+
+    def test_coerces_int(self):
+        runner = MagicMock(return_value=_cp(0, json.dumps({"status": "joined"})))
+        client = ss.SshsignSession(runner=runner)
+        # Passing a string-ish number should still work via int() coercion.
+        client.bind_group("neg_1", int("-42"))
+        argv = runner.call_args[0][0]
+        assert argv[argv.index("--group-chat-id") + 1] == "-42"
+
+    def test_raises_group_already_bound(self):
+        runner = MagicMock(return_value=_cp(0, json.dumps({"error": "group_already_bound"})))
+        client = ss.SshsignSession(runner=runner)
+        with pytest.raises(ss.GroupAlreadyBoundError):
+            client.bind_group("neg_1", -9999)
+
+    def test_idempotent_same_value_returns_session(self):
+        # Server returns the current session row (no error) on same-value rebind.
+        runner = MagicMock(return_value=_cp(0, json.dumps({
+            "session_id": "neg_1", "status": "joined", "group_chat_id": -1001,
+        })))
+        client = ss.SshsignSession(runner=runner)
+        result = client.bind_group("neg_1", -1001)
+        assert result["group_chat_id"] == -1001
+
+    def test_not_member_raises_typed(self):
+        runner = MagicMock(return_value=_cp(0, json.dumps({
+            "error": "caller is not a member of this session",
+        })))
+        client = ss.SshsignSession(runner=runner)
+        with pytest.raises(ss.SessionNotMemberError):
+            client.bind_group("neg_1", -1001)
+
+
 class TestAuditList:
     def test_returns_list(self):
         events = [
