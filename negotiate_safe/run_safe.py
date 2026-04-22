@@ -45,11 +45,16 @@ IDENTITY_SENTINEL_PATH = Path("/tmp/safe_negotiate/pending_negotiation.txt")
 def _identity_configured() -> bool:
     """Return True if the installed user's identity is already set up.
 
-    We treat FOUNDER_NAME as the anchor — on first install it's unset, and
-    the user runs the in-chat setup wizard to populate it alongside the
-    rest of the FOUNDER_*/INVESTOR_*/COMPANY_NAME env vars.
+    Either FOUNDER_NAME or INVESTOR_NAME counts — the user might only
+    negotiate from one side of the deal. A founder-only install sets
+    FOUNDER_NAME; an investor-only install sets INVESTOR_NAME (e.g. an
+    investor joining a two-party code via their own OC). Either way the
+    wizard has already run to completion and we skip the prompt.
     """
-    return bool((os.environ.get("FOUNDER_NAME") or "").strip())
+    return bool(
+        (os.environ.get("FOUNDER_NAME") or "").strip()
+        or (os.environ.get("INVESTOR_NAME") or "").strip()
+    )
 
 
 SKILL_DIR = Path(__file__).resolve().parent
