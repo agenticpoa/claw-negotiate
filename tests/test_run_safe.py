@@ -833,13 +833,15 @@ class TestRegisterSigningSession:
         assert call.kwargs["metadata_public"] == {
             "use_case": "safe", "version": 1, "company_name": "Acme",
         }
-        # metadata_member picks up identity fields, drops null/empty
-        # (company_name is NOT here — it's in metadata_public for pre-join
-        # visibility).
+        # metadata_member is intentionally minimal until sshsign's SSH
+        # argv parser is fixed to survive bare string values (currently
+        # strips inner double quotes, corrupting "Blue Fund"-style tokens).
+        # Telegram user_id is the only ACL-critical field for /bind.
+        # company_name stays in metadata_public (pre-join visibility).
         md = call.kwargs["metadata_member"]
-        assert md["founder_name"] == "Jane"
-        assert md["investor_firm"] == "Bay"
         assert "company_name" not in md
+        assert "investor_firm" not in md  # dropped until server bug fix
+        assert "founder_name" not in md
 
     def test_investor_role_reads_investor_pubkey(self, tmp_path):
         neg_dir = self._neg_dir(tmp_path, role="investor")
@@ -3400,6 +3402,24 @@ class TestRunBind:
         assert kwargs["session_code"] == "INV-7K3X9"
         assert kwargs["group_chat_id"] == -1001234
         assert kwargs["from_user_id"] == 111
+
+    def test_cli_strips_telegram_prefix_from_ids(self, tmp_path, monkeypatch):
+        """OC's envelope encodes ids as `telegram:<numeric>`. The bind
+        subcommand must strip that prefix before int-coercing."""
+        monkeypatch.setattr(sys, "argv", [
+            "run_safe.py", "bind",
+            "--message", "/bind@AgenticPOA_bot INV-PFX1",
+            "--chat-id", "telegram:-5215860483",
+            "--from-id", "telegram:6413315062",
+            "--dm-chat-id", "telegram:6413315062",
+        ])
+        with patch.object(rs, "run_bind", return_value=0) as mock_bind:
+            rc = rs.main()
+        assert rc == 0
+        kwargs = mock_bind.call_args.kwargs
+        assert kwargs["group_chat_id"] == -5215860483
+        assert kwargs["from_user_id"] == 6413315062
+        assert kwargs["dm_chat_id_flag"] == "6413315062"
 
     def test_cli_rejects_bind_with_no_code(self, tmp_path, monkeypatch, capsys):
         monkeypatch.setattr(sys, "argv", [

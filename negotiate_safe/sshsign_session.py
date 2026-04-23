@@ -153,10 +153,16 @@ class SshsignSession:
         ]
         if party_did:
             flags += ["--party-did", party_did]
+        # Compact JSON (no whitespace) — sshsign transports these as SSH
+        # argv values, and the server splits on whitespace. A space inside
+        # a JSON string (e.g. "Blue Fund") triggers a rejoin that produces
+        # invalid output; compact separators sidestep the whole dance.
         if metadata_public is not None:
-            flags += ["--metadata-public", json.dumps(metadata_public)]
+            flags += ["--metadata-public",
+                      json.dumps(metadata_public, separators=(",", ":"))]
         if metadata_member is not None:
-            flags += ["--metadata-member", json.dumps(metadata_member)]
+            flags += ["--metadata-member",
+                      json.dumps(metadata_member, separators=(",", ":"))]
         if ttl_seconds is not None:
             flags += ["--ttl", str(ttl_seconds)]
         return self._run("create-session", *flags)

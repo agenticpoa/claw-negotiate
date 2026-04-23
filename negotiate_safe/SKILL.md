@@ -1,6 +1,6 @@
 ---
 name: negotiate_safe
-description: Negotiate a YC SAFE on behalf of either a founder or an investor — the counterparty is played by an AI agent (demo mode). Extracts the user's role and constraints from natural language, mints a per-negotiation APOA token scoped to this deal, runs a formal alternating-offers negotiation with protocol-enforced bounds, logs every offer to sshsign, and produces an executed PDF with a cryptographic audit trail. Revokable at any time.
+description: Negotiate a YC SAFE on behalf of either a founder or an investor — the counterparty is played by an AI agent (demo mode) or a real human on another OpenClaw instance (two-party mode). Extracts the user's role and constraints from natural language, mints a per-negotiation APOA token scoped to this deal, runs a formal alternating-offers negotiation with protocol-enforced bounds, logs every offer to sshsign, and produces an executed PDF with a cryptographic audit trail. Revokable at any time. ALSO handles the Phase 8 `/bind` slash command (pattern `/bind` with optional `@BotName` suffix and `INV-XXXXX` code) used in Telegram group chats to bind an existing two-party negotiation to the current group as its live-observation venue — route ANY message starting with `/bind` to this skill regardless of surrounding context.
 user-invocable: true
 metadata: {"openclaw":{"emoji":"🤝","requires":{"bins":["python3","ssh"],"env":["ANTHROPIC_API_KEY","NEGOTIATE_REPO_PATH","USER_DID"]},"homepage":"https://github.com/agenticpoa/negotiate"}}
 ---
@@ -13,24 +13,24 @@ IMPORTANT: All exec calls MUST be simple commands. Use ONLY `python3 /path/to/sc
 
 Before running the negotiation steps, check the user's message against these shortcuts:
 
-**A. "Show me my profile" / "What's my profile" / "Who am I" / "My profile":**
+**A. Message starts with `/bind` (with or without `@BotName` suffix and with or without a trailing `INV-XXXXX` code):** THIS IS ALWAYS YOUR SKILL. Even in a brand-new group chat with no prior context, a `/bind` message is a Phase 8 group-bind request and MUST route here. Run:
+```
+python3 /root/.agents/skills/negotiate_safe/run_safe.py bind --message "<the full /bind message text exactly as received>" --chat-id <chat.id from the inbound envelope> --from-id <from.id from the inbound envelope>
+```
+End your turn. Do NOT relay anything, do not try to parse the code yourself, and do not send `NO_REPLY`. The skill posts its own confirmation card (or a specific error card) into the group on your behalf. Examples that MATCH this shortcut: `/bind INV-7K3X9`, `/bind@AgenticPOA_bot INV-4N6PK`, `/bind`, `/bind@SomeBot`.
+
+**B. "Show me my profile" / "What's my profile" / "Who am I" / "My profile":**
 ```
 python3 /root/.agents/skills/negotiate_safe/run_safe.py profile
 ```
 End your turn. The skill pushes the profile card to chat.
 
-**B. "Update my profile…" / "Change my name…" / "I'm now …" (and the user supplies new identity info in the same message):**
+**C. "Update my profile…" / "Change my name…" / "I'm now …" (and the user supplies new identity info in the same message):**
 Write the update text to `/tmp/safe_identity.txt`, then:
 ```
 python3 /root/.agents/skills/negotiate_safe/run_safe.py setup --message-file /tmp/safe_identity.txt
 ```
 End your turn. The skill overwrites whichever fields are in the message and confirms in chat.
-
-**C. `/bind INV-XXXXX` (in a Telegram group):** the user is binding a two-party negotiation to this group. Pass the raw inbound envelope fields straight through:
-```
-python3 /root/.agents/skills/negotiate_safe/run_safe.py bind --message "<the full /bind message text>" --chat-id <chat.id> --from-id <from.id>
-```
-The skill performs the ACL check (only the founder may bind), calls sshsign's `bind-group` RPC, and posts a confirmation card in the group. End your turn. Do not relay anything.
 
 **D. Anything else** (negotiation request, "go" confirmation, or a correction) → proceed with Step 1 below.
 

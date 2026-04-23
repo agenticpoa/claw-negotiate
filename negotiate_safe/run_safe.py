@@ -529,19 +529,16 @@ def _register_signing_session(
     metadata_public = {"use_case": "safe", "version": 1}
     if constraints.get("company_name"):
         metadata_public["company_name"] = constraints["company_name"]
-    metadata_member = {
-        k: v for k, v in {
-            "founder_name": constraints.get("founder_name"),
-            "founder_title": constraints.get("founder_title"),
-            "investor_name": constraints.get("investor_name"),
-            "investor_firm": constraints.get("investor_firm"),
-        }.items() if v
-    }
-    # Phase 8 /bind ACL: stash the founder's Telegram user_id so the
-    # bind handler can verify the caller of /bind in a group matches
-    # the session creator. In DMs, Telegram's chat_id equals the user's
-    # numeric user_id by convention, so the caller passes chat_id here.
-    # Investors (joiners) don't need this stored — only the founder binds.
+    # WORKAROUND: sshsign's SSH argv parser strips inner double quotes
+    # and its `fixBareJSONKeys` recovery only quotes keys, not bare
+    # string values. Fields like "Blue Fund" (contains a space) or "Alex"
+    # survive transit as bare tokens, which breaks json.loads on the
+    # server round-trip. Until a proper server-side fix lands (planned:
+    # `--metadata-member-b64` base64 flag), keep metadata_member limited
+    # to the single ACL-critical field: `telegram.founder_user_id`.
+    # Investor display names come back via the constraints dict locally
+    # and aren't needed for /bind ACL.
+    metadata_member = {}
     if telegram_user_id and user_role == "founder":
         metadata_member["telegram"] = {"founder_user_id": int(telegram_user_id)}
 
@@ -2442,17 +2439,27 @@ def main() -> int:
         if not code:
             sys.stderr.write("bind: no INV-XXXXX code found in --session-code or --message.\n")
             return 2
+        # OC's Telegram envelope encodes ids as `telegram:<numeric>`;
+        # tolerate that prefix plus any leading/trailing whitespace.
+        def _coerce_id(raw: str) -> int:
+            s = (raw or "").strip()
+            if ":" in s:
+                s = s.rsplit(":", 1)[-1]
+            return int(s)
         try:
-            group_chat_id = int(args.chat_id)
-            from_user_id = int(args.from_id)
+            group_chat_id = _coerce_id(args.chat_id)
+            from_user_id = _coerce_id(args.from_id)
         except ValueError as e:
             sys.stderr.write(f"bind: --chat-id and --from-id must be integers: {e}\n")
             return 2
+        dm_flag = args.dm_chat_id or None
+        if dm_flag and ":" in dm_flag:
+            dm_flag = dm_flag.rsplit(":", 1)[-1]
         return run_bind(
             session_code=code,
             group_chat_id=group_chat_id,
             from_user_id=from_user_id,
-            dm_chat_id_flag=args.dm_chat_id or None,
+            dm_chat_id_flag=dm_flag,
         )
     else:
         parser.print_help()
