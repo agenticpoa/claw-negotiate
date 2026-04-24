@@ -144,7 +144,8 @@ def format_confirm(event: dict[str, Any]) -> str:
         f"**Discount:** {fmt_percent(c['discount_min'])} or better\n"
         f"**Pro-rata rights:** {labels[c['pro_rata']]}\n"
         f"**MFN clause:** {mfn_labels[c['mfn']]}\n\n"
-        "I'll need your approval before signing anything.\n\n"
+        "I'll negotiate within these terms only. "
+        "You'll sign the final agreement yourself.\n\n"
         "If these terms look right, reply **GO**. Otherwise, please send your edits."
     )
 
