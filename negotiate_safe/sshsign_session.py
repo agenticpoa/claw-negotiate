@@ -249,3 +249,38 @@ class SshsignSession:
         raise SshsignSessionError(
             f"expected audit list, got: {type(result).__name__}"
         )
+
+    # P7-5: creator-only field updates on the caller's own member row.
+    # Whitelist enforced client-side AND server-side; the server is the
+    # authority, this check is a fast-fail for typos.
+    _UPDATABLE_MEMBER_FIELDS = frozenset({
+        "founder_resumed_at", "founder_streaming_at",
+    })
+
+    def update_session_member(
+        self, session_id: str, field: str, value: int,
+    ) -> dict[str, Any]:
+        """Update a whitelisted field on the caller's own member row.
+
+        Used by P7-5 durable founder-wait:
+          * ``founder_resumed_at`` — set when a cron-scanned ``scan``
+            turn reattaches to a waiting session.
+          * ``founder_streaming_at`` — set once ``_stream_to_telegram``
+            is actually running; the investor polls on this, not on
+            ``founder_resumed_at``, so a crash between the two is
+            recoverable.
+
+        Creator-only (enforced by sshsign). Raises SshsignSessionError
+        on server-side rejection (non-creator, non-whitelisted field,
+        terminal session).
+        """
+        if field not in self._UPDATABLE_MEMBER_FIELDS:
+            raise SshsignSessionError(
+                f"field not writable via update-session-member: {field!r}"
+            )
+        return self._run(
+            "update-session-member",
+            "--session-id", session_id,
+            "--field", field,
+            "--value", str(int(value)),
+        )

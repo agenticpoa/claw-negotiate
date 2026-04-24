@@ -19,6 +19,12 @@ python3 /root/.agents/skills/negotiate_safe/run_safe.py bind --message "<the ful
 ```
 End your turn. Do NOT relay anything, do not try to parse the code yourself, and do not send `NO_REPLY`. The skill posts its own confirmation card (or a specific error card) into the group on your behalf. Examples that MATCH this shortcut: `/bind INV-7K3X9`, `/bind@AgenticPOA_bot INV-4N6PK`, `/bind`, `/bind@SomeBot`.
 
+**A.5. Inbound is a system event whose body starts with `negotiate_safe_scan`:** THIS IS ALWAYS YOUR SKILL. This fires from the droplet's own OpenClaw cron job (installed at mint time for P7-5 durable founder-wait). It tells the skill to check every waiting two-party negotiation and resume any whose investor has just joined. Run:
+```
+python3 /root/.agents/skills/negotiate_safe/run_safe.py scan
+```
+End your turn. `scan` is idempotent, handles its own Telegram output (orienting card in the bound group, streaming, status updates), and exits 0 even if there's nothing to resume. Do not re-check, do not relay, do not emit any message yourself — especially nothing that starts with `/`, which would bounce back through this very dispatcher.
+
 **B. "Show me my profile" / "What's my profile" / "Who am I" / "My profile":**
 ```
 python3 /root/.agents/skills/negotiate_safe/run_safe.py profile
@@ -70,7 +76,7 @@ Once the user confirms, launch:
 python3 /root/.agents/skills/negotiate_safe/run_safe.py negotiate --output-dir /tmp/safe_negotiate
 ```
 
-Set `timeout` to 1200. The command will auto-background after ~10 seconds. That is expected.
+Set `timeout` to 1200. The command will auto-background after ~10 seconds. That is expected. If the investor joins after the foreground turn is reaped, a droplet-installed cron job fires the `negotiate_safe_scan` system event every ~30s and re-enters via rule A.5 above — no action from you.
 
 ## Step 3: Relay the launch to the user
 

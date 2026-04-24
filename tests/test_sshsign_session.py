@@ -286,3 +286,61 @@ class TestAuditList:
         client = ss.SshsignSession(runner=runner)
         with pytest.raises(ss.SshsignSessionError, match="expected audit list"):
             client.audit_session("neg_1")
+
+
+class TestUpdateSessionMember:
+    def test_builds_correct_argv_for_resumed_at(self):
+        runner = MagicMock(return_value=_cp(0, json.dumps({"ok": True})))
+        client = ss.SshsignSession(runner=runner)
+        client.update_session_member("neg_1", field="founder_resumed_at", value=1714000000)
+        argv = runner.call_args[0][0]
+        assert argv[:3] == ["ssh", "sshsign.dev", "update-session-member"]
+        assert argv[argv.index("--session-id") + 1] == "neg_1"
+        assert argv[argv.index("--field") + 1] == "founder_resumed_at"
+        assert argv[argv.index("--value") + 1] == "1714000000"
+
+    def test_builds_correct_argv_for_streaming_at(self):
+        runner = MagicMock(return_value=_cp(0, json.dumps({"ok": True})))
+        client = ss.SshsignSession(runner=runner)
+        client.update_session_member("neg_1", field="founder_streaming_at", value=1714000001)
+        argv = runner.call_args[0][0]
+        assert argv[argv.index("--field") + 1] == "founder_streaming_at"
+
+    def test_client_side_whitelist_rejects_unknown_field(self):
+        runner = MagicMock()
+        client = ss.SshsignSession(runner=runner)
+        with pytest.raises(ss.SshsignSessionError, match="not writable"):
+            client.update_session_member("neg_1", field="created_by", value=42)
+        # Must short-circuit before calling ssh.
+        runner.assert_not_called()
+
+    def test_server_rejects_non_creator(self):
+        runner = MagicMock(return_value=_cp(0, json.dumps({
+            "error": "only the session creator can update members",
+        })))
+        client = ss.SshsignSession(runner=runner)
+        with pytest.raises(ss.SessionNotCreatorError):
+            client.update_session_member(
+                "neg_1", field="founder_resumed_at", value=1,
+            )
+
+    def test_server_rejects_non_whitelisted(self):
+        runner = MagicMock(return_value=_cp(0, json.dumps({
+            "error": "field not writable via update-session-member",
+        })))
+        client = ss.SshsignSession(runner=runner)
+        # Client whitelist bypassed here to exercise the server error path
+        # (real server will reject even when the client lets it through).
+        client._UPDATABLE_MEMBER_FIELDS = frozenset({"some_future_field"})
+        with pytest.raises(ss.SshsignSessionError):
+            client.update_session_member(
+                "neg_1", field="some_future_field", value=1,
+            )
+
+    def test_coerces_int_value(self):
+        runner = MagicMock(return_value=_cp(0, json.dumps({"ok": True})))
+        client = ss.SshsignSession(runner=runner)
+        client.update_session_member("neg_1", field="founder_resumed_at", value=17140000.7)
+        argv = runner.call_args[0][0]
+        # int() coercion drops the fractional part.
+        assert argv[argv.index("--value") + 1] == "17140000"

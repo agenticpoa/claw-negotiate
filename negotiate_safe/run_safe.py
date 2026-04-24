@@ -45,6 +45,7 @@ from sshsign_session import (
     SessionNotMemberError,
     GroupAlreadyBoundError,
 )
+import state_store
 
 
 IDENTITY_SENTINEL_PATH = Path("/tmp/safe_negotiate/pending_negotiation.txt")
@@ -475,6 +476,33 @@ def run_mint(output_dir: str, config: dict, telegram_user_id: int | None = None)
             mint_output.update(session_registered)
 
     (out / "mint.json").write_text(json.dumps(mint_output, indent=2))
+
+    # P7-5: leave a pointer so a later cron-scanned `scan` turn can
+    # resume this negotiation if OC reaps the founder's foreground
+    # process before the investor joins. Founder-only (investor has
+    # no resume flow) and two-party-only (demo mode runs inline).
+    if mint_output["mode"] == "two_party" and user_role == "founder":
+        session_code = mint_output.get("session_code")
+        if session_code:
+            try:
+                state_store.write_state({
+                    "negotiation_id": negotiation_id,
+                    "output_dir": str(out),
+                    "session_code": session_code,
+                })
+            except state_store.StateCorruptError as e:
+                # Non-fatal: the founder can still wait inline this
+                # turn; they just won't survive a reap. Surface the
+                # reason so ops can fix the state dir.
+                sys.stderr.write(f"state_store.write_state failed: {e}\n")
+        # Install the global cron scan job (idempotent). Logged but
+        # not fatal — if OC rejects --every 30s or the pairing wall
+        # blocks us, the mint still succeeds and ops can install the
+        # job manually.
+        interval = os.environ.get("CLAW_NEGOTIATE_SCAN_INTERVAL", "30s")
+        ok, err = ensure_cron(interval=interval)
+        if not ok and err:
+            sys.stderr.write(f"ensure_cron: {err}\n")
 
     sys.stdout.write(json.dumps({
         "type": "authorized",
@@ -1817,11 +1845,27 @@ def run_negotiate(output_dir: str, chat_id_flag: str | None = None) -> int:
     sshsign_host = os.environ.get("SSHSIGN_HOST", "sshsign.dev")
     group_chat_id: str | None = None
     if mint.get("mode") == "two_party":
-        group_chat_id = _resolve_group_chat_id(
-            _sshsign_session_id(mint.get("negotiation_id") or ""),
-        )
+        session_id_for_wait = _sshsign_session_id(mint.get("negotiation_id") or "")
+        group_chat_id = _resolve_group_chat_id(session_id_for_wait)
+        role = (mint.get("user_role") or "").lower()
+
+        # P7-5 investor-side gate: don't let run_distributed spawn
+        # until the founder's agent has flipped founder_streaming_at.
+        # Otherwise upstream hangs on "waiting for founder's opening
+        # offer" until its internal timeout. The gate fires ONLY on
+        # the investor side; the founder has already resumed locally
+        # (or is about to, via this turn's _stream_to_telegram).
+        if role == "investor" and group_chat_id:
+            wait_status = _investor_wait_for_founder_streaming(
+                session_id=session_id_for_wait,
+                group_chat_id=group_chat_id,
+            )
+            if wait_status != "streaming":
+                # Timeout or terminal: surface happened already; the
+                # caller (run_negotiate) should NOT spawn the stream.
+                return 0 if wait_status == "terminal" else 4
+
         if group_chat_id:
-            role = (mint.get("user_role") or "").lower()
             if role == "founder":
                 kickoff = (
                     "\U0001f3ac Founder's agent is live — rounds start next."  # 🎬
@@ -2274,6 +2318,461 @@ def _extract_bind_code(message: str) -> str | None:
     return m.group(1).upper()
 
 
+CRON_JOB_NAME = "negotiate_safe-scan"
+
+
+# P7-5 investor-side wait tuning. Exposed as module constants so tests
+# can monkeypatch to fast values and ops can env-override for the
+# post-Day-4 tuning pass.
+INVESTOR_WAIT_POLL_INTERVAL = float(os.environ.get("CLAW_NEGOTIATE_WAIT_POLL", "3"))
+INVESTOR_WAIT_HEARTBEAT_AT = float(os.environ.get("CLAW_NEGOTIATE_WAIT_HEARTBEAT", "15"))
+INVESTOR_WAIT_TIMEOUT = float(os.environ.get("CLAW_NEGOTIATE_WAIT_TIMEOUT", "180"))
+
+
+def _investor_wait_for_founder_streaming(
+    session_id: str,
+    group_chat_id: str,
+    session_client=None,
+    sender=send_telegram,
+    typing_factory=None,
+    sleep_fn=None,
+    now_fn=None,
+) -> str:
+    """Bounded poll on founder_streaming_at (not founder_resumed_at).
+
+    Invoked immediately after the investor's join completes, before
+    ``_stream_to_telegram`` (because upstream's run_distributed will
+    hang on the missing opening offer if the founder's agent hasn't
+    resumed yet). Posts a waiting card, starts a typing indicator in
+    the group, and polls the session row every 3s for up to 180s.
+
+    Return values (all lowercase strings for easy grep):
+      "streaming"     — founder_streaming_at set; caller proceeds to stream
+      "timeout"       — 180s elapsed; caller returns without streaming
+      "terminal"      — session canceled/rescinded/completed/expired mid-wait
+
+    Cards emitted:
+      waiting          → right after join (investor_waiting_for_founder)
+      heartbeat        → at ~15s if still waiting (investor_waiting_heartbeat)
+      both_online      → on streaming_at hit (investor_both_online)
+      timeout          → on 180s cap (investor_wake_timeout)
+      session_ended    → on terminal status (investor_session_ended)
+
+    The returned value determines what the caller does next:
+      streaming → call _stream_to_telegram
+      timeout or terminal → return from run_negotiate without streaming
+    """
+    import time
+
+    if sleep_fn is None:
+        sleep_fn = time.sleep
+    if now_fn is None:
+        now_fn = time.time
+
+    client = session_client or SshsignSession(
+        host=os.environ.get("SSHSIGN_HOST", "sshsign.dev"),
+    )
+
+    # Waiting card first — sets the expectation even if the poll
+    # returns immediately (same tick the founder flipped streaming_at).
+    body = format_event({"type": "investor_waiting_for_founder"})
+    if body:
+        sender(group_chat_id, message=body)
+
+    # Typing indicator in the group. Factory injection is for tests;
+    # production uses the real bot token.
+    if typing_factory is None:
+        typing = TypingLoop(chat_id=group_chat_id, bot_token=get_bot_token())
+    else:
+        typing = typing_factory(group_chat_id)
+    typing.start()
+
+    try:
+        start = now_fn()
+        heartbeat_sent = False
+        # Add one extra iteration past the cap so we definitively
+        # timeout rather than miss the final check by a hair.
+        while True:
+            elapsed = now_fn() - start
+            if elapsed >= INVESTOR_WAIT_TIMEOUT:
+                body = format_event({"type": "investor_wake_timeout"})
+                if body:
+                    sender(group_chat_id, message=body)
+                return "timeout"
+
+            try:
+                sess = client.get_session(session_id=session_id)
+            except SshsignSessionError as e:
+                # Transient: log and keep polling. A persistent error
+                # will time out eventually and surface via the timeout
+                # card. We don't want a network blip to abort the wait
+                # given the founder's resume is the actual blocker.
+                sys.stderr.write(f"wait-for-founder: get-session: {e}\n")
+                sleep_fn(INVESTOR_WAIT_POLL_INTERVAL)
+                continue
+
+            status = (sess.get("status") or "").lower()
+            if status in ("canceled", "rescinded", "rescinded_after_sign",
+                          "completed", "expired"):
+                body = format_event({
+                    "type": "investor_session_ended", "status": status,
+                })
+                if body:
+                    sender(group_chat_id, message=body)
+                return "terminal"
+
+            # Check founder's streaming_at. Members list is the
+            # authoritative source; scan the founder row.
+            streaming_at = None
+            for m in (sess.get("members") or []):
+                if (m.get("role") or "").lower() == "founder":
+                    streaming_at = m.get("founder_streaming_at")
+                    break
+            if streaming_at:
+                body = format_event({"type": "investor_both_online"})
+                if body:
+                    sender(group_chat_id, message=body)
+                return "streaming"
+
+            if not heartbeat_sent and elapsed >= INVESTOR_WAIT_HEARTBEAT_AT:
+                body = format_event({"type": "investor_waiting_heartbeat"})
+                if body:
+                    sender(group_chat_id, message=body)
+                heartbeat_sent = True
+
+            sleep_fn(INVESTOR_WAIT_POLL_INTERVAL)
+    finally:
+        try:
+            typing.stop()
+        except Exception:
+            pass
+
+
+def ensure_cron(
+    interval: str = "30s",
+    runner: "callable | None" = None,
+) -> tuple[bool, str | None]:
+    """Install the ``negotiate_safe-scan`` cron job if absent.
+
+    Invoked from the founder's mint path (``_register_signing_session``
+    tail) so every fresh two-party session guarantees a running cron
+    job on this droplet. Idempotent: if the job already exists, do
+    nothing. Non-fatal on any failure — cron is a recovery mechanism,
+    not a correctness gate, and the founder's current turn still
+    works inline. Ops-visible errors go to stderr.
+
+    Parameters
+    ----------
+    interval
+        ``--every`` argument. Default ``30s``; the plan notes that
+        OC may floor at ``60s`` and we re-tune during live dry-run.
+    runner
+        Injectable subprocess runner for tests; defaults to
+        ``subprocess.run``.
+
+    Returns
+    -------
+    (installed, error_message)
+        ``installed`` is True if we called ``cron add`` (or True if
+        the job already existed — both are "in place"). ``False``
+        means an error prevented us from ensuring the job; error
+        message is returned for caller-side logging.
+    """
+    if runner is None:
+        runner = subprocess.run
+
+    # list + parse-json to detect the existing job.
+    try:
+        list_res = runner(
+            ["openclaw", "cron", "list", "--json"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        return False, f"openclaw cron list failed: {e}"
+
+    if list_res.returncode != 0:
+        # Pairing wall, unpaired gateway, etc. Log + continue; scan
+        # can be installed manually by ops as a fallback.
+        return False, (
+            f"openclaw cron list rc={list_res.returncode}: "
+            f"{(list_res.stderr or list_res.stdout or '').strip()[:200]}"
+        )
+
+    try:
+        jobs = json.loads(list_res.stdout or "[]")
+    except json.JSONDecodeError as e:
+        return False, f"openclaw cron list: invalid JSON: {e}"
+
+    if isinstance(jobs, dict):
+        # Some OC versions wrap the list under a top-level key.
+        jobs = jobs.get("jobs") or jobs.get("items") or []
+
+    for job in jobs or []:
+        if isinstance(job, dict) and job.get("name") == CRON_JOB_NAME:
+            # Already installed. Don't touch it — operator may have
+            # tuned the interval since mint-time.
+            return True, None
+
+    # Not installed — add it.
+    add_argv = [
+        "openclaw", "cron", "add",
+        "--name", CRON_JOB_NAME,
+        "--every", interval,
+        "--session", "isolated",
+        "--system-event", "negotiate_safe_scan",
+        "--no-deliver",
+        "--exact",
+        "--keep-after-run",
+    ]
+    try:
+        add_res = runner(add_argv, capture_output=True, text=True, timeout=10)
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        return False, f"openclaw cron add failed: {e}"
+
+    if add_res.returncode != 0:
+        return False, (
+            f"openclaw cron add rc={add_res.returncode}: "
+            f"{(add_res.stderr or add_res.stdout or '').strip()[:200]}"
+        )
+    return True, None
+
+
+def _run_founder_resume(
+    state: dict,
+    sshsign_host: str | None = None,
+    session_client=None,
+    sender=send_telegram,
+    now_fn=None,
+) -> int:
+    """P7-5 shared resume path.
+
+    Called from two sites:
+      * ``run_bind`` when the investor has ALREADY joined before the
+        founder pasted ``/bind`` (fast path: founder is live in the
+        bind turn; resume inline).
+      * ``run_scan`` when an OpenClaw cron tick finds a waiting session
+        that has advanced to ``joined`` but hasn't yet started streaming
+        (slow path: founder's original process was reaped; wake fresh).
+
+    Idempotency: if ``founder_resumed_at`` is already non-null on the
+    sshsign session, exit without re-streaming. A concurrent scan tick
+    or a bind racing with a scan can legitimately fire twice; the
+    sshsign row is the single coordination point.
+
+    State cleanup: on terminal session status, delete the local state
+    pointer so the next scan doesn't keep poking a dead session.
+
+    Return codes:
+      0  resume completed (or cleanly no-op'd)
+      1  resume not yet ready (status != joined; caller tries again later)
+      2  terminal session — cleaned up; do not retry
+      3  sshsign transport error
+    """
+    import time
+    if now_fn is None:
+        now_fn = time.time
+
+    negotiation_id = state.get("negotiation_id") or ""
+    output_dir_raw = state.get("output_dir") or ""
+    if not negotiation_id or not output_dir_raw:
+        sys.stderr.write(
+            "resume: state missing negotiation_id or output_dir; skipping\n"
+        )
+        return 2
+
+    out = Path(output_dir_raw)
+    if not out.exists():
+        # Output_dir was wiped (e.g., /tmp cleaned) — nothing to resume.
+        # Drop the pointer so future scans don't keep re-reading it.
+        sys.stderr.write(
+            f"resume: output_dir {out} missing; cleaning state pointer\n"
+        )
+        state_store.delete_state(negotiation_id)
+        return 2
+
+    sshsign_host = sshsign_host or os.environ.get("SSHSIGN_HOST", "sshsign.dev")
+    client = session_client or SshsignSession(host=sshsign_host)
+    session_id = _sshsign_session_id(negotiation_id)
+
+    try:
+        sess = client.get_session(session_id=session_id)
+    except SessionNotFoundError:
+        # sshsign no longer knows this session. Local state is stale.
+        state_store.delete_state(negotiation_id)
+        return 2
+    except SshsignSessionError as e:
+        sys.stderr.write(f"resume: get-session failed: {e}\n")
+        return 3
+
+    status = (sess.get("status") or "").lower()
+    if status in ("canceled", "rescinded", "rescinded_after_sign", "completed", "expired"):
+        # Terminal. Drop the pointer; don't re-emit status cards (the
+        # turn that terminated the session already sent the right one).
+        sys.stderr.write(
+            f"resume: session {session_id} is terminal ({status}); "
+            f"cleaning state pointer\n"
+        )
+        state_store.delete_state(negotiation_id)
+        return 2
+
+    if status != "joined":
+        # Investor hasn't joined yet. Scan will try again on next tick.
+        return 1
+
+    # Find this caller's member row and check dedup / founder_resumed_at.
+    members = sess.get("members") or []
+    founder_row: dict | None = None
+    for m in members:
+        if (m.get("role") or "").lower() == "founder":
+            founder_row = m
+            break
+    if founder_row is None:
+        sys.stderr.write("resume: session has no founder member row; cleaning\n")
+        state_store.delete_state(negotiation_id)
+        return 2
+
+    if founder_row.get("founder_resumed_at"):
+        # Another tick (or an in-process bind) already started the
+        # resume. Stay idle; that turn owns the stream.
+        return 0
+
+    # Mark ourselves as the resuming turn. This is the idempotency
+    # gate: sshsign's whitelisted field set makes the write creator-
+    # only, and a subsequent scan on the same tick will see non-null
+    # and bail above.
+    now = int(now_fn())
+    try:
+        client.update_session_member(
+            session_id, field="founder_resumed_at", value=now,
+        )
+    except SshsignSessionError as e:
+        sys.stderr.write(f"resume: update-session-member resumed_at: {e}\n")
+        return 3
+
+    group_chat_id = _resolve_group_chat_id(session_id, session_client=client)
+
+    # Orienting card (never starts with '/', per P7-5 invariant).
+    orient_body = format_event({
+        "type": "founder_resumed",
+        "session_code": state.get("session_code"),
+    })
+    if orient_body:
+        target = group_chat_id or ""
+        if target:
+            sender(target, message=orient_body)
+
+    # Re-hydrate mint + constraints from disk. These were written at
+    # mint-time and output_dir is stable across OC reap events.
+    try:
+        config = json.loads((out / "config.json").read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        sys.stderr.write(f"resume: loading config.json: {e}\n")
+        return 3
+    try:
+        mint = json.loads((out / "mint.json").read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        sys.stderr.write(f"resume: loading mint.json: {e}\n")
+        return 3
+
+    # Founder's DM chat_id is preserved in config.json by run_prepare
+    # (chat_id_flag / discovered from OC sessions). Fall back to empty
+    # if truly absent — the stream still works, signing URL just lands
+    # in whichever DM the typing loop defaults to.
+    founder_dm = config.get("chat_id") or ""
+
+    bot_username = os.environ.get("TELEGRAM_BOT_USERNAME", "AgenticPOA_bot")
+    history_neg_id = mint.get("negotiation_id")
+
+    stream_rc, signing_event = _stream_to_telegram(
+        output_dir=out,
+        chat_id=str(founder_dm),
+        constraints=config.get("constraints"),
+        bot_username=bot_username,
+        group_chat_id=group_chat_id,
+        negotiation_id=history_neg_id,
+        sshsign_host=sshsign_host,
+    )
+
+    # Mark streaming_at — this is the investor's real gate signal, not
+    # founder_resumed_at. A crash between resumed_at and streaming_at
+    # leaves the investor's bounded poll still waiting (correct) and
+    # a future scan tick re-idempotent-checks resumed_at (sees it set,
+    # logs dedup, exits).
+    try:
+        client.update_session_member(
+            session_id, field="founder_streaming_at", value=int(now_fn()),
+        )
+    except SshsignSessionError as e:
+        # Non-fatal: the investor will time out at 180s and emergency
+        # card, but we'd rather the founder's stream keep going than
+        # abort here. The audit trail on sshsign captures the gap.
+        sys.stderr.write(f"resume: update-session-member streaming_at: {e}\n")
+
+    if stream_rc != 0 or not signing_event:
+        # Stream failed or exited before a signing event landed. State
+        # stays (not terminal yet); next tick will re-check and dedup
+        # if resumed_at is still set. Real failures are rare; let the
+        # scan loop + audit log guide recovery.
+        return stream_rc
+
+    pending_id = signing_event.get("pending_id") or ""
+    if not pending_id:
+        return 0
+
+    # Creator (founder) finalize path — same as run_negotiate.
+    rc = _creator_await_sign_and_finalize(
+        output_dir=out,
+        chat_id=str(founder_dm),
+        sshsign_host=sshsign_host,
+        pending_id=pending_id,
+        session_id=session_id,
+        group_chat_id=group_chat_id,
+    )
+    # Terminal outcome either way: clean up the pointer.
+    state_store.delete_state(negotiation_id)
+    return rc
+
+
+def run_scan(
+    session_client=None,
+    sender=send_telegram,
+    now_fn=None,
+) -> int:
+    """P7-5 cron entrypoint.
+
+    Invoked by an OpenClaw cron job (every 30s, configured at mint
+    time). Iterates every active state pointer under
+    ``~/.openclaw/skill-state/negotiate_safe/`` and, for each, asks
+    sshsign whether the session has advanced enough to warrant a
+    resume. Fully idempotent: running twice in the same tick is safe
+    (the second invocation sees founder_resumed_at set and no-ops).
+
+    Returns 0 always — a single bad pointer shouldn't fail the whole
+    tick. Individual errors go to stderr for audit.
+    """
+    try:
+        pointers = state_store.list_active()
+    except Exception as e:
+        sys.stderr.write(f"scan: list_active failed: {e}\n")
+        return 0
+
+    for state in pointers:
+        try:
+            _run_founder_resume(
+                state,
+                session_client=session_client,
+                sender=sender,
+                now_fn=now_fn,
+            )
+        except Exception as e:
+            # Contain per-pointer failures so one bad session doesn't
+            # halt the tick; the next cron run re-attempts.
+            sys.stderr.write(
+                f"scan: resume failed for {state.get('negotiation_id')}: {e}\n"
+            )
+    return 0
+
+
 def run_bind(
     session_code: str,
     group_chat_id: int,
@@ -2386,6 +2885,20 @@ def run_bind(
     })
     if body:
         sender(str(group_chat_id), message=body)
+
+    # P7-5: if the investor joined BEFORE this /bind turn landed, the
+    # session is already in `joined` state. Don't wait for cron —
+    # resume inline. The founder's process is live for this turn;
+    # scan would eventually handle it, but the UX is better if we
+    # skip the wait and stream now.
+    status = (sess.get("status") or "").lower()
+    if status == "joined":
+        negotiation_id = _negotiation_id_from_sshsign_session_id(session_id)
+        state = state_store.read_state(negotiation_id)
+        if state is not None:
+            # Fire-and-forget return value; resume owns its own exit code.
+            _run_founder_resume(state, session_client=client, sender=sender)
+
     return 0
 
 
@@ -2690,6 +3203,13 @@ def main() -> int:
              "in the DM by mistake.",
     )
 
+    sub.add_parser(
+        "scan",
+        help="P7-5: resume any two-party negotiation whose investor "
+             "has joined but the founder hasn't yet started streaming. "
+             "Invoked by an OpenClaw cron job; idempotent across ticks.",
+    )
+
     args = parser.parse_args()
 
     if args.command == "prepare":
@@ -2749,6 +3269,8 @@ def main() -> int:
             from_user_id=from_user_id,
             dm_chat_id_flag=dm_flag,
         )
+    elif args.command == "scan":
+        return run_scan()
     else:
         parser.print_help()
         return 2

@@ -738,6 +738,85 @@ def format_bind_already_bound(event: dict[str, Any]) -> str:
     )
 
 
+def format_founder_resumed(event: dict[str, Any]) -> str:
+    """P7-5 orienting card. Posted in the group when an OC cron tick
+    (or an in-process /bind fast path) picks up a waiting negotiation
+    and is about to start streaming. Never starts with '/' (invariant
+    enforced in tests to prevent any future self-trigger loops).
+    """
+    code = (event.get("session_code") or "").strip()
+    header = "⚡ Founder's agent is back online."  # ⚡
+    if code:
+        header += f" (Session {code})"
+    return (
+        f"{header}\n\n"
+        "Streaming the first offer in a moment…"
+    )
+
+
+def format_investor_waiting_for_founder(event: dict[str, Any]) -> str:
+    """P7-5 investor-side: posted in the bound group immediately after
+    the investor joins. Tells both parties the founder's agent is
+    being woken and sets the expectation for the short pause that
+    follows (cron runs every ~30s, so worst-case wait is bounded).
+    """
+    return (
+        "⏳ Waking the founder's agent — this usually takes ~30 seconds.\n"  # ⏳
+        "Sit tight; the first offer will land here shortly."
+    )
+
+
+def format_investor_waiting_heartbeat(event: dict[str, Any]) -> str:
+    """Heartbeat card at ~15s if the founder's agent hasn't yet
+    signaled streaming_at. Keeps the chat from feeling dead during
+    the cron window. Posted at most once per wait.
+    """
+    return "⏳ Still waking the founder's agent…"  # ⏳
+
+
+def format_investor_both_online(event: dict[str, Any]) -> str:
+    """Posted the moment founder_streaming_at flips non-null on the
+    session row. Bridges the ~1-2s gap between "founder's agent is
+    up" and the first offer card arriving from upstream.
+    """
+    return (
+        "✅ Both sides are live — starting the negotiation now."  # ✅
+    )
+
+
+def format_investor_wake_timeout(event: dict[str, Any]) -> str:
+    """180s bounded-poll timeout. Rare in practice (cron fires every
+    30s), but surfaces clearly if the founder's droplet is offline or
+    the cron job failed to install. Mentions the OC-restart hint so
+    the user knows what to try first.
+    """
+    return (
+        "⏳ The founder's agent is taking longer than expected.\n\n"  # ⏳
+        "If you know the founder, a quick nudge to them (sending any "
+        "message to their bot) will force a retry. Otherwise the cron "
+        "scan will keep trying — come back in a few minutes."
+    )
+
+
+def format_investor_session_ended(event: dict[str, Any]) -> str:
+    """Terminal status detected during the investor's bounded poll.
+    Not the primary cancellation notice (the canceling party's turn
+    posts the authoritative card); this just tells the investor why
+    streaming never started.
+    """
+    status = (event.get("status") or "ended").lower()
+    pretty = {
+        "canceled": "canceled",
+        "rescinded": "canceled after signing",
+        "rescinded_after_sign": "canceled after signing",
+        "completed": "completed",
+        "expired": "expired",
+    }.get(status, status)
+    return (
+        f"ℹ️ Negotiation {pretty} before streaming started."  # ℹ️
+    )
+
+
 FORMATTERS = {
     "confirm": format_confirm,
     "authorized": format_authorized,
@@ -767,6 +846,13 @@ FORMATTERS = {
     "bind_wrong_chat_type": format_bind_wrong_chat_type,
     "bind_unknown_code": format_bind_unknown_code,
     "bind_already_bound": format_bind_already_bound,
+    "founder_resumed": format_founder_resumed,
+    # P7-5 investor-side UX
+    "investor_waiting_for_founder": format_investor_waiting_for_founder,
+    "investor_waiting_heartbeat": format_investor_waiting_heartbeat,
+    "investor_both_online": format_investor_both_online,
+    "investor_wake_timeout": format_investor_wake_timeout,
+    "investor_session_ended": format_investor_session_ended,
 }
 
 

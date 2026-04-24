@@ -39,6 +39,13 @@ class TestFormatters:
             "go_live", "group_bound",
             "bind_wrong_user", "bind_wrong_chat_type",
             "bind_unknown_code", "bind_already_bound",
+            # P7-5: durable founder-wait via OpenClaw cron
+            "founder_resumed",
+            "investor_waiting_for_founder",
+            "investor_waiting_heartbeat",
+            "investor_both_online",
+            "investor_wake_timeout",
+            "investor_session_ended",
         }
 
     # ---- confirm (our emit) ----

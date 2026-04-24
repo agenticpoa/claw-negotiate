@@ -2768,6 +2768,7 @@ class TestK3InvestorGroupRouting:
 
         with patch.object(rs, "run_mint", side_effect=self._fake_mint_investor(tmp_path)), \
              patch.object(rs, "_resolve_group_chat_id", return_value="-1001234567890"), \
+             patch.object(rs, "_investor_wait_for_founder_streaming", return_value="streaming"), \
              patch.object(rs, "_stream_to_telegram", mock_stream), \
              patch.object(rs, "resolve_chat_id", return_value="222222"), \
              patch.object(rs, "send_telegram", MagicMock()):
@@ -2786,6 +2787,7 @@ class TestK3InvestorGroupRouting:
 
         with patch.object(rs, "run_mint", side_effect=self._fake_mint_investor(tmp_path)), \
              patch.object(rs, "_resolve_group_chat_id", return_value="-1001234567890"), \
+             patch.object(rs, "_investor_wait_for_founder_streaming", return_value="streaming"), \
              patch.object(rs, "_stream_to_telegram", return_value=(0, None)), \
              patch.object(rs, "resolve_chat_id", return_value="222222"), \
              patch.object(rs, "send_telegram", sender):
@@ -2827,6 +2829,7 @@ class TestK3InvestorGroupRouting:
 
         with patch.object(rs, "run_mint", side_effect=self._fake_mint_investor(tmp_path)), \
              patch.object(rs, "_resolve_group_chat_id", return_value="-1001234567890"), \
+             patch.object(rs, "_investor_wait_for_founder_streaming", return_value="streaming"), \
              patch.object(rs, "_stream_to_telegram", return_value=(0, signing)), \
              patch.object(rs, "_joiner_await_sign_and_finalize", mock_joiner), \
              patch.object(rs, "resolve_chat_id", return_value="222222"), \
