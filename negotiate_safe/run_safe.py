@@ -529,16 +529,21 @@ def _register_signing_session(
     metadata_public = {"use_case": "safe", "version": 1}
     if constraints.get("company_name"):
         metadata_public["company_name"] = constraints["company_name"]
-    # WORKAROUND: sshsign's SSH argv parser strips inner double quotes
-    # and its `fixBareJSONKeys` recovery only quotes keys, not bare
-    # string values. Fields like "Blue Fund" (contains a space) or "Alex"
-    # survive transit as bare tokens, which breaks json.loads on the
-    # server round-trip. Until a proper server-side fix lands (planned:
-    # `--metadata-member-b64` base64 flag), keep metadata_member limited
-    # to the single ACL-critical field: `telegram.founder_user_id`.
-    # Investor display names come back via the constraints dict locally
-    # and aren't needed for /bind ACL.
-    metadata_member = {}
+    # Member-only metadata carries the display fields the joiner needs for
+    # their confirm card + signing view (title, both sides' names/firms)
+    # and the /bind ACL field (founder's Telegram user_id). Now that the
+    # client sends base64-encoded JSON via --metadata-member-b64 (P8-2),
+    # string values with spaces or inner quotes survive SSH argv — no
+    # need to restrict to integer-only fields.
+    metadata_member: dict = {}
+    for field in (
+        "founder_name", "founder_title",
+        "investor_name", "investor_firm",
+        "investment_amount",
+    ):
+        val = constraints.get(field)
+        if val not in (None, ""):
+            metadata_member[field] = val
     if telegram_user_id and user_role == "founder":
         metadata_member["telegram"] = {"founder_user_id": int(telegram_user_id)}
 
@@ -658,6 +663,89 @@ def _wait_for_counterparty(
         typing.stop()
 
 
+def _ssh_history(
+    negotiation_id: str,
+    sshsign_host: str = "sshsign.dev",
+    runner=subprocess.run,
+) -> list[dict] | None:
+    """Return sshsign's `history --negotiation-id` rows, or None on error.
+
+    Shape (per commands.go:1128): a JSON array of
+        {round, from, type, metadata, previous_tx, audit_tx_id, created_at}
+    Rows with a non-list response or a non-zero exit are treated as "no data
+    yet" and surface as None — the poller re-tries on the next interval.
+    """
+    try:
+        result = runner(
+            ["ssh", sshsign_host, "history", "--negotiation-id", negotiation_id],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+    if result.returncode != 0 or not (result.stdout or "").strip():
+        return None
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, list) else None
+
+
+def _synthesize_offer_event(entry: dict) -> dict | None:
+    """Translate a sshsign history row into an upstream-compatible event.
+
+    Upstream's `run_local` emits `offer` / `counter` / `accept` NDJSON
+    events on stdout via emit_json_event. `run_distributed` currently
+    does not (only the final `signing` event leaks through). P8-1:
+    reconstruct those events from sshsign's authoritative
+    `negotiation_offers` log so the group sees rounds live.
+
+    Upstream writes {**offer.terms, "_message": offer.message} into the
+    metadata column (negotiate.py:936), so we pop `_message` out and
+    keep the rest as `terms`.
+
+    Returns None for rows we can't render (unknown type, missing round).
+    """
+    if not isinstance(entry, dict):
+        return None
+    etype = entry.get("type")
+    if etype not in ("offer", "counter", "accept"):
+        return None
+    try:
+        round_num = int(entry.get("round", 0))
+    except (TypeError, ValueError):
+        return None
+    if round_num <= 0:
+        return None
+    party = entry.get("from") or ""
+    if party not in ("founder", "investor"):
+        return None
+
+    raw_meta = entry.get("metadata")
+    terms: dict = {}
+    message = ""
+    if isinstance(raw_meta, str) and raw_meta.strip():
+        try:
+            parsed = json.loads(raw_meta)
+        except json.JSONDecodeError:
+            parsed = None
+        if isinstance(parsed, dict):
+            message = str(parsed.pop("_message", "") or "")
+            terms = parsed
+    elif isinstance(raw_meta, dict):
+        meta_copy = dict(raw_meta)
+        message = str(meta_copy.pop("_message", "") or "")
+        terms = meta_copy
+
+    return {
+        "type": etype,
+        "party": party,
+        "round": round_num,
+        "terms": terms,
+        "message": message,
+    }
+
+
 def _augment_signing_url(event: dict, bot_username: str) -> dict:
     """Append a bare Telegram deep-link callback to the signing event's approval_url.
 
@@ -686,6 +774,10 @@ def _stream_to_telegram(
     typing_factory=None,
     group_chat_id: str | None = None,
     dm_sender=send_signing_url_to_dm,
+    negotiation_id: str | None = None,
+    sshsign_host: str = "sshsign.dev",
+    history_fn=None,
+    history_interval: float = 2.0,
 ) -> tuple[int, dict | None]:
     """Spawn the streaming helper; push each event to Telegram as it fires.
 
@@ -702,17 +794,26 @@ def _stream_to_telegram(
         receives a placeholder ("⏳ [Party] signing — check your DM")
         so both observers see the state without the URL leaking.
 
+    P8-1: when `negotiation_id` is set, a background thread polls
+    sshsign's authoritative offer log via `history --negotiation-id`
+    every `history_interval` seconds and synthesizes offer/counter/
+    accept events to supplement upstream's stdout stream. Necessary
+    because `run_distributed` only emits the final `signing` event —
+    without this poll the group never sees per-round cards. Events
+    are deduped by (type, round, party) so events that DO come through
+    stdout (e.g. in demo mode) aren't doubled. `history_fn` is
+    injectable for testing.
+
     Returns 0 on clean exit, the subprocess returncode otherwise.
     `sender`, `popen`, and `dm_sender` are injectable for testing.
     """
+    import threading
+
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
 
     cmd = [sys.executable, "-u", str(stream_helper), "--output-dir", str(output_dir)]
 
-    # Stream-target = group if bound, else DM. Typing indicator follows the
-    # stream target (that's where rounds appear; the DM stays quiet during
-    # negotiation once we've gone group-mode).
     stream_target = group_chat_id or chat_id
 
     if typing_factory is None:
@@ -720,6 +821,77 @@ def _stream_to_telegram(
     else:
         typing = typing_factory(stream_target)
     typing.start()
+
+    events: list[dict] = []
+    seen: set[tuple[str, int, str]] = set()
+    emit_lock = threading.Lock()
+
+    def _emit(event: dict) -> None:
+        """Format + route + record. Dedups offer/counter/accept by
+        (type, round, party) so the stdout + history poller can run
+        concurrently without double-posting."""
+        etype = event.get("type")
+        if etype in ("offer", "counter", "accept"):
+            try:
+                key = (etype, int(event.get("round", 0)), event.get("party") or "")
+            except (TypeError, ValueError):
+                return
+            with emit_lock:
+                if key in seen:
+                    return
+                seen.add(key)
+                events.append(event)
+        else:
+            with emit_lock:
+                events.append(event)
+
+        if etype == "signing":
+            event = _augment_signing_url(event, bot_username)
+
+        message = format_event(event, constraints=constraints)
+        if message:
+            if etype == "signing":
+                try:
+                    dm_sender(chat_id, message=message)
+                except SigningUrlTargetError:
+                    sys.stderr.write(
+                        f"stream: refusing to send signing URL to "
+                        f"non-DM target chat_id={chat_id!r}\n"
+                    )
+                if group_chat_id:
+                    placeholder = (
+                        "⏳ Signing… check your own DM for the "  # ⏳
+                        "signing link. Never share this link."
+                    )
+                    sender(stream_target, message=placeholder)
+            else:
+                sender(stream_target, message=message)
+
+        if etype == "outcome" and event.get("result") == "max_rounds":
+            cp_label = _counterparty_label_from_constraints(constraints or {})
+            follow = format_event({
+                "type": "propose_new_terms",
+                "counterparty_label": cp_label,
+            })
+            if follow:
+                sender(stream_target, message=follow)
+
+    def _drain_history() -> None:
+        if history_fn is not None:
+            rows = history_fn()
+        elif negotiation_id:
+            rows = _ssh_history(negotiation_id, sshsign_host=sshsign_host)
+        else:
+            rows = None
+        if not isinstance(rows, list):
+            return
+        for row in rows:
+            synthesized = _synthesize_offer_event(row)
+            if synthesized:
+                try:
+                    _emit(synthesized)
+                except Exception as e:  # never let a render error kill the poller
+                    sys.stderr.write(f"stream: history emit failed: {e}\n")
 
     try:
         proc = popen(
@@ -731,7 +903,20 @@ def _stream_to_telegram(
             env=env,
         )
 
-        events: list[dict] = []
+        stop_event = threading.Event()
+        poller: threading.Thread | None = None
+        if negotiation_id or history_fn is not None:
+            def _poll() -> None:
+                while not stop_event.is_set():
+                    try:
+                        _drain_history()
+                    except Exception as e:
+                        sys.stderr.write(f"stream: history poll failed: {e}\n")
+                    stop_event.wait(history_interval)
+
+            poller = threading.Thread(target=_poll, daemon=True)
+            poller.start()
+
         assert proc.stdout is not None
         for raw in proc.stdout:
             line = raw.strip()
@@ -743,55 +928,24 @@ def _stream_to_telegram(
                 continue
             if not isinstance(event, dict):
                 continue
-            events.append(event)
-
-            if event.get("type") == "signing":
-                event = _augment_signing_url(event, bot_username)
-
-            message = format_event(event, constraints=constraints)
-            if message:
-                if event.get("type") == "signing":
-                    # Signing URL → DM always (structural privacy).
-                    # Group receives a placeholder so observers see
-                    # state transitioning without the URL itself.
-                    try:
-                        dm_sender(chat_id, message=message)
-                    except SigningUrlTargetError:
-                        # chat_id isn't a positive DM id — this shouldn't
-                        # happen in normal operation, but if it does
-                        # (e.g. misconfig), fail closed: don't send.
-                        sys.stderr.write(
-                            f"stream: refusing to send signing URL to "
-                            f"non-DM target chat_id={chat_id!r}\n"
-                        )
-                    if group_chat_id:
-                        placeholder = (
-                            "⏳ Signing… check your own DM for the "  # ⏳
-                            "signing link. Never share this link."
-                        )
-                        sender(stream_target, message=placeholder)
-                else:
-                    sender(stream_target, message=message)
-
-            # No-ZOPA follow-up: right after a max_rounds outcome, invite
-            # the user to propose new terms. Renders on both sides
-            # symmetrically (both OCs consume the same outcome event
-            # independently from their own upstream runs).
-            if (event.get("type") == "outcome"
-                    and event.get("result") == "max_rounds"):
-                cp_label = _counterparty_label_from_constraints(constraints or {})
-                follow = format_event({
-                    "type": "propose_new_terms",
-                    "counterparty_label": cp_label,
-                })
-                if follow:
-                    sender(stream_target, message=follow)
+            _emit(event)
 
         proc.wait()
+
+        if poller is not None:
+            # One final drain: upstream emits `signing` on stdout before the
+            # last offer has necessarily propagated through sshsign's log.
+            # Catch anything that arrived in the window between the last
+            # poll and subprocess exit.
+            try:
+                _drain_history()
+            except Exception as e:
+                sys.stderr.write(f"stream: final history drain failed: {e}\n")
+            stop_event.set()
+            poller.join(timeout=history_interval + 1.0)
     finally:
         typing.stop()
 
-    # Archive events to disk for debuggability (replaces results.md)
     try:
         (output_dir / "events.ndjson").write_text(
             "\n".join(json.dumps(e) for e in events) + "\n"
@@ -866,6 +1020,67 @@ def _poll_envelope_approval(
         status = status_fn(pending_id, sshsign_host)
         if status == "approved":
             return True
+        sleep_fn(interval)
+        elapsed += interval
+    return False
+
+
+def _ssh_session_status(
+    session_id: str,
+    sshsign_host: str = "sshsign.dev",
+    runner=subprocess.run,
+) -> str | None:
+    """Return the aggregate session status from `ssh host session --id <id>`.
+
+    sshsign reports 'complete' when every pending in the session is
+    `approved`, 'failed' if any is `denied`, 'pending' otherwise. Used by
+    the P8-3 both-signed gate so the creator waits until the counterparty
+    has also signed before running finalize.
+    """
+    try:
+        result = runner(
+            ["ssh", sshsign_host, "session", "--id", session_id],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+    if result.returncode != 0 or not (result.stdout or "").strip():
+        return None
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    status = payload.get("status") if isinstance(payload, dict) else None
+    return str(status) if status else None
+
+
+def _poll_session_complete(
+    session_id: str,
+    sshsign_host: str = "sshsign.dev",
+    timeout: int = 900,
+    interval: int = 5,
+    status_fn=_ssh_session_status,
+    sleep_fn=None,
+) -> bool:
+    """Poll until the session aggregates to 'complete' (all pendings approved).
+
+    Returns True on complete, False on timeout or 'failed' (a denial is
+    treated as a hard stop — no point waiting longer). The default
+    interval of 5s matches _poll_envelope_approval so a creator's wait
+    for its own sig + the P8-3 wait for the counterparty have the same
+    cadence.
+    """
+    if sleep_fn is None:
+        import time as _time
+        sleep_fn = _time.sleep
+
+    elapsed = 0
+    while elapsed < timeout:
+        status = status_fn(session_id, sshsign_host)
+        if status == "complete":
+            return True
+        if status == "failed":
+            return False
         sleep_fn(interval)
         elapsed += interval
     return False
@@ -1051,11 +1266,23 @@ def _await_sign_and_push(
     is_active_fn=_is_still_active_session,
     typing_factory=None,
     group_chat_id: str | None = None,
+    pre_finalize_wait_fn=None,
 ) -> int:
     """Wait for signature, finalize PDF, push confirmation + attachment.
 
+    P8-3: when `pre_finalize_wait_fn` is provided, it runs AFTER the
+    caller's own sig lands and BEFORE `finalize_fn`. For the creator
+    path this gates on "session aggregates to complete (both parties
+    signed)", preventing the race where the founder finalized
+    immediately after their own sig and produced a partial PDF that
+    got posted to the group. The fn must return True when the gate
+    passes; returning False causes the flow to post a "counterparty
+    not signed yet" note and exit with rc=4.
+
     Returns 0 if the user received the executed PDF, 1 on timeout, 2 on
-    finalize failure, 3 if this process was superseded by a newer session.
+    finalize failure, 3 if this process was superseded by a newer session,
+    4 if the pre-finalize wait timed out (own sig landed but counterparty
+    didn't sign within the window).
     """
     # Typing covers the gap between "Almost done — sign here" and
     # "Signed ✓" or the eventual PDF generation. Follows the visible
@@ -1091,6 +1318,31 @@ def _await_sign_and_push(
         # seconds; posting "Generating executed file\u2026" fills that gap.
         sender(ui_target, message="\u2705 Confirmed signature.")  # ✅
         _mark_signed(output_dir)
+
+        # P8-3: both-signed gate. Without it, the founder's OC runs
+        # finalize the moment its own sig is approved — producing a
+        # partial PDF with only the founder's signature. Later, the
+        # investor's own finalize produces a second (both-signed) PDF.
+        # Two PDFs land in the group. With this gate, the creator waits
+        # for the session to aggregate `complete` (all pendings
+        # approved), then produces the executed PDF on the first try.
+        if pre_finalize_wait_fn is not None:
+            sender(
+                ui_target,
+                message="\u23f3 Waiting for counterparty to sign\u2026",  # ⏳
+            )
+            if not pre_finalize_wait_fn():
+                if not is_active_fn(output_dir):
+                    return 3
+                sender(ui_target, message=(
+                    "Your signature is on file, but your counterparty "
+                    "hasn't signed yet. The executed PDF will land here "
+                    "once both signatures are in."
+                ))
+                return 4
+            if not is_active_fn(output_dir):
+                return 3
+
         sender(ui_target, message="\U0001f4c4 Generating executed file\u2026")  # 📄
 
         pdf_path = finalize_fn(output_dir, pending_id, sshsign_host)
@@ -1207,6 +1459,7 @@ def _creator_await_sign_and_finalize(
     session_client=None,
     typing_factory=None,
     group_chat_id: str | None = None,
+    session_complete_fn=_poll_session_complete,
 ) -> int:
     """Creator-finalizes flow. Same as the demo path, plus a trailing
     `complete-session` call that unblocks the non-creator's poll loop.
@@ -1214,11 +1467,33 @@ def _creator_await_sign_and_finalize(
     group_chat_id, when set, forwards to _await_sign_and_push so status
     cards + PDF double-post into the bound Telegram group.
 
+    P8-3: gates finalize on the session aggregating to 'complete' (all
+    pendings approved) rather than firing on just the creator's own sig.
+    Without the gate, creator-runs-finalize-first produced a partial PDF
+    with only the founder's signature; later the joiner's own finalize
+    produced a second (both-signed) PDF; both got posted to the group.
+    The gate pushes both PDFs into one.
+
     Returns 0 on success (PDF pushed + session marked complete), non-zero
     for partial failures. A failed complete-session is NOT treated as
     fatal — the PDF already reached the user; J7 adds retry + manual
     fallback.
     """
+    # P8-3: build the both-signed gate. The creator is the one who
+    # ships the finalized PDF, so they need to wait for the joiner's
+    # sig before running upstream's run_finalize. The joiner waits for
+    # complete-session (which creator calls below) in its own flow;
+    # no gate needed on that side.
+    def _wait_for_both_signed() -> bool:
+        if not session_id:
+            return True
+        return session_complete_fn(
+            session_id=session_id,
+            sshsign_host=sshsign_host,
+            timeout=timeout,
+            interval=poll_interval,
+        )
+
     rc = _await_sign_and_push(
         output_dir=output_dir,
         chat_id=chat_id,
@@ -1232,6 +1507,7 @@ def _creator_await_sign_and_finalize(
         is_active_fn=is_active_fn,
         typing_factory=typing_factory,
         group_chat_id=group_chat_id,
+        pre_finalize_wait_fn=_wait_for_both_signed,
     )
     if rc != 0 or not session_id:
         return rc
@@ -1561,12 +1837,24 @@ def run_negotiate(output_dir: str, chat_id_flag: str | None = None) -> int:
             send_telegram(group_chat_id, message=kickoff)
 
     bot_username = os.environ.get("TELEGRAM_BOT_USERNAME", "AgenticPOA_bot")
+    # P8-1: in two-party mode, upstream's run_distributed only emits the
+    # final `signing` event to stdout — offer/counter/accept rounds
+    # happen but are only visible in sshsign's negotiation_offers log.
+    # Passing `negotiation_id` enables the supplemental history poller
+    # so the group sees rounds live. Demo mode (run_local) emits rounds
+    # on stdout directly; no poll needed, and not passing the id keeps
+    # the behavior identical to Phase 7.
+    history_neg_id = (
+        mint.get("negotiation_id") if mint.get("mode") == "two_party" else None
+    )
     stream_rc, signing_event = _stream_to_telegram(
         output_dir=out,
         chat_id=chat_id,
         constraints=config.get("constraints"),
         bot_username=bot_username,
         group_chat_id=group_chat_id,
+        negotiation_id=history_neg_id,
+        sshsign_host=sshsign_host,
     )
     if stream_rc != 0 or not signing_event:
         return stream_rc

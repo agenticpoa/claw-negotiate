@@ -5,6 +5,7 @@ Two subcommands: 'prepare' (fast, parses NL) and 'negotiate' (long, runs negotia
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -833,15 +834,18 @@ class TestRegisterSigningSession:
         assert call.kwargs["metadata_public"] == {
             "use_case": "safe", "version": 1, "company_name": "Acme",
         }
-        # metadata_member is intentionally minimal until sshsign's SSH
-        # argv parser is fixed to survive bare string values (currently
-        # strips inner double quotes, corrupting "Blue Fund"-style tokens).
-        # Telegram user_id is the only ACL-critical field for /bind.
-        # company_name stays in metadata_public (pre-join visibility).
+        # P8-2: the SSH argv quote-stripping workaround is gone — with the
+        # new --metadata-member-b64 path, display fields with spaces/quotes
+        # survive transit intact. The signing view on sshsign.dev now
+        # renders Title / Founder name / Firm from this metadata.
         md = call.kwargs["metadata_member"]
+        assert md["founder_name"] == "Jane"
+        assert md["founder_title"] == "CEO"
+        assert md["investor_name"] == "Mark"
+        assert md["investor_firm"] == "Bay"
+        # company_name stays in metadata_public (pre-join visibility) and
+        # is NOT duplicated into member-scope.
         assert "company_name" not in md
-        assert "investor_firm" not in md  # dropped until server bug fix
-        assert "founder_name" not in md
 
     def test_investor_role_reads_investor_pubkey(self, tmp_path):
         neg_dir = self._neg_dir(tmp_path, role="investor")
@@ -1101,6 +1105,99 @@ class TestAugmentSigningUrl:
         assert "callback=" in out["approval_url"]
 
 
+class TestSshHistoryHelpers:
+    """Tests for the P8-1 history poll: _ssh_history + _synthesize_offer_event."""
+
+    def test_synthesize_offer_round_trip(self):
+        row = {
+            "round": 1,
+            "from": "founder",
+            "type": "offer",
+            "metadata": json.dumps({
+                "valuation_cap": 15_000_000,
+                "discount_rate": 0.20,
+                "pro_rata": True,
+                "mfn": False,
+                "_message": "Here's our opening offer.",
+            }),
+        }
+        out = rs._synthesize_offer_event(row)
+        assert out is not None
+        assert out["type"] == "offer"
+        assert out["party"] == "founder"
+        assert out["round"] == 1
+        assert out["message"] == "Here's our opening offer."
+        assert out["terms"] == {
+            "valuation_cap": 15_000_000,
+            "discount_rate": 0.20,
+            "pro_rata": True,
+            "mfn": False,
+        }
+
+    def test_synthesize_accepts_dict_metadata(self):
+        row = {
+            "round": 2,
+            "from": "investor",
+            "type": "counter",
+            "metadata": {"valuation_cap": 8_000_000, "_message": "Too high."},
+        }
+        out = rs._synthesize_offer_event(row)
+        assert out["type"] == "counter"
+        assert out["party"] == "investor"
+        assert out["message"] == "Too high."
+        assert out["terms"] == {"valuation_cap": 8_000_000}
+
+    def test_synthesize_skips_unknown_type(self):
+        assert rs._synthesize_offer_event({
+            "round": 1, "from": "founder", "type": "gossip", "metadata": "{}",
+        }) is None
+
+    def test_synthesize_skips_unknown_party(self):
+        assert rs._synthesize_offer_event({
+            "round": 1, "from": "moderator", "type": "offer", "metadata": "{}",
+        }) is None
+
+    def test_synthesize_skips_invalid_round(self):
+        assert rs._synthesize_offer_event({
+            "round": 0, "from": "founder", "type": "offer", "metadata": "{}",
+        }) is None
+        assert rs._synthesize_offer_event({
+            "round": "nope", "from": "founder", "type": "offer", "metadata": "{}",
+        }) is None
+
+    def test_synthesize_handles_malformed_metadata(self):
+        out = rs._synthesize_offer_event({
+            "round": 1, "from": "founder", "type": "offer",
+            "metadata": "not-json",
+        })
+        # Unparseable metadata still produces a renderable event — rounds
+        # should surface even if the server logged something weird.
+        assert out is not None
+        assert out["terms"] == {}
+        assert out["message"] == ""
+
+    def test_ssh_history_returns_list_on_success(self):
+        runner = MagicMock(return_value=MagicMock(
+            returncode=0,
+            stdout=json.dumps([{"round": 1, "from": "founder", "type": "offer"}]),
+        ))
+        out = rs._ssh_history("neg_abc", runner=runner)
+        assert isinstance(out, list) and out[0]["from"] == "founder"
+
+    def test_ssh_history_returns_none_on_non_zero(self):
+        runner = MagicMock(return_value=MagicMock(returncode=1, stdout="", stderr="boom"))
+        assert rs._ssh_history("neg_abc", runner=runner) is None
+
+    def test_ssh_history_returns_none_on_non_json(self):
+        runner = MagicMock(return_value=MagicMock(returncode=0, stdout="not json"))
+        assert rs._ssh_history("neg_abc", runner=runner) is None
+
+    def test_ssh_history_tolerates_timeout(self):
+        def blow_up(*a, **k):
+            raise subprocess.TimeoutExpired(cmd="ssh", timeout=15)
+        assert rs._ssh_history("neg_abc", runner=blow_up) is None
+
+
 class TestStreamToTelegram:
     def _fake_proc(self, stdout_lines: list[str], returncode: int = 0):
         proc = MagicMock()
@@ -1262,6 +1359,100 @@ class TestStreamToTelegram:
         fake_loop.start.assert_called_once()
         fake_loop.stop.assert_called_once()
 
+    def test_history_poll_supplements_missing_rounds(self, tmp_path):
+        """P8-1: when run_distributed emits only the final signing event,
+        the history poller synthesizes offer/counter/accept from sshsign's
+        authoritative negotiation_offers log."""
+        signing = {
+            "type": "signing",
+            "pending_id": "pnd_x",
+            "approval_url": "https://sshsign.dev/approve/pnd_x",
+        }
+        lines = [json.dumps(signing) + "\n"]
+        popen_mock = MagicMock(return_value=self._fake_proc(lines))
+        sender = MagicMock()
+        dm_sender = MagicMock()
+
+        history_rows = [
+            {"round": 1, "from": "founder", "type": "offer",
+             "metadata": json.dumps({
+                 "valuation_cap": 20_000_000, "discount_rate": 0.15,
+                 "pro_rata": True, "mfn": False,
+                 "_message": "Opening.",
+             })},
+            {"round": 1, "from": "investor", "type": "counter",
+             "metadata": json.dumps({
+                 "valuation_cap": 10_000_000, "discount_rate": 0.10,
+                 "pro_rata": True, "mfn": False,
+             })},
+            {"round": 2, "from": "founder", "type": "accept",
+             "metadata": json.dumps({
+                 "valuation_cap": 15_000_000, "discount_rate": 0.12,
+             })},
+        ]
+
+        rs._stream_to_telegram(
+            output_dir=tmp_path, chat_id="1", constraints=None,
+            bot_username="B", popen=popen_mock,
+            sender=sender, dm_sender=dm_sender,
+            group_chat_id="-100",
+            history_fn=lambda: history_rows,
+            history_interval=10.0,
+        )
+
+        # 3 rounds into the group, one signing-placeholder into the group,
+        # and the signing URL into the DM.
+        group_msgs = [c for c in sender.call_args_list if c.args[0] == "-100"]
+        assert len(group_msgs) == 4
+        # DM received exactly the signing URL
+        assert dm_sender.call_count == 1
+
+    def test_history_poll_dedups_against_stdout(self, tmp_path):
+        """Events that arrive on BOTH stdout and sshsign history are
+        rendered once. Dedup key is (type, round, party)."""
+        stdout_events = [
+            {"type": "offer", "round": 1, "party": "founder",
+             "terms": {"valuation_cap": 20_000_000, "discount_rate": 0.15}},
+        ]
+        lines = [json.dumps(e) + "\n" for e in stdout_events]
+        popen_mock = MagicMock(return_value=self._fake_proc(lines))
+        sender = MagicMock()
+
+        # Same round as stdout + a new one the poller reveals.
+        history_rows = [
+            {"round": 1, "from": "founder", "type": "offer",
+             "metadata": json.dumps({"valuation_cap": 20_000_000})},
+            {"round": 2, "from": "investor", "type": "counter",
+             "metadata": json.dumps({"valuation_cap": 8_000_000})},
+        ]
+
+        rs._stream_to_telegram(
+            output_dir=tmp_path, chat_id="1", constraints=None,
+            bot_username="B", popen=popen_mock, sender=sender,
+            history_fn=lambda: history_rows,
+            history_interval=10.0,
+        )
+
+        # One offer from stdout + one synthesized counter from history = 2.
+        # The duplicate round-1/founder/offer must NOT double-render.
+        assert sender.call_count == 2
+
+    def test_history_poll_skipped_without_negotiation_id(self, tmp_path):
+        """Demo mode (no negotiation_id, no injected history_fn) must NOT
+        spawn the poll thread — upstream's run_local emits rounds directly
+        on stdout and there's nothing to supplement."""
+        lines = [json.dumps({"type": "outcome", "result": "accepted",
+                             "terms": {}}) + "\n"]
+        popen_mock = MagicMock(return_value=self._fake_proc(lines))
+        history_fn = MagicMock()
+
+        rs._stream_to_telegram(
+            output_dir=tmp_path, chat_id="1", constraints=None,
+            bot_username="B", popen=popen_mock, sender=MagicMock(),
+            # Neither negotiation_id nor history_fn passed here.
+        )
+        history_fn.assert_not_called()
+
     def test_typing_loop_stopped_on_exception(self, tmp_path):
         """If the stream raises, typing loop must still stop (finally block)."""
         popen_mock = MagicMock(side_effect=RuntimeError("boom"))
@@ -1417,6 +1608,78 @@ class TestPollEnvelopeApproval:
             status_fn=status_fn, sleep_fn=sleep_fn,
         )
         assert ok is True
+
+
+class TestSshSessionStatus:
+    """P8-3: session-aggregate status powers the both-signed gate."""
+
+    def test_returns_complete_when_server_reports_complete(self):
+        runner = MagicMock(return_value=MagicMock(
+            returncode=0,
+            stdout=json.dumps({
+                "session_id": "neg_1",
+                "status": "complete",
+                "signers": [{"status": "approved"}, {"status": "approved"}],
+            }),
+        ))
+        assert rs._ssh_session_status("neg_1", runner=runner) == "complete"
+
+    def test_returns_pending_while_waiting(self):
+        runner = MagicMock(return_value=MagicMock(
+            returncode=0,
+            stdout=json.dumps({"status": "pending"}),
+        ))
+        assert rs._ssh_session_status("neg_1", runner=runner) == "pending"
+
+    def test_returns_none_on_ssh_failure(self):
+        runner = MagicMock(return_value=MagicMock(returncode=1, stdout="", stderr="boom"))
+        assert rs._ssh_session_status("neg_1", runner=runner) is None
+
+    def test_returns_none_on_non_json(self):
+        runner = MagicMock(return_value=MagicMock(returncode=0, stdout="not json"))
+        assert rs._ssh_session_status("neg_1", runner=runner) is None
+
+    def test_tolerates_timeout(self):
+        def blow_up(*a, **k):
+            raise subprocess.TimeoutExpired(cmd="ssh", timeout=15)
+        assert rs._ssh_session_status("neg_1", runner=blow_up) is None
+
+
+class TestPollSessionComplete:
+    """P8-3: poll loop the creator's flow uses to wait for both-signed."""
+
+    def test_returns_true_when_status_reaches_complete(self):
+        statuses = iter(["pending", "pending", "complete"])
+        status_fn = MagicMock(side_effect=lambda sid, host: next(statuses))
+        sleep_fn = MagicMock()
+
+        ok = rs._poll_session_complete(
+            "neg_1", timeout=60, interval=5,
+            status_fn=status_fn, sleep_fn=sleep_fn,
+        )
+        assert ok is True
+        assert sleep_fn.call_count == 2
+
+    def test_returns_false_on_failed_status(self):
+        """A denial is terminal — no point waiting longer."""
+        status_fn = MagicMock(return_value="failed")
+        sleep_fn = MagicMock()
+        ok = rs._poll_session_complete(
+            "neg_1", timeout=60, interval=5,
+            status_fn=status_fn, sleep_fn=sleep_fn,
+        )
+        assert ok is False
+        sleep_fn.assert_not_called()  # bailed immediately
+
+    def test_returns_false_on_timeout(self):
+        status_fn = MagicMock(return_value="pending")
+        sleep_fn = MagicMock()
+        ok = rs._poll_session_complete(
+            "neg_1", timeout=20, interval=5,
+            status_fn=status_fn, sleep_fn=sleep_fn,
+        )
+        assert ok is False
+        assert sleep_fn.call_count == 4
 
 
 class TestStreamToTelegramGroupRouting:
@@ -2772,6 +3035,8 @@ class TestCreatorAwaitSignAndFinalize:
             pending_id="pnd_f", session_id="neg_1",
             sender=sender,
             poll_fn=lambda **kw: True,
+            # P8-3: gate passes immediately (both parties already signed)
+            session_complete_fn=lambda **kw: True,
             finalize_fn=lambda *a, **kw: pdf,
             is_active_fn=lambda _o: True,
             session_client=client,
@@ -2810,6 +3075,7 @@ class TestCreatorAwaitSignAndFinalize:
             pending_id="pnd", session_id="neg_1",
             sender=MagicMock(),
             poll_fn=lambda **kw: True,
+            session_complete_fn=lambda **kw: True,
             finalize_fn=lambda *a, **kw: pdf,
             is_active_fn=lambda _o: True,
             session_client=client,
@@ -2817,16 +3083,79 @@ class TestCreatorAwaitSignAndFinalize:
         )
         assert rc == 0
 
+    def test_p8_3_gate_waits_for_both_signed(self, tmp_path):
+        """P8-3: creator must wait for counterparty signature before
+        running finalize. Previously, founder OC finalized the moment
+        its own sig landed → partial PDF; investor then finalized →
+        second (complete) PDF. Two PDFs in the group. The gate prevents
+        this by waiting for the session to aggregate 'complete' before
+        calling finalize_fn."""
+        self._write_mint(tmp_path)
+        pdf = tmp_path / "executed.pdf"
+        pdf.write_bytes(b"PDF")
+
+        order: list[str] = []
+
+        def session_gate(**kw):
+            order.append("gate")
+            return True  # both signed
+
+        def finalize(*a, **kw):
+            order.append("finalize")
+            return pdf
+
+        rs._creator_await_sign_and_finalize(
+            output_dir=tmp_path, chat_id="1", sshsign_host="h",
+            pending_id="pnd", session_id="neg_1",
+            sender=MagicMock(),
+            poll_fn=lambda **kw: True,
+            session_complete_fn=session_gate,
+            finalize_fn=finalize,
+            is_active_fn=lambda _o: True,
+            session_client=MagicMock(),
+            typing_factory=lambda _c: MagicMock(start=MagicMock(), stop=MagicMock()),
+        )
+        # Gate runs before finalize; if it didn't, order would be
+        # ["finalize", "gate"] and we'd be shipping a partial PDF.
+        assert order == ["gate", "finalize"]
+
+    def test_p8_3_gate_timeout_skips_finalize(self, tmp_path):
+        """Counterparty never signs → gate returns False → we DON'T run
+        finalize (no partial PDF) and we DON'T call complete-session
+        (session stays joined, not falsely marked completed). Returns
+        rc=4 so the caller can route this to the 'waiting' UX."""
+        self._write_mint(tmp_path)
+        finalize = MagicMock()
+        client = MagicMock()
+
+        rc = rs._creator_await_sign_and_finalize(
+            output_dir=tmp_path, chat_id="1", sshsign_host="h",
+            pending_id="pnd", session_id="neg_1",
+            sender=MagicMock(),
+            poll_fn=lambda **kw: True,
+            session_complete_fn=lambda **kw: False,  # counterparty never signed
+            finalize_fn=finalize,
+            is_active_fn=lambda _o: True,
+            session_client=client,
+            typing_factory=lambda _c: MagicMock(start=MagicMock(), stop=MagicMock()),
+        )
+        assert rc == 4
+        finalize.assert_not_called()
+        client.complete_session.assert_not_called()
+
     def test_sign_timeout_skips_complete_session(self, tmp_path):
         """If the user never signed, we never finalized — don't falsely
-        mark the session complete."""
+        mark the session complete. The gate never runs because we exit
+        on own-sig timeout first."""
         self._write_mint(tmp_path)
         client = MagicMock()
+        gate = MagicMock()
         rc = rs._creator_await_sign_and_finalize(
             output_dir=tmp_path, chat_id="1", sshsign_host="h",
             pending_id="pnd", session_id="neg_1",
             sender=MagicMock(),
             poll_fn=lambda **kw: False,  # never approved
+            session_complete_fn=gate,
             finalize_fn=lambda *a, **kw: None,
             is_active_fn=lambda _o: True,
             session_client=client,
@@ -2834,6 +3163,7 @@ class TestCreatorAwaitSignAndFinalize:
         )
         assert rc == 1
         client.complete_session.assert_not_called()
+        gate.assert_not_called()
 
 
 class TestJoinerAwaitSignAndFinalize:

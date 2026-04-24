@@ -9,9 +9,19 @@ unit-test by injecting the `runner` callable.
 """
 from __future__ import annotations
 
+import base64
 import json
 import subprocess
 from typing import Any, Callable, Optional
+
+
+def _encode_metadata_b64(value: dict) -> str:
+    """Compact-JSON-encode + URL-safe base64. Matches what sshsign's
+    `--metadata-*-b64` flag expects (P8-2). Keeps the value opaque to
+    SSH argv parsing — no whitespace, no quotes, no bare-key repair.
+    """
+    raw = json.dumps(value, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii")
 
 
 class SshsignSessionError(Exception):
@@ -153,16 +163,16 @@ class SshsignSession:
         ]
         if party_did:
             flags += ["--party-did", party_did]
-        # Compact JSON (no whitespace) — sshsign transports these as SSH
-        # argv values, and the server splits on whitespace. A space inside
-        # a JSON string (e.g. "Blue Fund") triggers a rejoin that produces
-        # invalid output; compact separators sidestep the whole dance.
+        # P8-2: send metadata base64-encoded via --metadata-{public,member}-b64.
+        # SSH argv strips inner double quotes from string values, so a field
+        # like `"investor_firm":"Blue Fund"` used to arrive server-side as
+        # `investor_firm:Blue Fund` (bare value, malformed JSON). Base64 is
+        # a whitespace-free, quote-free alphabet; SSH transports it as one
+        # opaque token and the server decodes back to canonical JSON.
         if metadata_public is not None:
-            flags += ["--metadata-public",
-                      json.dumps(metadata_public, separators=(",", ":"))]
+            flags += ["--metadata-public-b64", _encode_metadata_b64(metadata_public)]
         if metadata_member is not None:
-            flags += ["--metadata-member",
-                      json.dumps(metadata_member, separators=(",", ":"))]
+            flags += ["--metadata-member-b64", _encode_metadata_b64(metadata_member)]
         if ttl_seconds is not None:
             flags += ["--ttl", str(ttl_seconds)]
         return self._run("create-session", *flags)

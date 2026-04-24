@@ -43,10 +43,21 @@ class TestCreateSession:
         assert "--apoa-pubkey" in argv
         assert argv[argv.index("--apoa-pubkey") + 1] == "PEM"
         assert "--party-did" in argv
-        assert "--metadata-public" in argv
-        mp = json.loads(argv[argv.index("--metadata-public") + 1])
+        # P8-2: metadata goes over the wire base64-encoded so string
+        # values survive SSH argv (no inner-quote stripping, no
+        # fixBareJSONKeys repair needed).
+        import base64
+        assert "--metadata-public-b64" in argv
+        encoded = argv[argv.index("--metadata-public-b64") + 1]
+        mp = json.loads(base64.urlsafe_b64decode(encoded))
         assert mp == {"use_case": "safe"}
-        assert "--metadata-member" in argv
+        assert "--metadata-member-b64" in argv
+        encoded = argv[argv.index("--metadata-member-b64") + 1]
+        mm = json.loads(base64.urlsafe_b64decode(encoded))
+        assert mm == {"company_name": "Acme"}
+        # The plain flags must NOT be sent (conflict check server-side).
+        assert "--metadata-public" not in argv
+        assert "--metadata-member" not in argv
         assert argv[argv.index("--ttl") + 1] == "86400"
 
     def test_omits_optional_flags_when_not_given(self):
@@ -58,7 +69,9 @@ class TestCreateSession:
         argv = runner.call_args[0][0]
         assert "--party-did" not in argv
         assert "--metadata-public" not in argv
+        assert "--metadata-public-b64" not in argv
         assert "--metadata-member" not in argv
+        assert "--metadata-member-b64" not in argv
         assert "--ttl" not in argv
 
 
