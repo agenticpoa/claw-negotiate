@@ -7,3 +7,11 @@ dist/
 build/
 .env
 /memory/
+
+# Private planning content — lives in ~/Projects/claude_projects/claw-negotiate-planning/
+/PLAN.md
+/TODO.md
+/claw-negotiate.md
+/docs/LAUNCH.md
+/docs/gotchas.md
+/docs/phases-shipped.md
