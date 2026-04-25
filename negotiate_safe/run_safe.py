@@ -187,6 +187,27 @@ def _classify_bot_role() -> str | None:
     return None
 
 
+def _counterparty_bot_handle(bot_role: str) -> str:
+    """Resolve the counterparty bot's Telegram @username for redirect
+    messages. Each droplet's openclaw.json sets:
+      NEGOTIATE_SAFE_COUNTERPARTY_BOT — explicit override (e.g.
+        "AgenticPOAInvestor_bot" on the founder droplet).
+    Falls back to a generic phrase if unset, so we never lie about a
+    handle the operator hasn't actually deployed.
+    """
+    explicit = (os.environ.get("NEGOTIATE_SAFE_COUNTERPARTY_BOT") or "").strip()
+    if explicit:
+        # Allow with-or-without leading @
+        if not explicit.startswith("@"):
+            explicit = "@" + explicit
+        return explicit
+    # Generic fallback — prompts the user to find the right handle
+    # rather than hardcoding one that may not exist.
+    return "the {other} bot".format(
+        other="investor" if bot_role == "founder" else "founder",
+    )
+
+
 def _enforce_bot_role_pre_parse(message: str) -> str | None:
     """Fast regex-only role check that runs BEFORE parse_constraints
     so an obvious mismatch (investor-shaped message to founder bot or
@@ -202,20 +223,20 @@ def _enforce_bot_role_pre_parse(message: str) -> str | None:
         return None  # no enforcement configured
 
     looks_investor = bool(_INVESTOR_HINT_RE.search(message))
+    handle = _counterparty_bot_handle(bot_role)
 
     if looks_investor and bot_role == "founder":
         return (
             "⛔ This bot represents the FOUNDER side.\n\n"  # ⛔
-            "Joining a negotiation as the investor goes through the "
-            "investor bot. DM @AgenticPOAInvestor_bot with your join "
-            "message instead."
+            f"Joining a negotiation as the investor goes through {handle}. "
+            "DM there with your join message instead."
         )
     if not looks_investor and bot_role == "investor":
         return (
             "⛔ This bot represents the INVESTOR side.\n\n"  # ⛔
-            "To start a new negotiation as the founder, DM "
-            "@AgenticPOA_bot. To join an existing one as the investor, "
-            "include the INV-XXXXX code in your message here."
+            f"To start a new negotiation as the founder, DM {handle}. "
+            "To join an existing one as the investor, include the "
+            "INV-XXXXX code in your message here."
         )
     return None
 
@@ -230,15 +251,15 @@ def _enforce_bot_role_post_parse(parsed_role: str) -> str | None:
         return None
     parsed = (parsed_role or "").strip().lower()
     if parsed and parsed != bot_role:
+        handle = _counterparty_bot_handle(bot_role)
         if bot_role == "founder":
             return (
                 "⛔ This bot represents the FOUNDER side, but your "  # ⛔
-                "request reads as an INVESTOR action. DM "
-                "@AgenticPOAInvestor_bot instead."
+                f"request reads as an INVESTOR action. DM {handle} instead."
             )
         return (
             "⛔ This bot represents the INVESTOR side, but your "  # ⛔
-            "request reads as a FOUNDER action. DM @AgenticPOA_bot instead."
+            f"request reads as a FOUNDER action. DM {handle} instead."
         )
     return None
 

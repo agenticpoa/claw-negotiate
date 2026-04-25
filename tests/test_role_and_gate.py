@@ -93,19 +93,34 @@ class TestEnforceBotRolePreParse:
 
     def test_investor_msg_to_founder_bot_blocked(self, monkeypatch):
         monkeypatch.setenv("NEGOTIATE_SAFE_BOT_ROLE", "founder")
+        monkeypatch.setenv("NEGOTIATE_SAFE_COUNTERPARTY_BOT", "InvBot")
         msg = "Join negotiation INV-7K3X9 as investor, $40M cap"
         err = rs._enforce_bot_role_pre_parse(msg)
         assert err is not None
         assert "FOUNDER" in err
-        assert "AgenticPOAInvestor" in err
+        assert "@InvBot" in err
 
     def test_founder_msg_to_investor_bot_blocked(self, monkeypatch):
         monkeypatch.setenv("NEGOTIATE_SAFE_BOT_ROLE", "investor")
+        monkeypatch.setenv("NEGOTIATE_SAFE_COUNTERPARTY_BOT", "@FounderBot")
         msg = "Negotiate a SAFE with Nora at Babes Fund, $40M cap"
         err = rs._enforce_bot_role_pre_parse(msg)
         assert err is not None
         assert "INVESTOR" in err
-        assert "AgenticPOA_bot" in err
+        assert "@FounderBot" in err
+
+    def test_no_counterparty_handle_falls_back_to_generic(self, monkeypatch):
+        """When operator hasn't configured NEGOTIATE_SAFE_COUNTERPARTY_BOT
+        we must NOT hardcode a handle that may not exist — fall back to
+        a generic phrase that hints at the right destination without
+        making a wrong claim."""
+        monkeypatch.setenv("NEGOTIATE_SAFE_BOT_ROLE", "founder")
+        monkeypatch.delenv("NEGOTIATE_SAFE_COUNTERPARTY_BOT", raising=False)
+        err = rs._enforce_bot_role_pre_parse("Join INV-X as investor")
+        assert err is not None
+        # No invented handle leaks into the message.
+        assert "@" not in err.split("\n", 1)[1].split(".")[0], err
+        assert "investor bot" in err.lower()
 
     def test_correct_role_passes(self, monkeypatch):
         monkeypatch.setenv("NEGOTIATE_SAFE_BOT_ROLE", "founder")
@@ -222,6 +237,7 @@ class TestHasActiveNegotiation:
 class TestRunPrepareWithGates:
     def test_wrong_bot_role_blocks_before_parse(self, tmp_path, monkeypatch):
         monkeypatch.setenv("NEGOTIATE_SAFE_BOT_ROLE", "founder")
+        monkeypatch.setenv("NEGOTIATE_SAFE_COUNTERPARTY_BOT", "InvBot")
         sender = MagicMock()
         # Mock identity check so it doesn't trip the welcome path.
         with patch.object(rs, "_identity_configured", return_value=True), \
@@ -273,6 +289,7 @@ class TestRunPrepareWithGates:
         but parse_constraints classifies the role as investor anyway.
         """
         monkeypatch.setenv("NEGOTIATE_SAFE_BOT_ROLE", "founder")
+        monkeypatch.setenv("NEGOTIATE_SAFE_COUNTERPARTY_BOT", "InvBot")
         sender = MagicMock()
         # Pre-parse regex won't match this ambiguous phrasing.
         msg = "Coordinating with Nora — see what she'll agree to"
