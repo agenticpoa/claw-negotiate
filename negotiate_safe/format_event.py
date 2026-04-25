@@ -738,6 +738,26 @@ def format_bind_already_bound(event: dict[str, Any]) -> str:
     )
 
 
+def format_active_negotiation_block(event: dict[str, Any]) -> str:
+    """P7-5+ single-active-negotiation gate. Reject a new-mint attempt
+    when there's already an in-flight negotiation on this bot. The
+    descriptor identifies the conflict (an INV-XXXXX session code, or
+    'a running negotiation' for demo mode).
+
+    Critical: tells the user exactly how to free the slot — `cancel`
+    the existing negotiation. Without this hint people end up retrying
+    the new mint and getting blocked on every attempt.
+    """
+    descriptor = (event.get("descriptor") or "an active negotiation").strip()
+    return (
+        f"⛔ You already have **{descriptor}** in progress.\n\n"  # ⛔
+        f"Reply `cancel my negotiation` to abort it, then start a new "
+        f"one. (Each bot handles one negotiation at a time so the "
+        f"agent can't accidentally send your terms to the wrong "
+        f"counterparty.)"
+    )
+
+
 def format_founder_resumed(event: dict[str, Any]) -> str:
     """P7-5 orienting card. Posted in the group when an OC cron tick
     (or an in-process /bind fast path) picks up a waiting negotiation
@@ -846,6 +866,7 @@ FORMATTERS = {
     "bind_wrong_chat_type": format_bind_wrong_chat_type,
     "bind_unknown_code": format_bind_unknown_code,
     "bind_already_bound": format_bind_already_bound,
+    "active_negotiation_block": format_active_negotiation_block,
     "founder_resumed": format_founder_resumed,
     # P7-5 investor-side UX
     "investor_waiting_for_founder": format_investor_waiting_for_founder,

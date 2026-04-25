@@ -141,6 +141,166 @@ def _resolve_group_chat_id(
     return str(as_int)
 
 
+# Lightweight regex used for fast role pre-classification before the
+# slow Claude call. Mirrors _BIND_CODE_RE; deliberately conservative
+# (requires the INV- prefix). Used only to reject obvious wrong-bot
+# requests early; the parsed `role` field from extract_constraints is
+# still the authoritative post-parse signal.
+_INVESTOR_HINT_RE = re.compile(
+    r"\b(?:INV-[A-Z0-9]+|join(?:ing)?\s+(?:as|the)?\s*invest|as\s+investor)\b",
+    re.IGNORECASE,
+)
+
+
+def _classify_bot_role() -> str | None:
+    """Return the bot's configured role per env, or None if unset.
+
+    NEGOTIATE_SAFE_BOT_ROLE is the explicit operator-set knob:
+      "founder"  → only founder-shaped requests accepted on this bot
+      "investor" → only investor-shaped requests accepted
+      unset / "either" → no enforcement (test default)
+
+    Falls back to inference from FOUNDER_NAME / INVESTOR_NAME for
+    droplets that haven't set the explicit knob yet:
+      FOUNDER_NAME set, INVESTOR_NAME unset → founder
+      INVESTOR_NAME set, FOUNDER_NAME unset → investor
+      both set or both unset → None (no enforcement)
+    """
+    explicit = (os.environ.get("NEGOTIATE_SAFE_BOT_ROLE") or "").strip().lower()
+    if explicit in ("founder", "investor"):
+        return explicit
+    if explicit:
+        # Anything else (including the explicit "either") means
+        # operator chose to disable enforcement; do NOT fall through
+        # to env-name inference. Falling through caused tests to
+        # accidentally inherit "founder" from conftest's FOUNDER_NAME
+        # default.
+        return None
+
+    # No explicit knob — fall back to inferring from identity env.
+    has_f = bool((os.environ.get("FOUNDER_NAME") or "").strip())
+    has_i = bool((os.environ.get("INVESTOR_NAME") or "").strip())
+    if has_f and not has_i:
+        return "founder"
+    if has_i and not has_f:
+        return "investor"
+    return None
+
+
+def _enforce_bot_role_pre_parse(message: str) -> str | None:
+    """Fast regex-only role check that runs BEFORE parse_constraints
+    so an obvious mismatch (investor-shaped message to founder bot or
+    vice versa) gets rejected instantly without burning a Claude
+    round-trip.
+
+    Returns:
+      None if no enforcement needed (mode unset, or message matches bot's role)
+      A short human-friendly error string explaining the rejection
+    """
+    bot_role = _classify_bot_role()
+    if bot_role is None:
+        return None  # no enforcement configured
+
+    looks_investor = bool(_INVESTOR_HINT_RE.search(message))
+
+    if looks_investor and bot_role == "founder":
+        return (
+            "⛔ This bot represents the FOUNDER side.\n\n"  # ⛔
+            "Joining a negotiation as the investor goes through the "
+            "investor bot. DM @AgenticPOAInvestor_bot with your join "
+            "message instead."
+        )
+    if not looks_investor and bot_role == "investor":
+        return (
+            "⛔ This bot represents the INVESTOR side.\n\n"  # ⛔
+            "To start a new negotiation as the founder, DM "
+            "@AgenticPOA_bot. To join an existing one as the investor, "
+            "include the INV-XXXXX code in your message here."
+        )
+    return None
+
+
+def _enforce_bot_role_post_parse(parsed_role: str) -> str | None:
+    """After-parse double-check: parse_constraints might infer a role
+    that's contradictory to the bot's configured role even when the
+    pre-parse regex didn't catch it. Returns error string or None.
+    """
+    bot_role = _classify_bot_role()
+    if bot_role is None:
+        return None
+    parsed = (parsed_role or "").strip().lower()
+    if parsed and parsed != bot_role:
+        if bot_role == "founder":
+            return (
+                "⛔ This bot represents the FOUNDER side, but your "  # ⛔
+                "request reads as an INVESTOR action. DM "
+                "@AgenticPOAInvestor_bot instead."
+            )
+        return (
+            "⛔ This bot represents the INVESTOR side, but your "  # ⛔
+            "request reads as a FOUNDER action. DM @AgenticPOA_bot instead."
+        )
+    return None
+
+
+def _has_active_negotiation() -> tuple[bool, str | None]:
+    """Detect whether this droplet already has an in-flight negotiation
+    that should block a new one. Two signals:
+
+    1. State pointers: any pointer that maps to a non-terminal sshsign
+       session (status in {open, joined}) is an active two-party
+       negotiation. Stale pointers (terminal session) are quietly
+       cleaned by the next scan tick; we tolerate them here.
+    2. ``.session.pid`` in /tmp/safe_negotiate: a still-running
+       background process from a prior demo or two-party stream that
+       hasn't exited yet.
+
+    Returns ``(True, descriptor)`` to block a new mint, or
+    ``(False, None)`` to allow it. The descriptor is human-friendly
+    and suitable for inclusion in the rejection card.
+
+    Network/sshsign errors fall through as "no block" — we'd rather
+    let a fresh mint proceed than wedge the user behind a transient
+    transport failure.
+    """
+    # Check two-party state pointers first.
+    try:
+        pointers = state_store.list_active()
+    except Exception:  # noqa: BLE001
+        pointers = []
+    if pointers:
+        try:
+            client = SshsignSession(host=os.environ.get("SSHSIGN_HOST", "sshsign.dev"))
+        except Exception:  # noqa: BLE001
+            client = None
+        for state in pointers:
+            try:
+                if client is None:
+                    raise SshsignSessionError("no client")
+                sess = client.get_session(
+                    session_id=_sshsign_session_id(state["negotiation_id"]),
+                )
+                status = (sess.get("status") or "").lower()
+                if status in ("open", "joined"):
+                    return (True, state.get("session_code") or state["negotiation_id"])
+            except SshsignSessionError:
+                # Couldn't reach sshsign — don't block on uncertain state;
+                # a stale pointer for a terminal session shouldn't trap
+                # the user out of new mints.
+                continue
+
+    # Check demo-mode PID file.
+    pid_path = Path("/tmp/safe_negotiate/.session.pid")
+    try:
+        pid_text = pid_path.read_text().strip()
+        pid = int(pid_text)
+        os.kill(pid, 0)  # raises if process is gone
+        return (True, "a running negotiation")
+    except (OSError, ValueError, FileNotFoundError):
+        pass
+    return (False, None)
+
+
 def run_prepare(
     message: str,
     output_dir: str,
@@ -159,6 +319,31 @@ def run_prepare(
 
     # Resolve chat_id first so we can push an interstitial before the slow parse.
     chat_id = resolve_chat_id(chat_id_flag)
+
+    # Gate 1: bot-role pre-check. Reject obviously wrong-bot requests
+    # (investor-shaped to founder bot or vice versa) BEFORE we burn a
+    # Claude round-trip on parse_constraints. The regex is conservative;
+    # the post-parse check below is the authoritative backstop.
+    role_err = _enforce_bot_role_pre_parse(message)
+    if role_err:
+        if chat_id:
+            sender(chat_id, message=role_err)
+        return 1
+
+    # Gate 2: single-active-negotiation. Each bot+droplet handles one
+    # negotiation at a time. If there's already an in-flight session
+    # (two-party state pointer + non-terminal sshsign status, OR a live
+    # .session.pid from demo mode), refuse the new mint cleanly and
+    # tell the user how to free the slot.
+    has_active, descriptor = _has_active_negotiation()
+    if has_active:
+        body = format_event({
+            "type": "active_negotiation_block",
+            "descriptor": descriptor,
+        })
+        if chat_id and body:
+            sender(chat_id, message=body)
+        return 1
 
     # First-run guard: if the user hasn't configured their identity yet,
     # stash their negotiation message and ask for identity before parsing.
@@ -205,6 +390,18 @@ def run_prepare(
         missing = [f for f in required_fields if constraints.get(f) is None]
         if missing:
             sys.stderr.write(f"Ambiguous constraints (null values): {missing}. Ask the user to clarify.\n")
+            return 1
+
+        # Gate 3: bot-role post-parse backstop. The regex pre-check
+        # catches the obvious cases; this catches subtler classifier
+        # outputs (e.g., parse_constraints inferring role=investor from
+        # phrasing the regex missed). Critical privacy gate — without
+        # it, a wrong-role message produces a confirm card revealing
+        # the OTHER party's constraints in this party's chat.
+        role_err = _enforce_bot_role_post_parse(constraints.get("role") or "")
+        if role_err:
+            if chat_id:
+                sender(chat_id, message=role_err)
             return 1
 
         # Two-party join path: the investor pasted a session_code. Validate

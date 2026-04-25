@@ -34,6 +34,42 @@ def _identity_configured(monkeypatch):
     monkeypatch.setenv("FOUNDER_NAME", "Test User")
 
 
+@pytest.fixture(autouse=True)
+def _bot_role_either(monkeypatch):
+    """Default every test to 'no role enforcement' so the bot-role gate
+    in run_prepare doesn't interfere with tests that exercise the join
+    branch (investor-shaped messages) or the post-parse role inference.
+    Tests that specifically verify the gate explicitly override this
+    via monkeypatch.setenv("NEGOTIATE_SAFE_BOT_ROLE", "founder"|"investor").
+    """
+    monkeypatch.setenv("NEGOTIATE_SAFE_BOT_ROLE", "either")
+
+
+@pytest.fixture(autouse=True)
+def _isolated_state_dir(tmp_path_factory, monkeypatch):
+    """Point state_store at a per-test-session isolated dir so the
+    single-active-negotiation gate doesn't read leftover pointers
+    from prior test runs (or the developer's actual home dir).
+    """
+    isolated = tmp_path_factory.mktemp("oc-skill-state")
+    monkeypatch.setenv("CLAW_NEGOTIATE_STATE_DIR", str(isolated))
+    yield isolated
+
+
+@pytest.fixture(autouse=True)
+def _no_demo_session_pid():
+    """Wipe any stale /tmp/safe_negotiate/.session.pid that an earlier
+    test or live demo left behind. Must run before each test so the
+    active-negotiation gate doesn't see a phantom PID."""
+    from pathlib import Path
+    pid = Path("/tmp/safe_negotiate/.session.pid")
+    try:
+        pid.unlink()
+    except (OSError, FileNotFoundError):
+        pass
+    yield
+
+
 @pytest.fixture
 def sample_constraints() -> dict:
     return {

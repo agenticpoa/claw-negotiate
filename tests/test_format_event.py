@@ -46,6 +46,8 @@ class TestFormatters:
             "investor_both_online",
             "investor_wake_timeout",
             "investor_session_ended",
+            # Single-active + role gates
+            "active_negotiation_block",
         }
 
     # ---- confirm (our emit) ----
