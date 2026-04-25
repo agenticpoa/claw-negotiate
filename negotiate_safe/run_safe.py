@@ -2513,15 +2513,22 @@ def ensure_cron(
             # tuned the interval since mint-time.
             return True, None
 
-    # Not installed — add it.
+    # Not installed — add it. Flag set discovered live (OC 2026.4.x):
+    #   * `--exact` is rejected for `--every` schedules (it's a `--cron`
+    #     stagger control, not an `--every` knob).
+    #   * `--session isolated` requires `--message` (agentTurn). For our
+    #     case a system event in main session is the right shape — A.5
+    #     in SKILL.md routes "negotiate_safe_scan" to `run_safe.py scan`
+    #     and the scan turn is short, so it doesn't disrupt active
+    #     conversations meaningfully.
+    #   * `--no-deliver` is only valid for non-main sessions; with main
+    #     session we just don't pass it (the system event payload
+    #     doesn't generate user-visible chatter on its own).
     add_argv = [
         "openclaw", "cron", "add",
         "--name", CRON_JOB_NAME,
         "--every", interval,
-        "--session", "isolated",
         "--system-event", "negotiate_safe_scan",
-        "--no-deliver",
-        "--exact",
         "--keep-after-run",
     ]
     try:
@@ -2683,21 +2690,16 @@ def _run_founder_resume(
     bot_username = os.environ.get("TELEGRAM_BOT_USERNAME", "AgenticPOA_bot")
     history_neg_id = mint.get("negotiation_id")
 
-    stream_rc, signing_event = _stream_to_telegram(
-        output_dir=out,
-        chat_id=str(founder_dm),
-        constraints=config.get("constraints"),
-        bot_username=bot_username,
-        group_chat_id=group_chat_id,
-        negotiation_id=history_neg_id,
-        sshsign_host=sshsign_host,
-    )
-
-    # Mark streaming_at — this is the investor's real gate signal, not
-    # founder_resumed_at. A crash between resumed_at and streaming_at
-    # leaves the investor's bounded poll still waiting (correct) and
-    # a future scan tick re-idempotent-checks resumed_at (sees it set,
-    # logs dedup, exits).
+    # Mark streaming_at BEFORE invoking _stream_to_telegram. The function
+    # blocks for the duration of the entire negotiation (rounds + signing
+    # path + finalize), and the investor's bounded poll is gating run_
+    # distributed on this signal. Setting it post-stream sequences both
+    # sides incorrectly: the investor would only unblock after the
+    # founder is DONE streaming, by which point the founder's
+    # run_distributed has exited and there's no counterparty for the
+    # investor's offers. INV-D67C9 (Apr 25) hit this race with the
+    # streaming_at write sitting after _stream_to_telegram in earlier
+    # code; moved here so both sides are concurrent.
     try:
         client.update_session_member(
             session_id, field="founder_streaming_at", value=int(now_fn()),
@@ -2707,6 +2709,16 @@ def _run_founder_resume(
         # card, but we'd rather the founder's stream keep going than
         # abort here. The audit trail on sshsign captures the gap.
         sys.stderr.write(f"resume: update-session-member streaming_at: {e}\n")
+
+    stream_rc, signing_event = _stream_to_telegram(
+        output_dir=out,
+        chat_id=str(founder_dm),
+        constraints=config.get("constraints"),
+        bot_username=bot_username,
+        group_chat_id=group_chat_id,
+        negotiation_id=history_neg_id,
+        sshsign_host=sshsign_host,
+    )
 
     if stream_rc != 0 or not signing_event:
         # Stream failed or exited before a signing event landed. State

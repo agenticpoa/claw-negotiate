@@ -138,13 +138,27 @@ class TestRunFounderResumeIdempotency:
 
 
 class TestRunFounderResumeHappyPath:
-    def test_sets_resumed_then_streams_then_sets_streaming(
+    def test_sets_resumed_then_streaming_BEFORE_stream_call(
         self, state_record, fake_client, monkeypatch,
     ):
-        # Mock _resolve_group_chat_id so we don't ssh in the test.
+        """Critical sequencing test: streaming_at MUST be set BEFORE
+        ``_stream_to_telegram`` is invoked. The investor's bounded
+        poll uses streaming_at as the signal that the founder is
+        live — if we set it post-stream, the investor only unblocks
+        AFTER the founder is done streaming, by which point there's
+        no counterparty for the investor's run_distributed to talk
+        to. Regression for INV-D67C9 (Apr 25)."""
         monkeypatch.setattr(rs, "_resolve_group_chat_id", lambda *a, **kw: "-100123")
-        # Stream returns clean rc + no signing event — skips finalize.
-        with patch.object(rs, "_stream_to_telegram", return_value=(0, None)) as stream:
+        # Track call order: each update_session_member + the stream.
+        events = []
+        fake_client.update_session_member.side_effect = (
+            lambda *a, **kw: events.append(("update", kw.get("field") or a[1]))
+        )
+        def _fake_stream(**kw):
+            events.append(("stream", None))
+            return (0, None)
+
+        with patch.object(rs, "_stream_to_telegram", side_effect=_fake_stream) as stream:
             sender = MagicMock()
             rc = rs._run_founder_resume(
                 state_record, session_client=fake_client, sender=sender,
@@ -152,15 +166,12 @@ class TestRunFounderResumeHappyPath:
             )
 
         assert rc == 0
-        # resumed_at set first, then stream called, then streaming_at set.
-        calls = fake_client.update_session_member.call_args_list
-        assert len(calls) == 2
-        assert calls[0].kwargs == {
-            "field": "founder_resumed_at", "value": 1714000000,
-        } or calls[0].args[1:] == ("founder_resumed_at", 1714000000)
-        assert calls[1].kwargs == {
-            "field": "founder_streaming_at", "value": 1714000000,
-        } or calls[1].args[1:] == ("founder_streaming_at", 1714000000)
+        # Exact order: resumed_at, streaming_at, _stream_to_telegram.
+        assert events == [
+            ("update", "founder_resumed_at"),
+            ("update", "founder_streaming_at"),
+            ("stream", None),
+        ], f"sequencing violated, got {events}"
         stream.assert_called_once()
         # Orienting card posted in the group, never starts with '/'.
         sent_to_group = [
@@ -366,10 +377,20 @@ class TestEnsureCron:
         assert "--name" in add_call
         assert add_call[add_call.index("--name") + 1] == "negotiate_safe-scan"
         assert add_call[add_call.index("--every") + 1] == "30s"
-        assert add_call[add_call.index("--session") + 1] == "isolated"
         assert add_call[add_call.index("--system-event") + 1] == "negotiate_safe_scan"
-        assert "--exact" in add_call
         assert "--keep-after-run" in add_call
+        # Regression: these flags were rejected by the live OC CLI on
+        # INV-6Z4K7 (Apr 25). Keep them out.
+        assert "--exact" not in add_call, (
+            "--exact is only valid with --cron schedules, not --every"
+        )
+        assert "--session" not in add_call, (
+            "main session is the right target for system-event payloads; "
+            "isolated/current session would also require --message"
+        )
+        assert "--no-deliver" not in add_call, (
+            "--no-deliver requires non-main session"
+        )
 
     def test_noop_when_job_already_exists(self):
         existing = json.dumps([
