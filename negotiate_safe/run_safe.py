@@ -354,14 +354,54 @@ def _has_active_negotiation() -> tuple[bool, str | None]:
                 # the user out of new mints.
                 continue
 
-    # Check demo-mode PID file.
+    # Check demo-mode PID file. Two failure modes the naive `os.kill(pid, 0)`
+    # check misses: (a) the PID is dead — fine, raises OSError, we treat as
+    # not-blocked; (b) the PID got REUSED by an unrelated process (sshd, cron,
+    # bash, etc.) — kill(0) succeeds and we falsely block all future mints.
+    # Verify it's actually ours by reading /proc/<pid>/cmdline and looking for
+    # a run_safe.py / negotiate_safe signature. Any failure of that check
+    # treats the pidfile as stale and unlinks it.
     pid_path = Path("/tmp/safe_negotiate/.session.pid")
     try:
         pid_text = pid_path.read_text().strip()
         pid = int(pid_text)
         os.kill(pid, 0)  # raises if process is gone
-        return (True, "a running negotiation")
     except (OSError, ValueError, FileNotFoundError):
+        # No pid file, unparsable, or process is dead. Either way: not
+        # blocked. Best-effort cleanup of the stale file.
+        try:
+            pid_path.unlink()
+        except (OSError, FileNotFoundError):
+            pass
+        return (False, None)
+
+    # PID exists. Verify it's actually one of ours before treating as a
+    # block. Linux-only path; on platforms without /proc we fall back to
+    # treating any live PID as ours (preserves existing behavior on macOS
+    # tests). A successful match means the process really is a negotiate
+    # run; mismatch means PID-reuse — drop the pidfile, allow new mint.
+    cmdline_path = Path(f"/proc/{pid}/cmdline")
+    try:
+        cmdline = cmdline_path.read_bytes().decode("utf-8", "replace")
+    except (OSError, FileNotFoundError):
+        # Either the proc entry vanished between kill(0) and now, or
+        # we're on a non-Linux platform. Treat as live-and-ours to
+        # match prior behavior; ops can manually rm the pidfile if
+        # this becomes a problem.
+        return (True, "a running negotiation")
+
+    if "run_safe.py" in cmdline or "negotiate_safe" in cmdline:
+        return (True, "a running negotiation")
+
+    # PID belongs to an unrelated process — pidfile is stale. Drop it
+    # so the user isn't blocked from minting forever.
+    sys.stderr.write(
+        f"_has_active_negotiation: pid {pid} is not ours "
+        f"(cmdline={cmdline[:80]!r}); cleaning stale pidfile\n"
+    )
+    try:
+        pid_path.unlink()
+    except (OSError, FileNotFoundError):
         pass
     return (False, None)
 
