@@ -758,16 +758,16 @@ def format_active_negotiation_block(event: dict[str, Any]) -> str:
     'a running negotiation' for demo mode).
 
     Critical: tells the user exactly how to free the slot — `cancel`
-    the existing negotiation. Without this hint people end up retrying
-    the new mint and getting blocked on every attempt.
+    the existing negotiation. The trigger word matches the SKILL.md
+    A.7 cancel intent rule, so just typing `cancel` works without
+    further qualification.
     """
     descriptor = (event.get("descriptor") or "an active negotiation").strip()
     return (
         f"⛔ You already have **{descriptor}** in progress.\n\n"  # ⛔
-        f"Reply `cancel my negotiation` to abort it, then start a new "
-        f"one. (Each bot handles one negotiation at a time so the "
-        f"agent can't accidentally send your terms to the wrong "
-        f"counterparty.)"
+        f"Reply `cancel` to abort it, then start a new one. "
+        f"(Each bot handles one negotiation at a time so the agent "
+        f"can't accidentally send your terms to the wrong counterparty.)"
     )
 
 
