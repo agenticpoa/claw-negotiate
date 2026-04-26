@@ -3399,9 +3399,10 @@ class TestMarkSigned:
 
 
 class TestRunCancel:
-    def _write_mint(self, tmp_path, neg_id: str = "neg_1"):
+    def _write_mint(self, tmp_path, neg_id: str = "neg_1", code: str = "INV-TEST1"):
         (tmp_path / "mint.json").write_text(json.dumps({
             "negotiation_id": neg_id,
+            "session_code": code,
         }))
 
     def test_no_mint_returns_2(self, tmp_path):
