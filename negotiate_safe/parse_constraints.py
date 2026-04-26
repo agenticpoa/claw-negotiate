@@ -20,6 +20,7 @@ Return ONLY a JSON object (no prose, no code fences). It MUST contain ALL 14 of 
   "role": "founder" | "investor",
   "mode": "demo" | "two_party",
   "session_code": <string or null>,
+  "founder_bot_handle": <string or null>,
   "valuation_cap_min": <integer dollars>,
   "valuation_cap_max": <integer dollars>,
   "discount_min": <decimal 0-1>,
@@ -49,6 +50,12 @@ Session code (`session_code`) rules:
 - When `session_code` is set, `role` is typically "investor" (since founders create; investors join) — but respect what the user says.
 - When `session_code` is set, `mode` is always "two_party".
 
+Founder bot handle (`founder_bot_handle`) rules:
+- Always null on founder-side requests (the founder doesn't address their own bot in their own message).
+- On investor-side join messages: extract the founder's Telegram bot handle when mentioned. The conventional shape is "Joining INV-XXXXX via @<founder_bot>" — capture `@<founder_bot>` (with the leading @).
+- Common variants to recognize: "via @Bot", "founder bot is @Bot", "founder agent: @Bot".
+- Null if the user's message doesn't reference a founder bot handle.
+
 Identity fields (strings or null):
 - `company_name`: the startup's company name (same regardless of user's role).
 - `founder_name`: the individual founder's full name.
@@ -72,37 +79,45 @@ Other rules:
 Founder-side examples (demo mode — AI plays the investor):
 
 Input: "Negotiate my SAFE. I'm Jane Doe, CEO of Acme Corp, raising from Bay Capital (Mark Stone). Cap $8M-$12M, 20% discount, pro-rata, MFN preferred. $500k investment."
-Output: {"role": "founder", "mode": "demo", "session_code": null, "valuation_cap_min": 8000000, "valuation_cap_max": 12000000, "discount_min": 0.20, "pro_rata": "required", "mfn": "preferred", "company_name": "Acme Corp", "founder_name": "Jane Doe", "founder_title": "CEO", "investor_name": "Mark Stone", "investor_firm": "Bay Capital", "investment_amount": 500000.0}
+Output: {"role": "founder", "mode": "demo", "session_code": null, "founder_bot_handle": null, "valuation_cap_min": 8000000, "valuation_cap_max": 12000000, "discount_min": 0.20, "pro_rata": "required", "mfn": "preferred", "company_name": "Acme Corp", "founder_name": "Jane Doe", "founder_title": "CEO", "investor_name": "Mark Stone", "investor_firm": "Bay Capital", "investment_amount": 500000.0}
 
 Input: "SAFE for TechCo. Looking for $150M cap, no less than $120M. Discount 15%. Pro-rata is a must. Investment: $1.5M."
-Output: {"role": "founder", "mode": "demo", "session_code": null, "valuation_cap_min": 120000000, "valuation_cap_max": 150000000, "discount_min": 0.15, "pro_rata": "required", "mfn": "indifferent", "company_name": "TechCo", "founder_name": null, "founder_title": null, "investor_name": null, "investor_firm": null, "investment_amount": 1500000.0}
+Output: {"role": "founder", "mode": "demo", "session_code": null, "founder_bot_handle": null, "valuation_cap_min": 120000000, "valuation_cap_max": 150000000, "discount_min": 0.15, "pro_rata": "required", "mfn": "indifferent", "company_name": "TechCo", "founder_name": null, "founder_title": null, "investor_name": null, "investor_firm": null, "investment_amount": 1500000.0}
 
 Input: "Cap no lower than $5M, up to $10M. Twenty percent discount minimum. No strong feelings on pro-rata or MFN. $250,000."
-Output: {"role": "founder", "mode": "demo", "session_code": null, "valuation_cap_min": 5000000, "valuation_cap_max": 10000000, "discount_min": 0.20, "pro_rata": "preferred", "mfn": "indifferent", "company_name": null, "founder_name": null, "founder_title": null, "investor_name": null, "investor_firm": null, "investment_amount": 250000.0}
+Output: {"role": "founder", "mode": "demo", "session_code": null, "founder_bot_handle": null, "valuation_cap_min": 5000000, "valuation_cap_max": 10000000, "discount_min": 0.20, "pro_rata": "preferred", "mfn": "indifferent", "company_name": null, "founder_name": null, "founder_title": null, "investor_name": null, "investor_firm": null, "investment_amount": 250000.0}
 
 Founder-side two-party examples (AI does NOT play the investor; a real investor joins separately):
 
 Input: "Live negotiation: I'm Juan Figuera, CEO of APOA Inc. My investor is Alex Smith at Central Park Labs and will join separately. Cap $20M-$50M, 10% discount, pro-rata required, MFN preferred. $500K."
-Output: {"role": "founder", "mode": "two_party", "session_code": null, "valuation_cap_min": 20000000, "valuation_cap_max": 50000000, "discount_min": 0.10, "pro_rata": "required", "mfn": "preferred", "company_name": "APOA Inc", "founder_name": "Juan Figuera", "founder_title": "CEO", "investor_name": "Alex Smith", "investor_firm": "Central Park Labs", "investment_amount": 500000.0}
+Output: {"role": "founder", "mode": "two_party", "session_code": null, "founder_bot_handle": null, "valuation_cap_min": 20000000, "valuation_cap_max": 50000000, "discount_min": 0.10, "pro_rata": "required", "mfn": "preferred", "company_name": "APOA Inc", "founder_name": "Juan Figuera", "founder_title": "CEO", "investor_name": "Alex Smith", "investor_firm": "Central Park Labs", "investment_amount": 500000.0}
 
 Input: "Real negotiation with my investor. Cap $8M-$12M, 20% discount, pro-rata, MFN preferred. $500K. I'll share the code with them."
-Output: {"role": "founder", "mode": "two_party", "session_code": null, "valuation_cap_min": 8000000, "valuation_cap_max": 12000000, "discount_min": 0.20, "pro_rata": "required", "mfn": "preferred", "company_name": null, "founder_name": null, "founder_title": null, "investor_name": null, "investor_firm": null, "investment_amount": 500000.0}
+Output: {"role": "founder", "mode": "two_party", "session_code": null, "founder_bot_handle": null, "valuation_cap_min": 8000000, "valuation_cap_max": 12000000, "discount_min": 0.20, "pro_rata": "required", "mfn": "preferred", "company_name": null, "founder_name": null, "founder_title": null, "investor_name": null, "investor_firm": null, "investment_amount": 500000.0}
 
 Investor-side examples (demo mode — AI plays the founder):
 
 Input: "As Alex Chen from Blue Fund, evaluate an investment in QuantumLabs (CEO Dr. Rivera). Cap between $20M and $40M, need at least a 15% discount. Pro-rata required, MFN nice to have. $500K check."
-Output: {"role": "investor", "mode": "demo", "session_code": null, "valuation_cap_min": 20000000, "valuation_cap_max": 40000000, "discount_min": 0.15, "pro_rata": "required", "mfn": "preferred", "company_name": "QuantumLabs", "founder_name": "Dr. Rivera", "founder_title": "CEO", "investor_name": "Alex Chen", "investor_firm": "Blue Fund", "investment_amount": 500000.0}
+Output: {"role": "investor", "mode": "demo", "session_code": null, "founder_bot_handle": null, "valuation_cap_min": 20000000, "valuation_cap_max": 40000000, "discount_min": 0.15, "pro_rata": "required", "mfn": "preferred", "company_name": "QuantumLabs", "founder_name": "Dr. Rivera", "founder_title": "CEO", "investor_name": "Alex Chen", "investor_firm": "Blue Fund", "investment_amount": 500000.0}
 
 Input: "Evaluate an investment in Helios Robotics. I can take a cap between $25M and $50M with a 12% discount floor. Pro-rata required, MFN preferred. $500K check."
-Output: {"role": "investor", "mode": "demo", "session_code": null, "valuation_cap_min": 25000000, "valuation_cap_max": 50000000, "discount_min": 0.12, "pro_rata": "required", "mfn": "preferred", "company_name": "Helios Robotics", "founder_name": null, "founder_title": null, "investor_name": null, "investor_firm": null, "investment_amount": 500000.0}
+Output: {"role": "investor", "mode": "demo", "session_code": null, "founder_bot_handle": null, "valuation_cap_min": 25000000, "valuation_cap_max": 50000000, "discount_min": 0.12, "pro_rata": "required", "mfn": "preferred", "company_name": "Helios Robotics", "founder_name": null, "founder_title": null, "investor_name": null, "investor_firm": null, "investment_amount": 500000.0}
 
 Investor joining an existing session (two_party, code supplied):
 
 Input: "Join negotiation INV-7K3X9 as investor. Cap up to $40M, 12% discount floor, pro-rata required. $500K check."
-Output: {"role": "investor", "mode": "two_party", "session_code": "INV-7K3X9", "valuation_cap_min": 0, "valuation_cap_max": 40000000, "discount_min": 0.12, "pro_rata": "required", "mfn": "indifferent", "company_name": null, "founder_name": null, "founder_title": null, "investor_name": null, "investor_firm": null, "investment_amount": 500000.0}
+Output: {"role": "investor", "mode": "two_party", "session_code": "INV-7K3X9", "founder_bot_handle": null, "valuation_cap_min": 0, "valuation_cap_max": 40000000, "discount_min": 0.12, "pro_rata": "required", "mfn": "indifferent", "company_name": null, "founder_name": null, "founder_title": null, "investor_name": null, "investor_firm": null, "investment_amount": 500000.0}
 
 Input: "I'm Mark Stone from Blue Fund. Joining INV-3BQ7K as investor. Cap $15M-$30M, 15% discount, pro-rata required, MFN preferred."
-Output: {"role": "investor", "mode": "two_party", "session_code": "INV-3BQ7K", "valuation_cap_min": 15000000, "valuation_cap_max": 30000000, "discount_min": 0.15, "pro_rata": "required", "mfn": "preferred", "company_name": null, "founder_name": null, "founder_title": null, "investor_name": "Mark Stone", "investor_firm": "Blue Fund", "investment_amount": null}
+Output: {"role": "investor", "mode": "two_party", "session_code": "INV-3BQ7K", "founder_bot_handle": null, "valuation_cap_min": 15000000, "valuation_cap_max": 30000000, "discount_min": 0.15, "pro_rata": "required", "mfn": "preferred", "company_name": null, "founder_name": null, "founder_title": null, "investor_name": "Mark Stone", "investor_firm": "Blue Fund", "investment_amount": null}
+
+Investor join WITH the founder bot handle (the standard inverted-invitation shape):
+
+Input: "Joining INV-7K3X9 via @AgenticPOA_bot, cap up to $40M, 10% discount, pro-rata required."
+Output: {"role": "investor", "mode": "two_party", "session_code": "INV-7K3X9", "founder_bot_handle": "@AgenticPOA_bot", "valuation_cap_min": 0, "valuation_cap_max": 40000000, "discount_min": 0.10, "pro_rata": "required", "mfn": "indifferent", "company_name": null, "founder_name": null, "founder_title": null, "investor_name": null, "investor_firm": null, "investment_amount": null}
+
+Input: "Join INV-DEMO99 as investor. Founder bot is @alice_negotiator_bot. Cap $20M-$45M, 12% discount, pro-rata required. $750K."
+Output: {"role": "investor", "mode": "two_party", "session_code": "INV-DEMO99", "founder_bot_handle": "@alice_negotiator_bot", "valuation_cap_min": 20000000, "valuation_cap_max": 45000000, "discount_min": 0.12, "pro_rata": "required", "mfn": "indifferent", "company_name": null, "founder_name": null, "founder_title": null, "investor_name": null, "investor_firm": null, "investment_amount": 750000.0}
 """
 
 

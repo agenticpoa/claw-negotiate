@@ -284,3 +284,34 @@ class SshsignSession:
             "--field", field,
             "--value", str(int(value)),
         )
+
+    # Inverted-invitation: each member's own bot_handle, written by
+    # the member's own bot. ACL is member-self-write (any session
+    # member can write their own row's whitelisted text fields).
+    _UPDATABLE_MEMBER_TEXT_FIELDS = frozenset({"bot_handle"})
+
+    def update_session_member_text(
+        self, session_id: str, field: str, text_value: str,
+    ) -> dict[str, Any]:
+        """Update a whitelisted text field on the caller's own member row.
+
+        Member-self-write: any session member can write their OWN row.
+        Distinct from ``update_session_member`` (creator-only int fields).
+        Whitelist: {bot_handle}.
+
+        Empty string is allowed (clears the field). Telegram bot handles
+        cap at 32 chars; we don't enforce that client-side — let the
+        server own length validation when it eventually adds it.
+
+        Raises SshsignSessionError on rejection.
+        """
+        if field not in self._UPDATABLE_MEMBER_TEXT_FIELDS:
+            raise SshsignSessionError(
+                f"text field not writable via update-session-member: {field!r}"
+            )
+        return self._run(
+            "update-session-member",
+            "--session-id", session_id,
+            "--field", field,
+            "--text-value", str(text_value),
+        )

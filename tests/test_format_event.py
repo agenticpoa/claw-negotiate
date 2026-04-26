@@ -48,6 +48,8 @@ class TestFormatters:
             "investor_session_ended",
             # Single-active + role gates
             "active_negotiation_block",
+            # Inverted-invitation
+            "create_group_for_founder",
         }
 
     # ---- confirm (our emit) ----
@@ -390,51 +392,57 @@ class TestFormatters:
 
 
 class TestFormatInvitation:
-    def test_includes_session_code_prominently(self):
+    def test_includes_session_code_and_founder_handle(self):
+        """Inverted-invitation card: copy-pasteable block must contain
+        BOTH the session code and the founder bot handle, so the
+        investor can paste the literal block to their own bot and the
+        parser extracts both fields cleanly."""
         out = fe.format_invitation({
             "type": "invitation",
             "session_code": "INV-7K3X9",
+            "founder_bot_handle": "@alice_negotiator_bot",
             "ttl_hours": 24,
             "counterparty_label": "Alex Smith, Central Park Labs",
         })
         assert "INV-7K3X9" in out
-        assert "**INV-7K3X9**" in out
+        assert "@alice_negotiator_bot" in out
         assert "Alex Smith, Central Park Labs" in out
-        # Copy explicitly frames the next step so the user isn't stuck
-        # wondering what to do with the code.
-        assert "Next step" in out
-        assert "send this code" in out.lower()
-        # Should hint at sharing channels, not just "copy this"
+        # The "Joining INV-X via @handle" anchor phrase is what the
+        # investor's parser keys on. Drop this and the design breaks.
+        assert "Joining INV-7K3X9 via @alice_negotiator_bot" in out
+        # Should hint at sharing channels, not just "copy this".
         assert any(ch in out for ch in ("Signal", "SMS", "email"))
-        # Should tell the user what they can do while waiting
+        # Should tell the user what they can do while waiting.
         assert "cancel" in out.lower()
 
     def test_generic_counterparty_label_when_missing(self):
-        out = fe.format_invitation({"type": "invitation", "session_code": "INV-X"})
-        assert "your investor" in out.lower() or "your counterparty" in out.lower()
-
-    def test_example_join_phrasing_included(self):
-        """The card tells the user what the other side should reply with,
-        so copy-paste onboarding is frictionless. Only when no invite URL
-        is provided — the URL replaces the example phrasing."""
-        out = fe.format_invitation({"type": "invitation", "session_code": "INV-X"})
-        assert "Join negotiation" in out or "join negotiation" in out.lower()
-        assert "as investor" in out.lower()
-
-    def test_invite_url_displayed_when_provided(self):
-        """With a one-click URL, the card surfaces it alongside the code so
-        the founder can share either ('or both')."""
         out = fe.format_invitation({
             "type": "invitation",
-            "session_code": "INV-7K3X9",
-            "invite_url": "https://provision.example.com/join/INV-7K3X9",
-            "counterparty_label": "Alex",
+            "session_code": "INV-X",
+            "founder_bot_handle": "@bot",
         })
-        assert "INV-7K3X9" in out
-        assert "https://provision.example.com/join/INV-7K3X9" in out
-        assert "one-click" in out.lower()
-        # The fallback "Join negotiation" example is dropped when URL is present
-        assert "as investor" not in out.lower()
+        assert "your investor" in out.lower() or "your counterparty" in out.lower()
+
+    def test_normalizes_handle_without_at_prefix(self):
+        out = fe.format_invitation({
+            "type": "invitation",
+            "session_code": "INV-X",
+            "founder_bot_handle": "raw_bot_no_at_prefix",
+        })
+        # The card normalizes to @-prefixed for display consistency.
+        assert "@raw_bot_no_at_prefix" in out
+
+    def test_warns_when_founder_bot_handle_missing(self):
+        """The skill env should always supply TELEGRAM_BOT_USERNAME so
+        founder_bot_handle is set. If somehow missing, the card should
+        surface a visible warning rather than silently shipping a card
+        without the handle."""
+        out = fe.format_invitation({
+            "type": "invitation",
+            "session_code": "INV-X",
+            "founder_bot_handle": "",
+        })
+        assert "wasn't configured" in out.lower() or "warning" in out.lower() or "⚠" in out
 
 
 class TestFormatWaiting:

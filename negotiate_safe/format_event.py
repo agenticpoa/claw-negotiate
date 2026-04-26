@@ -460,58 +460,78 @@ def format_profile(event: dict[str, Any]) -> str:
 def format_invitation(event: dict[str, Any]) -> str:
     """Founder-side card shown after a two-party session is created.
 
-    The user has a session code and needs two pieces of guidance:
-    (1) what to do with it (share via any channel — Signal, SMS, email,
-    or paste into an existing conversation), and (2) what the recipient
-    should do on their end (paste into their own instance of the skill).
-    Without that framing the card feels like a dead-end.
+    Inverted-invitation design: the founder doesn't know the
+    investor's bot handle, so we cannot author a tap-to-join Telegram
+    link. Instead, hand the founder a single copy-pasteable block
+    that includes BOTH the session code and the founder's own bot
+    handle. The investor's job is to paste this exact text to their
+    own bot — the "via @<founder>" form is what the investor's parse
+    layer extracts, with sshsign's metadata as the authoritative
+    backstop.
 
-    When a one-click invite URL is provided (via PROVISION_BASE_URL), we
-    surface that instead of the manual "reply to your own bot" fallback.
+    Required event fields: session_code, founder_bot_handle.
+    Optional: expires_at, ttl_hours, counterparty_label.
     """
     code = (event.get("session_code") or "").strip()
-    invite_url = (event.get("invite_url") or "").strip()
+    founder_bot = (event.get("founder_bot_handle") or "").strip()
+    if founder_bot and not founder_bot.startswith("@"):
+        founder_bot = "@" + founder_bot
     expires_at = event.get("expires_at") or ""
     ttl_h = event.get("ttl_hours") or 24
     counterparty = (event.get("counterparty_label") or "your investor").strip()
 
+    # Pre-build the exact join template the investor should paste.
+    # Including a placeholder line for "your terms" makes the
+    # required edit obvious; the investor knows to swap it for their
+    # own cap/discount/etc. without us having to explain.
+    join_template = (
+        f"Joining {code} via {founder_bot}, "
+        f"cap up to $X, Y% discount, pro-rata required"
+        if founder_bot
+        else f"Joining {code} as investor, cap up to $X, Y% discount, "
+             "pro-rata required"
+    )
+
     lines = [
-        "\U0001f91d **Live negotiation started.**",  # 🤝
+        "🤝 **Live negotiation ready.**",  # 🤝
         "",
-        "**Next step — send this code to " + counterparty + "** "
-        "(via Signal, SMS, email, or any channel you already use):",
+        f"**Send {counterparty} this exact message** "
+        "(via Signal, SMS, email — whatever you already use):",
         "",
-        f"    **{code}**",
+        "─────────────────────────",
+        "Negotiating a SAFE — your turn.",
+        "",
+        "DM your investor agent on Telegram with this exact message "
+        "(replace cap/discount with your terms):",
+        "",
+        f"`{join_template}`",
+        "─────────────────────────",
         "",
     ]
-    if invite_url:
-        lines.extend([
-            "**Or send them this one-click join link** "
-            "(sets them up if they don't have the skill):",
-            "",
-            f"    {invite_url}",
-            "",
-        ])
-    else:
-        lines.extend([
-            "**What they'll do on their side:** reply to their own "
-            "AgenticPOA bot with something like:",
-            "",
-            f"> Join negotiation {code} as investor, cap up to "
-            "$X, $Y% discount, pro-rata required",
-            "",
-            "(They'll need the skill installed and their own AgenticPOA bot.)",
-            "",
-        ])
+    if not founder_bot:
+        # We should always have founder_bot at this point (skill env
+        # sets TELEGRAM_BOT_USERNAME). If somehow missing, surface a
+        # warning so ops sees it rather than the user getting a card
+        # without the founder handle.
+        lines.append(
+            "⚠️ Note: my bot handle wasn't configured at deploy time. "
+            "Tell your investor to mention me explicitly in their join "
+            "message so my agent gets attribution right."
+        )
+        lines.append("")
 
     lines.append("**While you wait:**")
     if expires_at:
         lines.append(
-            f"• I'll notify you the moment they join. The code is valid "
-            f"for {ttl_h} hours."
+            f"• I'll notify you the moment {counterparty} joins. "
+            f"The code is valid for {ttl_h} hours."
         )
     else:
-        lines.append("• I'll notify you the moment they join.")
+        lines.append(f"• I'll notify you the moment {counterparty} joins.")
+    lines.append(
+        "• Once they're in, I'll tell you how to set up the live group "
+        "chat for round-by-round visibility."
+    )
     lines.append("• Reply \"cancel\" anytime to revoke and tear it down.")
     return "\n".join(lines)
 
@@ -775,15 +795,79 @@ def format_founder_resumed(event: dict[str, Any]) -> str:
 
 
 def format_investor_waiting_for_founder(event: dict[str, Any]) -> str:
-    """P7-5 investor-side: posted in the bound group immediately after
-    the investor joins. Tells both parties the founder's agent is
-    being woken and sets the expectation for the short pause that
-    follows (cron runs every ~30s, so worst-case wait is bounded).
+    """Investor-side, post-join: posted to investor's DM right after
+    join completes, before the live group exists. Tells the investor
+    the founder side is being prepared and what's about to happen.
+
+    Inverted-invitation design: also surfaces the founder bot handle
+    (pulled from sshsign session.metadata_public) so the investor
+    knows whose agent they're waiting on.
     """
+    founder_bot = (event.get("founder_bot_handle") or "").strip()
+    if founder_bot and not founder_bot.startswith("@"):
+        founder_bot = "@" + founder_bot
+    if founder_bot:
+        return (
+            "✅ **Joined.** Waiting for the founder's agent.\n\n"  # ✅
+            f"Founder agent: {founder_bot}\n\n"
+            "They're setting up a Telegram group where the negotiation "
+            "rounds will stream live. You'll be invited to it shortly. "
+            "No action needed from you — sit tight."
+        )
     return (
-        "⏳ Waking the founder's agent — this usually takes ~30 seconds.\n"  # ⏳
-        "Sit tight; the first offer will land here shortly."
+        "✅ **Joined.** Waiting for the founder's agent.\n\n"  # ✅
+        "They're setting up a Telegram group where the negotiation "
+        "rounds will stream live. You'll be invited to it shortly. "
+        "No action needed from you — sit tight."
     )
+
+
+def format_create_group_for_founder(event: dict[str, Any]) -> str:
+    """Founder-side, post-investor-join: posted to founder's DM the
+    moment the cron-driven scan picks up the joined session. Tells
+    the founder how to create the live group, with BOTH bot handles
+    pre-filled from sshsign session metadata.
+
+    Asymmetric: only the founder gets a "create group" instruction.
+    The investor's card is "wait" (above). This prevents both parties
+    from racing to create separate groups.
+    """
+    code = (event.get("session_code") or "").strip()
+    founder_bot = (event.get("founder_bot_handle") or "").strip()
+    investor_bot = (event.get("investor_bot_handle") or "").strip()
+    investor_label = (event.get("investor_label") or "your investor").strip()
+
+    if founder_bot and not founder_bot.startswith("@"):
+        founder_bot = "@" + founder_bot
+    if investor_bot and not investor_bot.startswith("@"):
+        investor_bot = "@" + investor_bot
+
+    # When the investor's bot handle hasn't propagated yet (timing
+    # window between join and our cron read), fall back to a
+    # placeholder. The card is regenerated on the next scan tick
+    # with the real handle. Better than blocking the founder.
+    if not investor_bot:
+        investor_bot = "(your investor's agent — handle not yet known)"
+
+    lines = [
+        f"✅ **{investor_label} joined.** Time to set up the live group.",  # ✅
+        "",
+        "**Create a Telegram group:**",
+        "1. Tap **+** → **New Group**",
+        "2. Search and add these members:",
+        f"   • `{founder_bot}` (your agent)" if founder_bot else "   • your founder agent",
+        f"   • `{investor_bot}`",
+        f"   • {investor_label} (their personal Telegram account)",
+        "   • You",
+        "3. Name the group (e.g. \"SAFE round – Acme + Babes Fund\").",
+        "4. In the group, paste:",
+        "",
+        f"`/bind {code}`",
+        "",
+        "Both agents will then post offers there round by round so "
+        "everyone watches live. Signing stays in your DM (private).",
+    ]
+    return "\n".join(lines)
 
 
 def format_investor_waiting_heartbeat(event: dict[str, Any]) -> str:
@@ -870,6 +954,7 @@ FORMATTERS = {
     "founder_resumed": format_founder_resumed,
     # P7-5 investor-side UX
     "investor_waiting_for_founder": format_investor_waiting_for_founder,
+    "create_group_for_founder": format_create_group_for_founder,
     "investor_waiting_heartbeat": format_investor_waiting_heartbeat,
     "investor_both_online": format_investor_both_online,
     "investor_wake_timeout": format_investor_wake_timeout,

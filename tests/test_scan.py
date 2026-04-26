@@ -510,9 +510,12 @@ class TestInvestorWaitForFounderStreaming:
             now_fn=now_fn,
         )
         assert rc == "streaming"
-        # Waiting card posted first, then both-online.
+        # Waiting card posted first, then both-online. Inverted-invitation
+        # changed the waiting copy from "Waking the founder's agent" to
+        # "Joined. Waiting for the founder's agent" since the investor
+        # is now the one who joined (not waking anything).
         msgs = [c.kwargs.get("message") or c.args[1] for c in sender.call_args_list]
-        assert any("Waking" in m for m in msgs)
+        assert any("Waiting for the founder" in m or "Joined" in m for m in msgs)
         assert any("Both sides" in m for m in msgs)
         typing.start.assert_called_once()
         typing.stop.assert_called_once()

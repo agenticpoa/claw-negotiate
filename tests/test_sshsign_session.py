@@ -344,3 +344,42 @@ class TestUpdateSessionMember:
         argv = runner.call_args[0][0]
         # int() coercion drops the fractional part.
         assert argv[argv.index("--value") + 1] == "17140000"
+
+
+class TestUpdateSessionMemberText:
+    def test_builds_correct_argv_for_bot_handle(self):
+        runner = MagicMock(return_value=_cp(0, json.dumps({"ok": True})))
+        client = ss.SshsignSession(runner=runner)
+        client.update_session_member_text(
+            "neg_1", field="bot_handle", text_value="@alice_bot",
+        )
+        argv = runner.call_args[0][0]
+        assert argv[:3] == ["ssh", "sshsign.dev", "update-session-member"]
+        assert argv[argv.index("--field") + 1] == "bot_handle"
+        assert argv[argv.index("--text-value") + 1] == "@alice_bot"
+        # No --value (int) flag
+        assert "--value" not in argv
+
+    def test_client_side_whitelist_rejects_unknown_text_field(self):
+        runner = MagicMock()
+        client = ss.SshsignSession(runner=runner)
+        with pytest.raises(ss.SshsignSessionError, match="not writable"):
+            client.update_session_member_text("neg_1", field="role", text_value="founder")
+        runner.assert_not_called()
+
+    def test_empty_string_value_allowed(self):
+        runner = MagicMock(return_value=_cp(0, json.dumps({"ok": True})))
+        client = ss.SshsignSession(runner=runner)
+        client.update_session_member_text("neg_1", field="bot_handle", text_value="")
+        argv = runner.call_args[0][0]
+        assert argv[argv.index("--text-value") + 1] == ""
+
+    def test_server_rejects_non_member(self):
+        runner = MagicMock(return_value=_cp(0, json.dumps({
+            "error": "caller is not a member of this session",
+        })))
+        client = ss.SshsignSession(runner=runner)
+        with pytest.raises(ss.SessionNotMemberError):
+            client.update_session_member_text(
+                "neg_1", field="bot_handle", text_value="@bot",
+            )

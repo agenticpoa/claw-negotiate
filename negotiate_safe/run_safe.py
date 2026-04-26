@@ -187,25 +187,65 @@ def _classify_bot_role() -> str | None:
     return None
 
 
-def _counterparty_bot_handle(bot_role: str) -> str:
-    """Resolve the counterparty bot's Telegram @username for redirect
-    messages. Each droplet's openclaw.json sets:
-      NEGOTIATE_SAFE_COUNTERPARTY_BOT — explicit override (e.g.
-        "AgenticPOAInvestor_bot" on the founder droplet).
-    Falls back to a generic phrase if unset, so we never lie about a
-    handle the operator hasn't actually deployed.
+def _counterparty_bot_handle_from_session(message: str, bot_role: str) -> str:
+    """Resolve the counterparty bot's Telegram @username for the
+    rejection card by looking up the session referenced in the
+    rejected message (if any). Sshsign is the trust anchor — the
+    handle is whatever the OTHER side's bot wrote into the session.
+
+    Returns an "@handle" string when sshsign yields one, or a
+    generic phrase ("the investor bot") when there's no INV code in
+    the message OR sshsign doesn't have a handle on file.
+
+    No environment-variable fallback: we used to have
+    NEGOTIATE_SAFE_COUNTERPARTY_BOT, but it required the operator to
+    know the counterparty bot at deploy time — wrong assumption for
+    the multi-operator world.
     """
-    explicit = (os.environ.get("NEGOTIATE_SAFE_COUNTERPARTY_BOT") or "").strip()
-    if explicit:
-        # Allow with-or-without leading @
-        if not explicit.startswith("@"):
-            explicit = "@" + explicit
-        return explicit
-    # Generic fallback — prompts the user to find the right handle
-    # rather than hardcoding one that may not exist.
-    return "the {other} bot".format(
-        other="investor" if bot_role == "founder" else "founder",
-    )
+    generic = "the investor bot" if bot_role == "founder" else "the founder bot"
+    m = _BIND_CODE_RE.search(message or "")
+    if not m:
+        return generic
+    code = m.group(1).upper()
+    try:
+        client = SshsignSession(host=os.environ.get("SSHSIGN_HOST", "sshsign.dev"))
+        sess = client.get_session(session_code=code)
+    except SshsignSessionError:
+        return generic
+
+    if bot_role == "founder":
+        # Rejecting an investor-shaped message on the founder bot —
+        # the investor's destination is the OTHER party's bot, but
+        # the SESSION's founder_bot_handle in metadata_public is
+        # actually OUR own. We want the investor bot's handle, which
+        # lives on the investor's member row. Pre-investor-join,
+        # this isn't set — fall back to generic.
+        for member in (sess.get("members") or []):
+            if (member.get("role") or "").lower() == "investor":
+                handle = (member.get("bot_handle") or "").strip()
+                if handle:
+                    if not handle.startswith("@"):
+                        handle = "@" + handle
+                    return handle
+        return generic
+
+    # bot_role == "investor": rejecting a founder-shaped message on
+    # the investor bot. The founder's handle is in metadata_public,
+    # written at create-session, available pre-join.
+    try:
+        meta_pub_raw = sess.get("metadata_public") or "{}"
+        meta_pub = (
+            json.loads(meta_pub_raw) if isinstance(meta_pub_raw, str)
+            else (meta_pub_raw or {})
+        )
+        handle = (meta_pub.get("founder_bot_handle") or "").strip()
+        if handle:
+            if not handle.startswith("@"):
+                handle = "@" + handle
+            return handle
+    except (json.JSONDecodeError, AttributeError):
+        pass
+    return generic
 
 
 def _enforce_bot_role_pre_parse(message: str) -> str | None:
@@ -223,7 +263,7 @@ def _enforce_bot_role_pre_parse(message: str) -> str | None:
         return None  # no enforcement configured
 
     looks_investor = bool(_INVESTOR_HINT_RE.search(message))
-    handle = _counterparty_bot_handle(bot_role)
+    handle = _counterparty_bot_handle_from_session(message, bot_role)
 
     if looks_investor and bot_role == "founder":
         return (
@@ -241,17 +281,21 @@ def _enforce_bot_role_pre_parse(message: str) -> str | None:
     return None
 
 
-def _enforce_bot_role_post_parse(parsed_role: str) -> str | None:
+def _enforce_bot_role_post_parse(parsed_role: str, message: str = "") -> str | None:
     """After-parse double-check: parse_constraints might infer a role
     that's contradictory to the bot's configured role even when the
     pre-parse regex didn't catch it. Returns error string or None.
+
+    Optionally takes the original message so the rejection card can
+    pull a session-derived counterparty handle (when the message
+    contains an INV code).
     """
     bot_role = _classify_bot_role()
     if bot_role is None:
         return None
     parsed = (parsed_role or "").strip().lower()
     if parsed and parsed != bot_role:
-        handle = _counterparty_bot_handle(bot_role)
+        handle = _counterparty_bot_handle_from_session(message, bot_role)
         if bot_role == "founder":
             return (
                 "⛔ This bot represents the FOUNDER side, but your "  # ⛔
@@ -419,7 +463,7 @@ def run_prepare(
         # phrasing the regex missed). Critical privacy gate — without
         # it, a wrong-role message produces a confirm card revealing
         # the OTHER party's constraints in this party's chat.
-        role_err = _enforce_bot_role_post_parse(constraints.get("role") or "")
+        role_err = _enforce_bot_role_post_parse(constraints.get("role") or "", message)
         if role_err:
             if chat_id:
                 sender(chat_id, message=role_err)
@@ -441,6 +485,24 @@ def run_prepare(
                 return 1
             constraints = _enrich_constraints_from_session(constraints, sess_payload)
             joined_session = sess_payload
+            # Inverted-invitation: prefer the sshsign-authoritative
+            # founder_bot_handle over whatever the investor typed.
+            # The human-typed value can be a typo; the session row is
+            # the trust anchor (founder bot self-wrote it at create-
+            # session). If sshsign has nothing, keep the parsed value
+            # as a best-effort fallback.
+            try:
+                meta_pub = sess_payload.get("metadata_public")
+                if isinstance(meta_pub, str):
+                    meta_pub = json.loads(meta_pub)
+                if isinstance(meta_pub, dict):
+                    sshsign_handle = (meta_pub.get("founder_bot_handle") or "").strip()
+                    if sshsign_handle:
+                        if not sshsign_handle.startswith("@"):
+                            sshsign_handle = "@" + sshsign_handle
+                        constraints["founder_bot_handle"] = sshsign_handle
+            except (json.JSONDecodeError, AttributeError):
+                pass
 
         config = {
             "constraints": constraints,
@@ -775,6 +837,17 @@ def _register_signing_session(
     metadata_public = {"use_case": "safe", "version": 1}
     if constraints.get("company_name"):
         metadata_public["company_name"] = constraints["company_name"]
+    # Inverted-invitation: founder publishes its own Telegram bot
+    # handle here so the investor's bot can read it on join (BEFORE
+    # joining the session, while metadata_member is still hidden).
+    # The investor uses this for: (a) showing the founder bot's handle
+    # in the investor's confirm card, (b) building the post-join
+    # waiting card with correct attribution, (c) overriding any typo
+    # in the human-shared invitation message — sshsign is authoritative.
+    if user_role == "founder":
+        bot_handle = (os.environ.get("TELEGRAM_BOT_USERNAME") or "").strip()
+        if bot_handle:
+            metadata_public["founder_bot_handle"] = bot_handle
     # Member-only metadata carries the display fields the joiner needs for
     # their confirm card + signing view (title, both sides' names/firms)
     # and the /bind ACL field (founder's Telegram user_id). Now that the
@@ -2074,9 +2147,33 @@ def run_negotiate(output_dir: str, chat_id_flag: str | None = None) -> int:
         # the investor side; the founder has already resumed locally
         # (or is about to, via this turn's _stream_to_telegram).
         if role == "investor" and group_chat_id:
+            # Inverted-invitation: when a group is bound, pull
+            # founder_bot_handle from sshsign metadata so the
+            # waiting card has the right attribution.
+            #
+            # NOTE: the join-before-bind flow (investor joins while
+            # group_chat_id is null) is intentionally not handled here
+            # in v1. Founder's documented happy path is /bind first,
+            # then share the code. We track v1.1 follow-up in TODO.md.
+            founder_handle = ""
+            try:
+                fetch_sess = SshsignSession(
+                    host=os.environ.get("SSHSIGN_HOST", sshsign_host),
+                ).get_session(session_id=session_id_for_wait)
+                meta_pub_raw = fetch_sess.get("metadata_public") or "{}"
+                meta_pub = (
+                    json.loads(meta_pub_raw) if isinstance(meta_pub_raw, str)
+                    else (meta_pub_raw or {})
+                )
+                founder_handle = (meta_pub.get("founder_bot_handle") or "").strip()
+            except (SshsignSessionError, json.JSONDecodeError, AttributeError):
+                pass
+
             wait_status = _investor_wait_for_founder_streaming(
                 session_id=session_id_for_wait,
                 group_chat_id=group_chat_id,
+                investor_dm_chat_id=chat_id,
+                founder_bot_handle=founder_handle,
             )
             if wait_status != "streaming":
                 # Timeout or terminal: surface happened already; the
@@ -2207,6 +2304,23 @@ def _join_signing_session(
     except SshsignSessionError as e:
         sys.stderr.write(f"join-session failed: {e}\n")
         return None
+
+    # Inverted-invitation: as soon as we're a member, write our own
+    # bot_handle to the session row so the founder bot can read it
+    # at the next get-session and compose the create-group card with
+    # accurate attribution. Non-fatal: a missing handle just means
+    # the founder card falls back to a generic "your investor's bot"
+    # phrase. Audit on sshsign captures the gap.
+    bot_handle = (os.environ.get("TELEGRAM_BOT_USERNAME") or "").strip()
+    if bot_handle:
+        joined_session_id = (join_result or {}).get("session_id")
+        if joined_session_id:
+            try:
+                client.update_session_member_text(
+                    joined_session_id, field="bot_handle", text_value=bot_handle,
+                )
+            except SshsignSessionError as e:
+                sys.stderr.write(f"join: bot_handle write: {e}\n")
 
     # Re-fetch as member to pick up the counterparty's pubkey.
     try:
@@ -2549,12 +2663,14 @@ INVESTOR_WAIT_TIMEOUT = float(os.environ.get("CLAW_NEGOTIATE_WAIT_TIMEOUT", "180
 
 def _investor_wait_for_founder_streaming(
     session_id: str,
-    group_chat_id: str,
+    group_chat_id: str | None,
     session_client=None,
     sender=send_telegram,
     typing_factory=None,
     sleep_fn=None,
     now_fn=None,
+    investor_dm_chat_id: str | None = None,
+    founder_bot_handle: str | None = None,
 ) -> str:
     """Bounded poll on founder_streaming_at (not founder_resumed_at).
 
@@ -2591,18 +2707,25 @@ def _investor_wait_for_founder_streaming(
         host=os.environ.get("SSHSIGN_HOST", "sshsign.dev"),
     )
 
+    # Cards land in the bound group when one exists; otherwise the
+    # investor's own DM (inverted-invitation flow joins before bind).
+    # Either way, ONE chat is the active surface for this wait.
+    target_chat = group_chat_id or investor_dm_chat_id or ""
+
     # Waiting card first — sets the expectation even if the poll
     # returns immediately (same tick the founder flipped streaming_at).
-    body = format_event({"type": "investor_waiting_for_founder"})
-    if body:
-        sender(group_chat_id, message=body)
+    body = format_event({
+        "type": "investor_waiting_for_founder",
+        "founder_bot_handle": (founder_bot_handle or "").strip(),
+    })
+    if body and target_chat:
+        sender(target_chat, message=body)
 
-    # Typing indicator in the group. Factory injection is for tests;
-    # production uses the real bot token.
+    # Typing indicator in the same chat the cards land in.
     if typing_factory is None:
-        typing = TypingLoop(chat_id=group_chat_id, bot_token=get_bot_token())
+        typing = TypingLoop(chat_id=target_chat or "", bot_token=get_bot_token())
     else:
-        typing = typing_factory(group_chat_id)
+        typing = typing_factory(target_chat)
     typing.start()
 
     try:
@@ -2614,8 +2737,8 @@ def _investor_wait_for_founder_streaming(
             elapsed = now_fn() - start
             if elapsed >= INVESTOR_WAIT_TIMEOUT:
                 body = format_event({"type": "investor_wake_timeout"})
-                if body:
-                    sender(group_chat_id, message=body)
+                if body and target_chat:
+                    sender(target_chat, message=body)
                 return "timeout"
 
             try:
@@ -2635,8 +2758,8 @@ def _investor_wait_for_founder_streaming(
                 body = format_event({
                     "type": "investor_session_ended", "status": status,
                 })
-                if body:
-                    sender(group_chat_id, message=body)
+                if body and target_chat:
+                    sender(target_chat, message=body)
                 return "terminal"
 
             # Check founder's streaming_at. Members list is the
@@ -2648,14 +2771,14 @@ def _investor_wait_for_founder_streaming(
                     break
             if streaming_at:
                 body = format_event({"type": "investor_both_online"})
-                if body:
-                    sender(group_chat_id, message=body)
+                if body and target_chat:
+                    sender(target_chat, message=body)
                 return "streaming"
 
             if not heartbeat_sent and elapsed >= INVESTOR_WAIT_HEARTBEAT_AT:
                 body = format_event({"type": "investor_waiting_heartbeat"})
-                if body:
-                    sender(group_chat_id, message=body)
+                if body and target_chat:
+                    sender(target_chat, message=body)
                 heartbeat_sent = True
 
             sleep_fn(INVESTOR_WAIT_POLL_INTERVAL)
@@ -2885,6 +3008,59 @@ def _run_founder_resume(
         target = group_chat_id or ""
         if target:
             sender(target, message=orient_body)
+
+    # Inverted-invitation: post a "create the live group" card to
+    # the FOUNDER'S DM the moment we know the investor joined. The
+    # investor side gets a "wait" card on its own droplet (asymmetric
+    # — only one party creates the group, prevents the duplicate-
+    # group race). Pull both bot handles + investor label from the
+    # session row so the card is fully formed.
+    if not group_chat_id:
+        # No group bound yet — this is the path where founder needs
+        # the create-group instructions.
+        founder_handle = ""
+        investor_handle = ""
+        investor_label = "your investor"
+        try:
+            meta_pub_raw = sess.get("metadata_public") or "{}"
+            meta_member_raw = sess.get("metadata_member") or "{}"
+            meta_pub = (
+                json.loads(meta_pub_raw) if isinstance(meta_pub_raw, str)
+                else (meta_pub_raw or {})
+            )
+            meta_member = (
+                json.loads(meta_member_raw) if isinstance(meta_member_raw, str)
+                else (meta_member_raw or {})
+            )
+            founder_handle = (meta_pub.get("founder_bot_handle") or "").strip()
+            inv_name = (meta_member.get("investor_name") or "").strip()
+            inv_firm = (meta_member.get("investor_firm") or "").strip()
+            if inv_name and inv_firm:
+                investor_label = f"{inv_name}, {inv_firm}"
+            elif inv_name:
+                investor_label = inv_name
+            for m in (sess.get("members") or []):
+                if (m.get("role") or "").lower() == "investor":
+                    investor_handle = (m.get("bot_handle") or "").strip()
+                    break
+        except (json.JSONDecodeError, AttributeError):
+            pass
+
+        cg_body = format_event({
+            "type": "create_group_for_founder",
+            "session_code": state.get("session_code"),
+            "founder_bot_handle": founder_handle,
+            "investor_bot_handle": investor_handle,
+            "investor_label": investor_label,
+        })
+        founder_dm_for_card = ""
+        try:
+            cfg = json.loads((Path(state["output_dir"]) / "config.json").read_text())
+            founder_dm_for_card = str(cfg.get("chat_id") or "")
+        except (OSError, json.JSONDecodeError):
+            pass
+        if cg_body and founder_dm_for_card:
+            sender(founder_dm_for_card, message=cg_body)
 
     # Re-hydrate mint + constraints from disk. These were written at
     # mint-time and output_dir is stable across OC reap events.

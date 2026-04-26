@@ -2802,20 +2802,23 @@ class TestK3InvestorGroupRouting:
         assert "investor" in body.lower(), f"kickoff not role-specific: {body!r}"
 
     def test_investor_kickoff_absent_when_not_bound(self, tmp_path):
-        """When no group is bound, the investor's flow stays Phase-7:
-        only the DM 'Joined — starting now' card fires."""
+        """When no group is bound at investor-join time (inverted-
+        invitation: investor joins BEFORE founder /binds), the wait
+        gate still fires — but its waiting card lands in the investor's
+        DM, not in any group, since no group exists yet."""
         self._write_cfg(tmp_path)
         sender = MagicMock()
 
         with patch.object(rs, "run_mint", side_effect=self._fake_mint_investor(tmp_path)), \
              patch.object(rs, "_resolve_group_chat_id", return_value=None), \
+             patch.object(rs, "_investor_wait_for_founder_streaming", return_value="streaming"), \
              patch.object(rs, "_stream_to_telegram", return_value=(0, None)), \
              patch.object(rs, "resolve_chat_id", return_value="222222"), \
              patch.object(rs, "send_telegram", sender):
             rs.run_negotiate(str(tmp_path), chat_id_flag="222222")
 
         targets = [c.args[0] for c in sender.call_args_list if c.args]
-        # No send should target any negative chat id.
+        # No send should target any negative chat id (no group bound).
         assert all(not t.startswith("-") for t in targets), \
             f"unexpected group send: {targets}"
 
@@ -3805,7 +3808,8 @@ class TestGoLiveCardOnTwoPartyMint:
         messages = [c.kwargs.get("message", "") for c in sender.call_args_list]
         # Invitation card must come BEFORE the go-live card.
         inv_idx = next((i for i, m in enumerate(messages)
-                        if "Live negotiation started" in m), -1)
+                        if "Live negotiation ready" in m
+                        or "Live negotiation started" in m), -1)
         go_idx = next((i for i, m in enumerate(messages)
                        if "Want to see both agents" in m), -1)
         assert inv_idx >= 0, f"missing invitation card; msgs={messages}"

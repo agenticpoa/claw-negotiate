@@ -57,6 +57,31 @@ def _isolated_state_dir(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_sshsign_session(monkeypatch):
+    """Several code paths instantiate SshsignSession directly (rather
+    than accepting an injected session_client) and call get_session
+    or update_session_member. In tests we don't want any path to fire
+    a real `ssh sshsign.dev …` subprocess. Patch the class globally
+    to a MagicMock that raises SshsignSessionError by default — tests
+    that need a specific session payload override the .get_session
+    side_effect / return_value via their own MagicMock injection.
+    """
+    from unittest.mock import MagicMock
+    from sshsign_session import SshsignSessionError
+
+    def _factory(*a, **kw):
+        m = MagicMock()
+        m.get_session.side_effect = SshsignSessionError("not stubbed in this test")
+        m.update_session_member.return_value = {"ok": True}
+        m.update_session_member_text.return_value = {"ok": True}
+        return m
+
+    import run_safe as rs
+    monkeypatch.setattr(rs, "SshsignSession", _factory)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _no_demo_session_pid():
     """Wipe any stale /tmp/safe_negotiate/.session.pid that an earlier
     test or live demo left behind. Must run before each test so the
