@@ -755,6 +755,18 @@ def run_mint(output_dir: str, config: dict, telegram_user_id: int | None = None)
                 return 3
             mint_output.update(session_registered)
 
+    # Clean up any stale .signed marker from a PRIOR negotiation that
+    # ran in the same output_dir. Without this, run_cancel reads the
+    # leftover marker and thinks the user signed THIS session — auto-
+    # routes to `cancel-session --rescind` instead of plain cancel.
+    # Caught live (INV-XXFJ2 → rescinded_after_sign despite being open).
+    try:
+        (out / ".signed").unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as _e:
+        sys.stderr.write(f"clean stale .signed: {_e}\n")
+
     (out / "mint.json").write_text(json.dumps(mint_output, indent=2))
 
     # P7-5: leave a pointer so a later cron-scanned `scan` turn can
