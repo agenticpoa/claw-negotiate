@@ -25,11 +25,19 @@ python3 /root/.agents/skills/negotiate_safe/run_safe.py scan
 ```
 End your turn. `scan` is idempotent, handles its own Telegram output (orienting card in the bound group, streaming, status updates), and exits 0 even if there's nothing to resume. Do not re-check, do not relay, do not emit any message yourself — especially nothing that starts with `/`, which would bounce back through this very dispatcher.
 
-**A.7. Message is "cancel", "cancel my negotiation", "stop", "abort", "stop the negotiation", or any short variant of those:** THIS IS ALWAYS YOUR SKILL. The user wants to abort the in-flight negotiation. Run:
+**A.7. CANCEL INTENT — ALWAYS RUN THE SKILL, NEVER REPLY WITH PROSE.**
+
+If the user's message is ANY of: `cancel`, `Cancel`, `cancel my negotiation`, `cancel the negotiation`, `cancel it`, `stop`, `abort`, `stop the negotiation`, `cancel and start over`, or any other short message that primarily expresses an intent to abort the current negotiation — THIS IS ALWAYS YOUR SKILL.
+
+You MUST run this exec call. Do NOT type a confirmation. Do NOT say "Understood, canceled." Do NOT acknowledge in any way. The skill posts its own confirmation card to the user; if you also reply, the user sees a duplicate.
+
 ```
 python3 /root/.agents/skills/negotiate_safe/run_safe.py cancel --output-dir /tmp/safe_negotiate --chat-id <chat.id from the inbound envelope>
 ```
-End your turn. The skill posts the cancellation confirmation card itself. Do NOT relay anything; do NOT route this to `prepare`. Examples that MATCH: `cancel`, `Cancel`, `cancel my negotiation`, `cancel the negotiation`, `stop`, `abort`, `stop negotiating`. If the user says something longer like "actually cancel this and let's start over", still route here — the cancel card includes guidance to start fresh.
+
+After the exec returns, end your turn with `NO_REPLY` and nothing else. The skill has already pushed the cancellation card.
+
+This rule fires even when the user's message is JUST the single word "cancel" with no other context. Especially then.
 
 **B. "Show me my profile" / "What's my profile" / "Who am I" / "My profile":**
 ```
