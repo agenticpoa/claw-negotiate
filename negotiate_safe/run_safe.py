@@ -2489,7 +2489,7 @@ def _founder_two_party_gate(
     invitation_body = format_event({
         "type": "invitation",
         "session_code": session_code,
-        "invite_url": _build_invite_url(session_code),
+        "founder_bot_handle": (os.environ.get("TELEGRAM_BOT_USERNAME") or "").strip(),
         "expires_at": mint.get("session_expires_at") or "",
         "ttl_hours": 24,
         "counterparty_label": counterparty_label,
@@ -2497,22 +2497,12 @@ def _founder_two_party_gate(
     if invitation_body:
         sender(chat_id, message=invitation_body)
 
-    # Phase 8 opt-in: go-live card offers group-mode as an alternative to
-    # DM-only. Non-breaking — ignoring it keeps the existing flow intact.
-    # K2 will replace this "secondary card" pattern with a fully restructured
-    # flow; K1 ships it additively so it can be verified in isolation.
-    bot_username = os.environ.get("TELEGRAM_BOT_USERNAME", "AgenticPOA_bot").lstrip("@")
-    investor_bot = os.environ.get("TELEGRAM_BOT_USERNAME_INVESTOR", "AgenticPOAInvestor_bot").lstrip("@")
-    investor_handle = (os.environ.get("INVESTOR_TELEGRAM_HANDLE") or "").lstrip("@")
-    go_live_body = format_event({
-        "type": "go_live",
-        "session_code": session_code,
-        "founder_bot": f"@{bot_username}",
-        "investor_bot": f"@{investor_bot}",
-        "counterparty_handle": f"@{investor_handle}" if investor_handle else "",
-    })
-    if go_live_body:
-        sender(chat_id, message=go_live_body)
+    # Pre-join "create the live group" card was previously emitted here
+    # with hardcoded counterparty bot handle — wrong assumption for
+    # multi-operator deploys (we don't know the investor's bot until
+    # they join). Removed. The post-join create-group card from
+    # _run_founder_resume composes from real sshsign metadata once
+    # both bot handles are known.
 
     status = wait_fn(
         session_id=session_id,

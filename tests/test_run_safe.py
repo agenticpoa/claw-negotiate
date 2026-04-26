@@ -3784,11 +3784,16 @@ class TestRunBind:
 
 
 class TestGoLiveCardOnTwoPartyMint:
-    """The go-live card is pushed in _founder_two_party_gate after the
-    existing invitation card. K1 ships it additively (non-breaking);
-    K2 will restructure the flow."""
+    """Inverted-invitation regression: the pre-join "Want to see both
+    agents negotiate / create a group with @AgenticPOAInvestor_bot…"
+    card was REMOVED. We can't honestly know the investor's bot
+    handle pre-join in a multi-operator deploy. The post-join
+    create_group_for_founder card (emitted from _run_founder_resume
+    once the investor's bot writes its handle to sshsign) is the
+    replacement.
+    """
 
-    def test_go_live_card_pushed_after_invitation(self, tmp_path):
+    def test_no_pre_join_create_group_card(self, tmp_path):
         mint = {
             "negotiation_id": "neg_1",
             "session_code": "INV-7K3X9",
@@ -3806,19 +3811,15 @@ class TestGoLiveCardOnTwoPartyMint:
         )
         assert rc == 0
         messages = [c.kwargs.get("message", "") for c in sender.call_args_list]
-        # Invitation card must come BEFORE the go-live card.
-        inv_idx = next((i for i, m in enumerate(messages)
-                        if "Live negotiation ready" in m
-                        or "Live negotiation started" in m), -1)
-        go_idx = next((i for i, m in enumerate(messages)
-                       if "Want to see both agents" in m), -1)
-        assert inv_idx >= 0, f"missing invitation card; msgs={messages}"
-        assert go_idx >= 0, f"missing go-live card; msgs={messages}"
-        assert inv_idx < go_idx
-        # Go-live card must contain the bind payload as a code span.
-        go = messages[go_idx]
-        assert "`/bind INV-7K3X9`" in go
-        assert "`INV-7K3X9`" in go
+        # The pre-join hardcoded-bot-handle card must be gone.
+        assert not any("Want to see both agents" in m for m in messages), (
+            f"pre-join group-create card with hardcoded handles regressed; "
+            f"msgs={messages}"
+        )
+        # Invitation card with the inverted-invitation copy MUST still be present.
+        assert any("Live negotiation ready" in m for m in messages), (
+            f"missing invitation card; msgs={messages}"
+        )
 
 
 class TestRegisterSigningSessionTelegramUserId:

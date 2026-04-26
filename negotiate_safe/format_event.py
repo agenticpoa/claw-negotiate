@@ -508,17 +508,10 @@ def format_invitation(event: dict[str, Any]) -> str:
         "─────────────────────────",
         "",
     ]
-    if not founder_bot:
-        # We should always have founder_bot at this point (skill env
-        # sets TELEGRAM_BOT_USERNAME). If somehow missing, surface a
-        # warning so ops sees it rather than the user getting a card
-        # without the founder handle.
-        lines.append(
-            "⚠️ Note: my bot handle wasn't configured at deploy time. "
-            "Tell your investor to mention me explicitly in their join "
-            "message so my agent gets attribution right."
-        )
-        lines.append("")
+    # If founder_bot is empty we silently fall back to the generic
+    # template above. The op-side warning that used to live here was
+    # confusing to end users (it was meant for ops). Misconfig logs
+    # to stderr from the call site instead.
 
     lines.append("**While you wait:**")
     if expires_at:

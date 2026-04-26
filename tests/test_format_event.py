@@ -432,17 +432,23 @@ class TestFormatInvitation:
         # The card normalizes to @-prefixed for display consistency.
         assert "@raw_bot_no_at_prefix" in out
 
-    def test_warns_when_founder_bot_handle_missing(self):
-        """The skill env should always supply TELEGRAM_BOT_USERNAME so
-        founder_bot_handle is set. If somehow missing, the card should
-        surface a visible warning rather than silently shipping a card
-        without the handle."""
+    def test_silent_generic_fallback_when_founder_bot_handle_missing(self):
+        """When founder_bot_handle is empty the card falls back to the
+        generic 'Joining INV-X as investor, …' template — no scary
+        end-user-facing warning. Misconfig is an ops problem (logged
+        to stderr from the call site), not an end-user one."""
         out = fe.format_invitation({
             "type": "invitation",
             "session_code": "INV-X",
             "founder_bot_handle": "",
         })
-        assert "wasn't configured" in out.lower() or "warning" in out.lower() or "⚠" in out
+        # No "wasn't configured" / warning emoji leaked to user.
+        assert "wasn't configured" not in out.lower()
+        assert "⚠" not in out
+        # Generic template still references the code so the investor
+        # has SOMETHING to type.
+        assert "INV-X" in out
+        assert "as investor" in out
 
 
 class TestFormatWaiting:
