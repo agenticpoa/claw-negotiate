@@ -765,7 +765,7 @@ def format_active_negotiation_block(event: dict[str, Any]) -> str:
     descriptor = (event.get("descriptor") or "an active negotiation").strip()
     return (
         f"⛔ You already have **{descriptor}** in progress.\n\n"  # ⛔
-        f"Reply `cancel` to abort it, then start a new one. "
+        f"Reply `/cancel` to abort it, then start a new one. "
         f"(Each bot handles one negotiation at a time so the agent "
         f"can't accidentally send your terms to the wrong counterparty.)"
     )
