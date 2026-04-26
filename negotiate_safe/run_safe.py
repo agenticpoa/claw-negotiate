@@ -3528,6 +3528,18 @@ def run_cancel(
 
     # State 1/2 vs 3 split based on local .signed marker.
     rescind = _has_signed(out)
+    session_code = mint.get("session_code") or sess.get("session_code") or ""
+
+    # Post an optimistic "canceling…" card BEFORE the slow SSH
+    # call. OC's exec lifetime can interrupt mid-call (observed
+    # SIGTERM at 8s for INV-3YHM7). Without this immediate ack
+    # the user sees nothing if SIGTERM fires between
+    # cancel-session success and the confirm card emission.
+    if chat_id and session_code:
+        sender(chat_id, message=(
+            f"\u23f3 Canceling **{session_code}**\u2026"  # ⏳
+        ))
+
     try:
         client.cancel_session(session_id=session_id, rescind=rescind)
     except SshsignSessionError as e:
@@ -3540,11 +3552,29 @@ def run_cancel(
         return 3
 
     if rescind:
-        body = format_event({"type": "rescinded_after_sign_initiator"})
+        body = format_event({
+            "type": "rescinded_after_sign_initiator",
+            "session_code": session_code,
+        })
     else:
-        body = format_event({"type": "canceled_before_deal_initiator"})
+        body = format_event({
+            "type": "canceled_before_deal_initiator",
+            "session_code": session_code,
+        })
     if chat_id and body:
         sender(chat_id, message=body)
+
+    # Clean up local state so a future mint isn't blocked by
+    # the active-negotiation gate. State pointer might already
+    # be gone if scan beat us to it; ignore not-found.
+    try:
+        state_store.delete_state(mint.get("negotiation_id") or "")
+    except Exception as _e:  # noqa: BLE001
+        sys.stderr.write(f"cancel: state cleanup: {_e}\n")
+    try:
+        (out / ".session.pid").unlink()
+    except (OSError, FileNotFoundError):
+        pass
     return 0
 
 

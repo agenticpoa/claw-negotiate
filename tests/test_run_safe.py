@@ -3427,10 +3427,11 @@ class TestRunCancel:
         call = client.cancel_session.call_args
         assert call.kwargs["session_id"] == "session_neg_1"
         assert call.kwargs["rescind"] is False
-        # Initiator card pushed
+        # Initiator card pushed (new copy includes session code).
         msgs = [c.kwargs.get("message", "") for c in sender.call_args_list]
-        assert any("canceled the negotiation before any agreement" in m.lower()
-                   for m in msgs)
+        assert any("canceled" in m.lower() and "apoa" in m.lower() for m in msgs)
+        # Optimistic "canceling…" pre-card lands first, before SSH call.
+        assert any("Canceling" in m for m in msgs)
 
     def test_cancel_after_sign_rescinds(self, tmp_path):
         self._write_mint(tmp_path)

@@ -595,9 +595,14 @@ def _who_label(event: dict[str, Any]) -> str:
 
 
 def format_canceled_before_deal_initiator(event: dict[str, Any]) -> str:
-    """You canceled — no agreement had been reached yet."""
+    """You canceled — no agreement had been reached yet. Includes the
+    session code so the user can confirm WHICH negotiation got
+    canceled (especially when rapidly minting + canceling).
+    """
+    code = (event.get("session_code") or "").strip()
+    code_line = f" **{code}**" if code else ""
     return (
-        "\u274c You canceled the negotiation before any agreement was reached.\n\n"  # ❌
+        f"\u274c **Negotiation{code_line} canceled.**\n\n"  # ❌
         "No SAFE was executed. Your APOA authorization has been revoked."
     )
 
@@ -628,10 +633,14 @@ def format_canceled_after_deal_observer(event: dict[str, Any]) -> str:
 
 
 def format_rescinded_after_sign_initiator(event: dict[str, Any]) -> str:
-    """You rescinded AFTER signing — your signature stays on record but the
-    deal does not execute."""
+    """You rescinded AFTER signing — your signature stays on record but
+    the deal does not execute. Includes the session code so the user
+    knows WHICH negotiation was rescinded.
+    """
+    code = (event.get("session_code") or "").strip()
+    code_line = f" **{code}**" if code else ""
     return (
-        "\u26a0\ufe0f You rescinded after signing.\n\n"  # ⚠
+        f"\u26a0\ufe0f **Negotiation{code_line} rescinded after signing.**\n\n"  # ⚠
         "Your signature stays on record for audit purposes, "
         "but the SAFE will NOT execute. Your counterparty has been notified."
     )

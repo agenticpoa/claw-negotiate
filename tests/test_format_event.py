@@ -555,9 +555,16 @@ class TestFormatProfile:
 
 class TestCancellationCards:
     def test_canceled_before_deal_initiator(self):
+        # New format: includes session code prominently for clarity.
+        out = fe.format_canceled_before_deal_initiator({"session_code": "INV-7K3X9"})
+        assert "INV-7K3X9" in out
+        assert "canceled" in out.lower()
+        assert "APOA" in out
+
+    def test_canceled_before_deal_initiator_no_code(self):
+        # Falls back to generic phrasing when session code missing.
         out = fe.format_canceled_before_deal_initiator({})
-        assert "You canceled" in out
-        assert "before any agreement was reached" in out
+        assert "canceled" in out.lower()
         assert "APOA" in out
 
     def test_canceled_before_deal_observer(self):
@@ -579,10 +586,16 @@ class TestCancellationCards:
         assert "No SAFE will be executed" in out
 
     def test_rescinded_after_sign_initiator(self):
-        out = fe.format_rescinded_after_sign_initiator({})
-        assert "You rescinded after signing" in out
+        out = fe.format_rescinded_after_sign_initiator({"session_code": "INV-7K3X9"})
+        assert "INV-7K3X9" in out
+        assert "rescinded" in out.lower()
         assert "signature stays on record" in out
         assert "will NOT execute" in out
+
+    def test_rescinded_after_sign_initiator_no_code(self):
+        out = fe.format_rescinded_after_sign_initiator({})
+        assert "rescinded" in out.lower()
+        assert "signature stays on record" in out
 
     def test_rescinded_after_sign_observer(self):
         out = fe.format_rescinded_after_sign_observer({"by": "Jane"})
