@@ -400,9 +400,15 @@ class TestNegotiate:
         mock_await.assert_called_once()
         assert mock_await.call_args.kwargs["pending_id"] == "pnd_xyz"
 
-    def test_two_party_mode_calls_gate_before_streaming(self, tmp_path, sample_constraints):
-        """When mint.json says mode=two_party + user_role=founder,
-        run_negotiate must call the founder gate before firing the stream."""
+    def test_two_party_founder_posts_invite_and_exits(self, tmp_path, sample_constraints):
+        """Path 1 (post-INV-GD4KZ): two-party founder mint must post the
+        invitation card and EXIT — no foreground wait, no stream spawn.
+        The cron-driven Phase A/B owns everything from here. Spawning
+        `_stream_to_telegram` from the founder mint deadlocked the
+        negotiation at round 1 because upstream's `run_negotiation`
+        wrote Round 0 to sshsign before being reaped, and the post-
+        /bind Phase B re-spawn couldn't reconcile.
+        """
         self._write_config(tmp_path, sample_constraints)
 
         def fake_mint(output_dir, config, **kwargs):
@@ -414,19 +420,25 @@ class TestNegotiate:
             }))
             return 0
 
-        mock_gate = MagicMock(return_value=0)
+        mock_invite = MagicMock(return_value=0)
         mock_stream = MagicMock(return_value=(0, None))
+        mock_gate = MagicMock(return_value=0)
 
         with patch.object(rs, "run_mint", side_effect=fake_mint), \
+             patch.object(rs, "_founder_post_invitation_card", mock_invite), \
              patch.object(rs, "_founder_two_party_gate", mock_gate), \
              patch.object(rs, "_stream_to_telegram", mock_stream), \
              patch.object(rs, "resolve_chat_id", return_value="12345"):
-            rs.run_negotiate(str(tmp_path), chat_id_flag="12345")
+            rc = rs.run_negotiate(str(tmp_path), chat_id_flag="12345")
 
-        mock_gate.assert_called_once()
-        mock_stream.assert_called_once()
+        assert rc == 0
+        mock_invite.assert_called_once()
+        mock_stream.assert_not_called()
+        mock_gate.assert_not_called()
 
-    def test_two_party_mode_skips_stream_when_gate_fails(self, tmp_path, sample_constraints):
+    def test_two_party_founder_propagates_invite_failure(self, tmp_path, sample_constraints):
+        """If invitation card posting fails (rc != 0) we still skip the
+        stream — the user got an explicit error reply already."""
         self._write_config(tmp_path, sample_constraints)
 
         def fake_mint(output_dir, config, **kwargs):
@@ -440,16 +452,17 @@ class TestNegotiate:
 
         mock_stream = MagicMock()
         with patch.object(rs, "run_mint", side_effect=fake_mint), \
-             patch.object(rs, "_founder_two_party_gate", return_value=1), \
+             patch.object(rs, "_founder_post_invitation_card", return_value=3), \
              patch.object(rs, "_stream_to_telegram", mock_stream), \
              patch.object(rs, "resolve_chat_id", return_value="12345"):
             rc = rs.run_negotiate(str(tmp_path), chat_id_flag="12345")
 
-        assert rc == 1
+        assert rc == 3
         mock_stream.assert_not_called()
 
-    def test_demo_mode_skips_gate(self, tmp_path, sample_constraints):
-        """Demo mode (default) must go straight to streaming — no gate."""
+    def test_demo_mode_skips_invite(self, tmp_path, sample_constraints):
+        """Demo mode (default) must go straight to streaming — no invite,
+        no gate."""
         self._write_config(tmp_path, sample_constraints)
 
         def fake_mint(output_dir, config, **kwargs):
@@ -459,14 +472,14 @@ class TestNegotiate:
             }))
             return 0
 
-        mock_gate = MagicMock()
+        mock_invite = MagicMock()
         with patch.object(rs, "run_mint", side_effect=fake_mint), \
-             patch.object(rs, "_founder_two_party_gate", mock_gate), \
+             patch.object(rs, "_founder_post_invitation_card", mock_invite), \
              patch.object(rs, "_stream_to_telegram", return_value=(0, None)), \
              patch.object(rs, "resolve_chat_id", return_value="12345"):
             rs.run_negotiate(str(tmp_path), chat_id_flag="12345")
 
-        mock_gate.assert_not_called()
+        mock_invite.assert_not_called()
 
     def test_skips_await_when_no_signing_event(self, tmp_path, sample_constraints):
         self._write_config(tmp_path, sample_constraints)
@@ -2608,9 +2621,12 @@ class TestNegotiateInvestorBranch:
             "founder_name": "", "founder_title": "CEO", "message": "Join INV-X",
         }))
 
-    def test_two_party_creator_uses_creator_await_path(self, tmp_path, sample_constraints):
-        """Founder in two-party mode routes signing through the creator
-        finalize helper, which adds a complete-session call."""
+    def test_two_party_founder_mint_does_not_finalize(self, tmp_path, sample_constraints):
+        """Path 1: two-party founder mint exits immediately after posting
+        the invitation. Stream + creator-finalize are owned by Phase B
+        (`_run_founder_resume` post-/bind). The founder mint flow itself
+        never reaches `_creator_await_sign_and_finalize`.
+        """
         (tmp_path / "config.json").write_text(json.dumps({
             "constraints": sample_constraints,
             "founder_name": "F", "founder_title": "CEO", "message": "m",
@@ -2626,11 +2642,11 @@ class TestNegotiateInvestorBranch:
         mock_creator = MagicMock(return_value=0)
         mock_joiner = MagicMock(return_value=0)
         mock_demo_await = MagicMock(return_value=0)
-        signing = {"type": "signing", "pending_id": "pnd_f"}
+        mock_stream = MagicMock()
 
         with patch.object(rs, "run_mint", side_effect=fake_mint), \
-             patch.object(rs, "_founder_two_party_gate", return_value=0), \
-             patch.object(rs, "_stream_to_telegram", return_value=(0, signing)), \
+             patch.object(rs, "_founder_post_invitation_card", return_value=0), \
+             patch.object(rs, "_stream_to_telegram", mock_stream), \
              patch.object(rs, "_creator_await_sign_and_finalize", mock_creator), \
              patch.object(rs, "_joiner_await_sign_and_finalize", mock_joiner), \
              patch.object(rs, "_await_sign_and_push", mock_demo_await), \
@@ -2638,11 +2654,10 @@ class TestNegotiateInvestorBranch:
             rc = rs.run_negotiate(str(tmp_path), chat_id_flag="12345")
 
         assert rc == 0
-        mock_creator.assert_called_once()
+        mock_stream.assert_not_called()
+        mock_creator.assert_not_called()
         mock_joiner.assert_not_called()
         mock_demo_await.assert_not_called()
-        # Sshsign session APIs use prefixed form
-        assert mock_creator.call_args.kwargs["session_id"] == "session_neg_1"
 
     def test_two_party_joiner_uses_joiner_await_path(self, tmp_path, sample_constraints):
         """Investor in two-party mode routes through the joiner helper
@@ -2842,10 +2857,12 @@ class TestK3InvestorGroupRouting:
         mock_joiner.assert_called_once()
         assert mock_joiner.call_args.kwargs["group_chat_id"] == "-1001234567890"
 
-    def test_founder_kickoff_is_distinct_from_investor(self, tmp_path):
-        """Founder's kickoff copy must NOT say 'investor' — otherwise
-        the two roles produce identical cards and the group sees a
-        duplicate when both bots run."""
+    def test_founder_mint_does_not_post_to_group(self, tmp_path):
+        """Path 1: founder's mint runs before any group is bound, and
+        even if a stale `_resolve_group_chat_id` somehow returned a
+        chat id (e.g. leftover state from a prior negotiation), the
+        founder mint must NOT post anything to that group. The mint
+        flow exits immediately after the invitation card."""
         (tmp_path / "config.json").write_text(json.dumps({
             "constraints": {"role": "founder", "mode": "two_party"},
             "founder_name": "F", "founder_title": "CEO", "message": "m",
@@ -2862,7 +2879,7 @@ class TestK3InvestorGroupRouting:
 
         sender = MagicMock()
         with patch.object(rs, "run_mint", side_effect=fake_mint), \
-             patch.object(rs, "_founder_two_party_gate", return_value=0), \
+             patch.object(rs, "_founder_post_invitation_card", return_value=0), \
              patch.object(rs, "_resolve_group_chat_id", return_value="-1001234567890"), \
              patch.object(rs, "_stream_to_telegram", return_value=(0, None)), \
              patch.object(rs, "resolve_chat_id", return_value="111111"), \
@@ -2870,13 +2887,9 @@ class TestK3InvestorGroupRouting:
             rs.run_negotiate(str(tmp_path), chat_id_flag="111111")
 
         group_sends = [c for c in sender.call_args_list
-                       if c.args and c.args[0] == "-1001234567890"]
-        assert group_sends
-        founder_kickoff = group_sends[0].kwargs.get("message", "").lower()
-        assert "founder" in founder_kickoff
-        # Crucial: founder's kickoff must not claim the investor just joined
-        assert "investor" not in founder_kickoff, \
-            f"founder kickoff misnames the role: {founder_kickoff!r}"
+                       if c.args and str(c.args[0]) == "-1001234567890"]
+        assert not group_sends, \
+            f"founder mint must not post to group; saw {group_sends}"
 
 
 class TestAuthorizationCardOnRunNegotiate:

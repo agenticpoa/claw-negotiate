@@ -2158,14 +2158,29 @@ def run_negotiate(output_dir: str, chat_id_flag: str | None = None) -> int:
         mint = {}
     if mint.get("mode") == "two_party":
         if mint.get("user_role") == "founder":
-            wait_rc = _founder_two_party_gate(
-                out=out,
+            # Path 1 (post-mortem of INV-GD4KZ on 2026-04-27): the founder
+            # mint must NOT keep the foreground process alive waiting for
+            # the investor to join. The OC reaper kills it after a few
+            # minutes anyway, and any `_stream_to_telegram` it spawns will
+            # write Round 0 to sshsign — leaving upstream's stateful
+            # negotiation half-bootstrapped. When the cron-driven Phase B
+            # later spawns a SECOND `_stream_to_telegram` after /bind,
+            # that fresh `run_negotiation` can't reconcile with the
+            # already-written Round 0 and the negotiation hangs at
+            # round 1 (only the investor's response makes it through).
+            #
+            # Fix: post the invitation card and EXIT. The cron scan
+            # (Phase A) handles the create-group card once the investor
+            # joins; `/bind` triggers the SOLE `_stream_to_telegram`
+            # invocation via `_run_founder_resume` Phase B.
+            invite_rc = _founder_post_invitation_card(
                 chat_id=chat_id,
                 mint=mint,
                 constraints=config.get("constraints") or {},
             )
-            if wait_rc != 0:
-                return wait_rc
+            if invite_rc != 0:
+                return invite_rc
+            return 0
         elif mint.get("user_role") == "investor":
             # Investor just joined — push a short "joined; starting" card
             # so they know the flow is progressing before upstream's first
@@ -2511,6 +2526,63 @@ def _enrich_constraints_from_session(
         elif member_md.get(key):
             out[key] = member_md[key]
     return out
+
+
+def _founder_post_invitation_card(
+    chat_id: str,
+    mint: dict,
+    constraints: dict,
+    sender=send_telegram,
+) -> int:
+    """Post the invitation card to the founder's DM and return immediately.
+
+    Path 1 replacement for `_founder_two_party_gate`'s blocking wait.
+    The founder's mint flow used to BLOCK here waiting for the
+    investor to join (via `_wait_for_counterparty`). That foreground
+    wait is what the OC reaper killed; worse, on detect-join it would
+    spawn `_stream_to_telegram` → upstream's `run_negotiation` →
+    Round 0 written to sshsign. When the cron-driven Phase B later
+    re-spawned the stream after /bind, upstream couldn't reconcile
+    with that pre-written Round 0 and the negotiation deadlocked.
+
+    Now: just push the invitation card and exit. Cron's scan / Phase
+    A handle the rest of the founder-side state machine, and the
+    `_stream_to_telegram` call lives ONLY in `_run_founder_resume`'s
+    Phase B (post-/bind), so upstream is spawned exactly once.
+
+    rc=0    → invitation posted (or skipped silently if missing data);
+              the caller should return 0 from run_negotiate.
+    rc=3    → missing session_code or negotiation_id; the data needed
+              to assemble the card is missing.
+    """
+    session_code = mint.get("session_code")
+    session_id = _sshsign_session_id(mint.get("negotiation_id") or "")
+    if not session_code or not session_id:
+        sender(chat_id, message=(
+            "⚠️ Internal error: two-party session was not registered. "  # ⚠️
+            "Try again."
+        ))
+        return 3
+
+    label_parts = [
+        p for p in (
+            constraints.get("investor_name"),
+            constraints.get("investor_firm"),
+        ) if p
+    ]
+    counterparty_label = ", ".join(label_parts) if label_parts else "your counterparty"
+
+    invitation_body = format_event({
+        "type": "invitation",
+        "session_code": session_code,
+        "founder_bot_handle": (os.environ.get("TELEGRAM_BOT_USERNAME") or "").strip(),
+        "expires_at": mint.get("session_expires_at") or "",
+        "ttl_hours": 24,
+        "counterparty_label": counterparty_label,
+    })
+    if invitation_body:
+        sender(chat_id, message=invitation_body)
+    return 0
 
 
 def _founder_two_party_gate(
