@@ -281,6 +281,23 @@ class TestFormatters:
         assert "(your range:" not in out
         assert "(your min:" not in out
 
+    def test_offer_two_party_suppresses_range(self, sample_constraints):
+        """PRIVACY regression: in two-party mode round cards land in
+        the shared group. The "your range" / "your min" hints would
+        leak each side's private bounds to the counterparty. Must
+        be suppressed even when constraints are passed.
+        """
+        two_party_constraints = dict(sample_constraints, mode="two_party")
+        event = {
+            "type": "counter",
+            "round": 1,
+            "party": "investor",
+            "terms": {"valuation_cap": 20_000_000, "discount_rate": 0.10},
+        }
+        out = fe.format_offer(event, constraints=two_party_constraints)
+        assert "(your range:" not in out, f"PRIVACY LEAK: {out}"
+        assert "(your min:" not in out, f"PRIVACY LEAK: {out}"
+
     def test_offer_missing_terms_renders_dashes(self):
         event = {"type": "offer", "round": 1, "party": "founder"}
         out = fe.format_offer(event)

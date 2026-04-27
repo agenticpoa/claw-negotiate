@@ -247,7 +247,12 @@ def format_offer(
     if message:
         lines.append(f'"{_escape_md(message)}"')
 
-    if constraints:
+    # PRIVACY: in two-party mode round cards land in the SHARED group
+    # where the counterparty can read them. Each side's bounds are
+    # private. Suppress the "your range" / "your min" annotations
+    # entirely in two-party. Demo mode renders to the user's own DM,
+    # so the hint is safe to keep there.
+    if constraints and mode != "two_party":
         cap_min = constraints.get("valuation_cap_min")
         cap_max = constraints.get("valuation_cap_max")
         disc_min = constraints.get("discount_min")
