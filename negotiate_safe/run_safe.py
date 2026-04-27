@@ -2192,21 +2192,16 @@ def run_negotiate(output_dir: str, chat_id_flag: str | None = None) -> int:
         group_chat_id = _resolve_group_chat_id(session_id_for_wait)
         role = (mint.get("user_role") or "").lower()
 
-        # P7-5 investor-side gate: don't let run_distributed spawn
-        # until the founder's agent has flipped founder_streaming_at.
+        # P7-5+Path1 investor-side gate: don't let run_distributed
+        # spawn until founder_streaming_at is set on sshsign.
         # Otherwise upstream hangs on "waiting for founder's opening
-        # offer" until its internal timeout. The gate fires ONLY on
-        # the investor side; the founder has already resumed locally
-        # (or is about to, via this turn's _stream_to_telegram).
-        if role == "investor" and group_chat_id:
-            # Inverted-invitation: when a group is bound, pull
-            # founder_bot_handle from sshsign metadata so the
-            # waiting card has the right attribution.
-            #
-            # NOTE: the join-before-bind flow (investor joins while
-            # group_chat_id is null) is intentionally not handled here
-            # in v1. Founder's documented happy path is /bind first,
-            # then share the code. We track v1.1 follow-up in TODO.md.
+        # offer". Gate fires for investor regardless of whether a
+        # group is bound at investor-join time — Path 1 specifically
+        # handles "investor joins, then founder creates the group" —
+        # the wait helper notices group_chat_id appearing mid-poll
+        # and switches its target chat from investor DM to the bound
+        # group on the fly.
+        if role == "investor":
             founder_handle = ""
             try:
                 fetch_sess = SshsignSession(
@@ -2231,6 +2226,14 @@ def run_negotiate(output_dir: str, chat_id_flag: str | None = None) -> int:
                 # Timeout or terminal: surface happened already; the
                 # caller (run_negotiate) should NOT spawn the stream.
                 return 0 if wait_status == "terminal" else 4
+
+            # Path 1: the wait may have observed group_chat_id
+            # appearing mid-poll. Re-resolve so _stream_to_telegram
+            # routes round cards into the now-bound group, not the
+            # investor's DM where the waiting card initially landed.
+            group_chat_id = _resolve_group_chat_id(
+                session_id_for_wait,
+            ) or group_chat_id
 
         if group_chat_id:
             if role == "founder":
@@ -2749,9 +2752,11 @@ def _investor_wait_for_founder_streaming(
         host=os.environ.get("SSHSIGN_HOST", "sshsign.dev"),
     )
 
-    # Cards land in the bound group when one exists; otherwise the
-    # investor's own DM (inverted-invitation flow joins before bind).
-    # Either way, ONE chat is the active surface for this wait.
+    # Path 1: cards land in the bound group when one exists; otherwise
+    # the investor's own DM. The bound group may APPEAR mid-poll
+    # (founder taps create-group + /bind in response to the create-
+    # group card). Re-resolve the target each iteration so subsequent
+    # cards (heartbeat, both-online) target whichever chat is current.
     target_chat = group_chat_id or investor_dm_chat_id or ""
 
     # Waiting card first — sets the expectation even if the poll
@@ -2763,7 +2768,9 @@ def _investor_wait_for_founder_streaming(
     if body and target_chat:
         sender(target_chat, message=body)
 
-    # Typing indicator in the same chat the cards land in.
+    # Typing indicator in the same chat the cards land in. If the
+    # group emerges mid-wait the indicator stays on the original
+    # chat — minor visual gap, not worth restarting the loop.
     if typing_factory is None:
         typing = TypingLoop(chat_id=target_chat or "", bot_token=get_bot_token())
     else:
@@ -2793,6 +2800,20 @@ def _investor_wait_for_founder_streaming(
                 sys.stderr.write(f"wait-for-founder: get-session: {e}\n")
                 sleep_fn(INVESTOR_WAIT_POLL_INTERVAL)
                 continue
+
+            # Path 1: detect group binding mid-poll. The founder's
+            # /bind writes group_chat_id on the session row. Once it
+            # appears, switch the active target chat so subsequent
+            # cards (heartbeat, both-online) land in the group where
+            # both parties can see them.
+            sess_group_id = sess.get("group_chat_id")
+            if sess_group_id:
+                # Telegram group_chat_ids on the wire are negative
+                # int64; sshsign stores as int. Normalize to str for
+                # send_telegram which expects a string target.
+                sess_group_str = str(sess_group_id)
+                if sess_group_str != target_chat:
+                    target_chat = sess_group_str
 
             status = (sess.get("status") or "").lower()
             if status in ("canceled", "rescinded", "rescinded_after_sign",
@@ -3021,45 +3042,48 @@ def _run_founder_resume(
         state_store.delete_state(negotiation_id)
         return 2
 
-    if founder_row.get("founder_resumed_at"):
-        # Another tick (or an in-process bind) already started the
-        # resume. Stay idle; that turn owns the stream.
-        return 0
-
-    # Mark ourselves as the resuming turn. This is the idempotency
-    # gate: sshsign's whitelisted field set makes the write creator-
-    # only, and a subsequent scan on the same tick will see non-null
-    # and bail above.
-    now = int(now_fn())
-    try:
-        client.update_session_member(
-            session_id, field="founder_resumed_at", value=now,
-        )
-    except SshsignSessionError as e:
-        sys.stderr.write(f"resume: update-session-member resumed_at: {e}\n")
-        return 3
-
+    # Path 1 two-phase state machine. The dedup signal is
+    # streaming_at (the "we're done with this resume" marker), NOT
+    # resumed_at (which now means "phase A acknowledged the join,
+    # waiting for the founder to /bind a group").
+    #
+    # State table for (resumed_at, streaming_at, group_chat_id):
+    #   (null, null, null)       Phase A — post create-group card,
+    #                            set resumed_at, exit. Wait for bind.
+    #   (set,  null, null)       A-done — no-op (still waiting on bind,
+    #                            card already posted on the prior tick).
+    #   (any,  null, set)        Phase B — set resumed_at if null,
+    #                            set streaming_at, run _stream_to_telegram.
+    #                            Combined-pass: covers run_bind's
+    #                            in-process fast path that hits us
+    #                            after the founder pasted /bind directly
+    #                            (group already bound, A never ran).
+    #   (any,  set,  any)        Done — streaming has begun on a prior
+    #                            pass; nothing more to do here.
+    streaming_at = founder_row.get("founder_streaming_at")
+    resumed_at = founder_row.get("founder_resumed_at")
     group_chat_id = _resolve_group_chat_id(session_id, session_client=client)
 
-    # Orienting card (never starts with '/', per P7-5 invariant).
-    orient_body = format_event({
-        "type": "founder_resumed",
-        "session_code": state.get("session_code"),
-    })
-    if orient_body:
-        target = group_chat_id or ""
-        if target:
-            sender(target, message=orient_body)
+    if streaming_at:
+        # Done state. Stream already kicked off on a prior tick.
+        return 0
 
-    # Inverted-invitation: post a "create the live group" card to
-    # the FOUNDER'S DM the moment we know the investor joined. The
-    # investor side gets a "wait" card on its own droplet (asymmetric
-    # — only one party creates the group, prevents the duplicate-
-    # group race). Pull both bot handles + investor label from the
-    # session row so the card is fully formed.
     if not group_chat_id:
-        # No group bound yet — this is the path where founder needs
-        # the create-group instructions.
+        # Phase A or A-done. Founder hasn't /bound a group yet.
+        if resumed_at:
+            # Phase A-done: card already posted on a prior tick;
+            # still waiting for the founder to /bind. No-op so we
+            # don't spam the create-group card every 10s.
+            return 0
+
+        # Phase A: post create-group card, set resumed_at, exit.
+        # Pull both bot handles + investor label from sshsign so the
+        # card is fully formed (founder's handle from metadata_public
+        # written at create-session; investor's handle from the
+        # member row written at join). investor_handle may still be
+        # empty if the investor's bot couldn't write it on join —
+        # the card falls back to a placeholder; cron will re-emit
+        # only after the founder /binds (we don't loop on phase A).
         founder_handle = ""
         investor_handle = ""
         investor_label = "your investor"
@@ -3104,6 +3128,40 @@ def _run_founder_resume(
         if cg_body and founder_dm_for_card:
             sender(founder_dm_for_card, message=cg_body)
 
+        try:
+            client.update_session_member(
+                session_id, field="founder_resumed_at", value=int(now_fn()),
+            )
+        except SshsignSessionError as e:
+            sys.stderr.write(f"resume phase A: update resumed_at: {e}\n")
+            # Non-fatal: the card was sent. Next tick re-attempts the
+            # write; idempotent (sshsign overwrites). Worst case: we
+            # post the card again (mild spam) but never advance to
+            # phase B. Acceptable risk for transient sshsign blips.
+        return 0
+
+    # group_chat_id is set: Phase B (or combined first-pass if
+    # resumed_at was null because the founder went straight from
+    # mint → /bind without a cron tick in between).
+    now_ts = int(now_fn())
+    if not resumed_at:
+        try:
+            client.update_session_member(
+                session_id, field="founder_resumed_at", value=now_ts,
+            )
+        except SshsignSessionError as e:
+            sys.stderr.write(f"resume phase B (combined): resumed_at: {e}\n")
+            # Continue — streaming_at is the more important signal
+            # for the investor's wait gate.
+
+    # Orienting card lands in the bound group.
+    orient_body = format_event({
+        "type": "founder_resumed",
+        "session_code": state.get("session_code"),
+    })
+    if orient_body and group_chat_id:
+        sender(group_chat_id, message=orient_body)
+
     # Re-hydrate mint + constraints from disk. These were written at
     # mint-time and output_dir is stable across OC reap events.
     try:
@@ -3117,33 +3175,25 @@ def _run_founder_resume(
         sys.stderr.write(f"resume: loading mint.json: {e}\n")
         return 3
 
-    # Founder's DM chat_id is preserved in config.json by run_prepare
-    # (chat_id_flag / discovered from OC sessions). Fall back to empty
-    # if truly absent — the stream still works, signing URL just lands
-    # in whichever DM the typing loop defaults to.
+    # Founder's DM chat_id from config.json. Used for signing URL
+    # routing; the round cards land in the group via _stream_to_telegram.
     founder_dm = config.get("chat_id") or ""
 
     bot_username = os.environ.get("TELEGRAM_BOT_USERNAME", "AgenticPOA_bot")
     history_neg_id = mint.get("negotiation_id")
 
-    # Mark streaming_at BEFORE invoking _stream_to_telegram. The function
-    # blocks for the duration of the entire negotiation (rounds + signing
-    # path + finalize), and the investor's bounded poll is gating run_
-    # distributed on this signal. Setting it post-stream sequences both
-    # sides incorrectly: the investor would only unblock after the
-    # founder is DONE streaming, by which point the founder's
-    # run_distributed has exited and there's no counterparty for the
-    # investor's offers. INV-D67C9 (Apr 25) hit this race with the
-    # streaming_at write sitting after _stream_to_telegram in earlier
-    # code; moved here so both sides are concurrent.
+    # Set streaming_at BEFORE invoking _stream_to_telegram. The
+    # investor's bounded poll gates run_distributed on this signal;
+    # setting it post-stream would deadlock both sides (investor
+    # only unblocks after founder's stream is DONE, by which time
+    # the founder's run_distributed has exited).
     try:
         client.update_session_member(
             session_id, field="founder_streaming_at", value=int(now_fn()),
         )
     except SshsignSessionError as e:
-        # Non-fatal: the investor will time out at 180s and emergency
-        # card, but we'd rather the founder's stream keep going than
-        # abort here. The audit trail on sshsign captures the gap.
+        # Non-fatal: investor will time out at 180s with emergency
+        # card. Stream proceeds; audit trail captures the gap.
         sys.stderr.write(f"resume: update-session-member streaming_at: {e}\n")
 
     stream_rc, signing_event = _stream_to_telegram(

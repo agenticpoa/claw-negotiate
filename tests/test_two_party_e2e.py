@@ -263,6 +263,7 @@ class TestScenarioBindAfterJoin:
 
 # ---- Scenario 4 — Cancel during investor wait --------------------------------
 
+@pytest.mark.real_wait
 class TestScenarioCancelDuringInvestorWait:
     """Investor is polling for founder_streaming_at. The session gets
     canceled (by the founder from another turn). The investor's poll
@@ -358,6 +359,7 @@ class TestScenarioCrossBotIsolation:
 
 # ---- Scenario 6 — Race: founder crashes between resumed_at and streaming_at -
 
+@pytest.mark.real_wait
 class TestScenarioRaceResumedWithoutStreaming:
     """If the founder's resume sets founder_resumed_at then crashes
     before _stream_to_telegram actually runs, founder_streaming_at

@@ -82,6 +82,26 @@ def _no_real_sshsign_session(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_investor_wait(monkeypatch, request):
+    """The investor wait gate now runs unconditionally when role==investor
+    (Path 1 supports investor-joins-before-founder-binds). Without this
+    autouse mock, any test that drives run_negotiate down the investor
+    path enters a poll loop that hits the SshsignSession mock — which
+    raises by default — and loops forever waiting for streaming_at.
+    Default to "streaming" return so tests proceed; tests that exercise
+    the wait helper directly mark themselves with the real_wait marker
+    or fixture to opt out.
+    """
+    if "real_wait" in request.keywords:
+        return
+    import run_safe as rs
+    monkeypatch.setattr(
+        rs, "_investor_wait_for_founder_streaming",
+        lambda *a, **kw: "streaming",
+    )
+
+
+@pytest.fixture(autouse=True)
 def _no_demo_session_pid():
     """Wipe any stale /tmp/safe_negotiate/.session.pid that an earlier
     test or live demo left behind. Must run before each test so the

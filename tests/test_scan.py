@@ -124,12 +124,137 @@ class TestRunFounderResumeSessionStatus:
         fake_client.update_session_member.assert_not_called()
 
 
-class TestRunFounderResumeIdempotency:
-    def test_resumed_at_already_set_dedups(self, state_record, fake_client):
-        """A concurrent scan tick or a bind race: the other turn already
-        set resumed_at. Stay idle and let them own the stream.
-        """
+class TestRunFounderResumePath1StateMachine:
+    """Path 1 two-phase resume: state machine branches on
+    (streaming_at, group_chat_id). The dedup signal is streaming_at
+    (the "we're done" marker), NOT resumed_at (which now means
+    "phase A acknowledged join, waiting for /bind"). See
+    _run_founder_resume's docstring for the full state table.
+    """
+
+    def test_phase_a_no_group_yet(
+        self, state_record, fake_client, monkeypatch, founder_output_dir,
+    ):
+        """Status=joined, no group bound, no resumed_at.
+        → post create-group card to founder DM, set resumed_at,
+        EXIT WITHOUT STREAMING."""
+        # No group bound, no streaming_at, no resumed_at on founder row.
+        fake_client.get_session.return_value["group_chat_id"] = 0
+        fake_client.get_session.return_value["metadata_public"] = (
+            '{"founder_bot_handle": "AgenticPOA_bot"}'
+        )
+        fake_client.get_session.return_value["members"][1]["bot_handle"] = (
+            "AgenticPOAInvestor_bot"
+        )
+        monkeypatch.setattr(rs, "_resolve_group_chat_id", lambda *a, **kw: None)
+        sender = MagicMock()
+
+        with patch.object(rs, "_stream_to_telegram") as stream:
+            rc = rs._run_founder_resume(
+                state_record, session_client=fake_client, sender=sender,
+                now_fn=lambda: 1714000000,
+            )
+
+        assert rc == 0
+        # Stream MUST NOT be called — group isn't bound yet.
+        stream.assert_not_called()
+        # resumed_at written; streaming_at NOT written.
+        fields_written = [
+            (kw.get("field") or a[1])
+            for a, kw in (
+                (c.args, c.kwargs)
+                for c in fake_client.update_session_member.call_args_list
+            )
+        ]
+        assert "founder_resumed_at" in fields_written
+        assert "founder_streaming_at" not in fields_written
+        # Create-group card landed in the founder's DM (config.json's chat_id).
+        msgs = [c.kwargs.get("message") or c.args[1] for c in sender.call_args_list]
+        assert any("create" in m.lower() and "group" in m.lower() for m in msgs)
+
+    def test_phase_a_done_idempotent(
+        self, state_record, fake_client, monkeypatch,
+    ):
+        """resumed_at already set, no group, no streaming_at.
+        → no-op (don't re-spam the create-group card every 10s)."""
+        fake_client.get_session.return_value["group_chat_id"] = 0
         fake_client.get_session.return_value["members"][0]["founder_resumed_at"] = 1700000000
+        monkeypatch.setattr(rs, "_resolve_group_chat_id", lambda *a, **kw: None)
+        sender = MagicMock()
+
+        with patch.object(rs, "_stream_to_telegram") as stream:
+            rc = rs._run_founder_resume(
+                state_record, session_client=fake_client, sender=sender,
+            )
+
+        assert rc == 0
+        stream.assert_not_called()
+        fake_client.update_session_member.assert_not_called()
+        # Critical: NO new card emitted — we're already in phase A-done.
+        assert sender.call_count == 0
+
+    def test_phase_b_runs_stream_when_group_appears(
+        self, state_record, fake_client, monkeypatch,
+    ):
+        """resumed_at set (phase A acknowledged on a prior tick),
+        group_chat_id NOW set (founder pasted /bind), streaming_at null.
+        → set streaming_at, run _stream_to_telegram against the group."""
+        fake_client.get_session.return_value["members"][0]["founder_resumed_at"] = 1700000000
+        fake_client.get_session.return_value["group_chat_id"] = -100456
+        monkeypatch.setattr(rs, "_resolve_group_chat_id", lambda *a, **kw: "-100456")
+        sender = MagicMock()
+        events = []
+        fake_client.update_session_member.side_effect = (
+            lambda *a, **kw: events.append(("update", kw.get("field") or a[1]))
+        )
+        def _fake_stream(**kw):
+            events.append(("stream", kw.get("group_chat_id")))
+            return (0, None)
+        with patch.object(rs, "_stream_to_telegram", side_effect=_fake_stream):
+            rc = rs._run_founder_resume(
+                state_record, session_client=fake_client, sender=sender,
+                now_fn=lambda: 1714000005,
+            )
+
+        assert rc == 0
+        # streaming_at written THEN stream called (sequencing critical).
+        assert events == [
+            ("update", "founder_streaming_at"),
+            ("stream", "-100456"),
+        ], f"phase B sequencing wrong: {events}"
+
+    def test_combined_pass_when_no_prior_phase_a(
+        self, state_record, fake_client, monkeypatch,
+    ):
+        """No resumed_at, group already bound (run_bind's in-process
+        fast path: founder pasted /bind directly without a cron tick
+        in between). Phase B should set both resumed_at AND
+        streaming_at, then run stream."""
+        fake_client.get_session.return_value["group_chat_id"] = -100789
+        monkeypatch.setattr(rs, "_resolve_group_chat_id", lambda *a, **kw: "-100789")
+        events = []
+        fake_client.update_session_member.side_effect = (
+            lambda *a, **kw: events.append(("update", kw.get("field") or a[1]))
+        )
+        with patch.object(rs, "_stream_to_telegram", return_value=(0, None)):
+            rc = rs._run_founder_resume(
+                state_record, session_client=fake_client,
+                now_fn=lambda: 1714000010,
+            )
+        assert rc == 0
+        # Both timestamps written, in correct order.
+        fields = [e[1] for e in events if e[0] == "update"]
+        assert fields == ["founder_resumed_at", "founder_streaming_at"], fields
+
+    def test_done_state_is_noop(self, state_record, fake_client, monkeypatch):
+        """streaming_at already set → entire function is a no-op,
+        regardless of group_chat_id or resumed_at. Prevents
+        double-stream on concurrent cron ticks."""
+        fake_client.get_session.return_value["members"][0]["founder_resumed_at"] = 1700000000
+        fake_client.get_session.return_value["members"][0]["founder_streaming_at"] = 1700000005
+        fake_client.get_session.return_value["group_chat_id"] = -100123
+        monkeypatch.setattr(rs, "_resolve_group_chat_id", lambda *a, **kw: "-100123")
+
         with patch.object(rs, "_stream_to_telegram") as stream:
             rc = rs._run_founder_resume(state_record, session_client=fake_client)
         assert rc == 0
@@ -137,61 +262,15 @@ class TestRunFounderResumeIdempotency:
         fake_client.update_session_member.assert_not_called()
 
 
-class TestRunFounderResumeHappyPath:
-    def test_sets_resumed_then_streaming_BEFORE_stream_call(
-        self, state_record, fake_client, monkeypatch,
-    ):
-        """Critical sequencing test: streaming_at MUST be set BEFORE
-        ``_stream_to_telegram`` is invoked. The investor's bounded
-        poll uses streaming_at as the signal that the founder is
-        live — if we set it post-stream, the investor only unblocks
-        AFTER the founder is done streaming, by which point there's
-        no counterparty for the investor's run_distributed to talk
-        to. Regression for INV-D67C9 (Apr 25)."""
-        monkeypatch.setattr(rs, "_resolve_group_chat_id", lambda *a, **kw: "-100123")
-        # Track call order: each update_session_member + the stream.
-        events = []
-        fake_client.update_session_member.side_effect = (
-            lambda *a, **kw: events.append(("update", kw.get("field") or a[1]))
-        )
-        def _fake_stream(**kw):
-            events.append(("stream", None))
-            return (0, None)
-
-        with patch.object(rs, "_stream_to_telegram", side_effect=_fake_stream) as stream:
-            sender = MagicMock()
-            rc = rs._run_founder_resume(
-                state_record, session_client=fake_client, sender=sender,
-                now_fn=lambda: 1714000000,
-            )
-
-        assert rc == 0
-        # Exact order: resumed_at, streaming_at, _stream_to_telegram.
-        assert events == [
-            ("update", "founder_resumed_at"),
-            ("update", "founder_streaming_at"),
-            ("stream", None),
-        ], f"sequencing violated, got {events}"
-        stream.assert_called_once()
-        # Orienting card posted in the group, never starts with '/'.
-        sent_to_group = [
-            c for c in sender.call_args_list if c.args[0] == "-100123"
-        ]
-        assert sent_to_group, "resume must post at least one card in the group"
-        orient_msg = sent_to_group[0].kwargs["message"]
-        assert not orient_msg.startswith("/"), (
-            "invariant: resume cards must never start with '/' "
-            "(would be dispatched back as a skill intent)"
-        )
-
+class TestRunFounderResumeStreamFailure:
     def test_streaming_at_failure_is_non_fatal(
         self, state_record, fake_client, monkeypatch,
     ):
         """update_session_member(founder_streaming_at) failing must NOT
-        abort the stream — the stream already ran. The audit trail on
-        sshsign captures the gap for ops.
-        """
+        abort the stream — the audit trail on sshsign captures the gap.
+        Phase B path with combined-first-pass."""
         from sshsign_session import SshsignSessionError
+        fake_client.get_session.return_value["group_chat_id"] = -100123
         monkeypatch.setattr(rs, "_resolve_group_chat_id", lambda *a, **kw: "-100123")
 
         def _update(*args, **kwargs):
@@ -207,23 +286,21 @@ class TestRunFounderResumeHappyPath:
                 state_record, session_client=fake_client,
                 now_fn=lambda: 1714000001,
             )
-        # Return code still 0; scan-level audit reflects the gap.
-        assert rc == 0
+        assert rc == 0  # stream-rc precedence
 
     def test_stream_failure_returns_rc_without_cleanup(
         self, state_record, fake_client, monkeypatch,
     ):
-        """Non-terminal stream failure: don't delete state. Next cron
-        tick will re-check — resumed_at is set so it'll dedup and
-        skip, which is safe behavior until the session genuinely
-        terminates or is cancelled.
-        """
+        """Non-terminal stream failure (rc != 0): don't delete state.
+        Next cron tick re-evaluates; the dedup gate (streaming_at set)
+        prevents a re-stream. State pointer survives until session
+        terminates."""
+        fake_client.get_session.return_value["group_chat_id"] = -100123
         state_store.write_state(state_record)
-        monkeypatch.setattr(rs, "_resolve_group_chat_id", lambda *a, **kw: None)
+        monkeypatch.setattr(rs, "_resolve_group_chat_id", lambda *a, **kw: "-100123")
         with patch.object(rs, "_stream_to_telegram", return_value=(1, None)):
             rc = rs._run_founder_resume(state_record, session_client=fake_client)
         assert rc == 1
-        # State NOT deleted — session isn't terminal yet.
         assert state_store.read_state("neg_abc") is not None
 
 
@@ -454,6 +531,7 @@ class TestEnsureCron:
         assert "openclaw cron list failed" in err
 
 
+@pytest.mark.real_wait
 class TestInvestorWaitForFounderStreaming:
     """P7-5 investor-side bounded poll: posts waiting card, typing
     indicator, and either sees founder_streaming_at hit, detects
