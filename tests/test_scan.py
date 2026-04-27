@@ -51,6 +51,7 @@ def state_record(founder_output_dir) -> dict:
         "negotiation_id": "neg_abc",
         "output_dir": str(founder_output_dir),
         "session_code": "INV-ABCDE",
+        "founder_dm_chat_id": "123456",
     }
 
 

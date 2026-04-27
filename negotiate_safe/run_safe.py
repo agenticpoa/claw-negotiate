@@ -817,11 +817,20 @@ def run_mint(output_dir: str, config: dict, telegram_user_id: int | None = None)
         session_code = mint_output.get("session_code")
         if session_code:
             try:
-                state_store.write_state({
+                state_payload = {
                     "negotiation_id": negotiation_id,
                     "output_dir": str(out),
                     "session_code": session_code,
-                })
+                }
+                # Persist founder DM chat_id so a cron-triggered scan/
+                # resume can route the create-group card back to the
+                # founder when OC has reaped the foreground process.
+                # In a DM, chat_id == user_id (positive int), so the
+                # telegram_user_id captured at mint is exactly what
+                # _run_founder_resume needs.
+                if telegram_user_id:
+                    state_payload["founder_dm_chat_id"] = str(telegram_user_id)
+                state_store.write_state(state_payload)
             except state_store.StateCorruptError as e:
                 # Non-fatal: the founder can still wait inline this
                 # turn; they just won't survive a reap. Surface the
@@ -3119,12 +3128,10 @@ def _run_founder_resume(
             "investor_bot_handle": investor_handle,
             "investor_label": investor_label,
         })
-        founder_dm_for_card = ""
-        try:
-            cfg = json.loads((Path(state["output_dir"]) / "config.json").read_text())
-            founder_dm_for_card = str(cfg.get("chat_id") or "")
-        except (OSError, json.JSONDecodeError):
-            pass
+        # Founder DM chat_id was persisted to the state pointer at
+        # mint time. config.json is the constraints/identity blob;
+        # it does NOT carry chat_id, so we MUST read from state here.
+        founder_dm_for_card = str(state.get("founder_dm_chat_id") or "")
         if cg_body and founder_dm_for_card:
             sender(founder_dm_for_card, message=cg_body)
 
@@ -3175,9 +3182,10 @@ def _run_founder_resume(
         sys.stderr.write(f"resume: loading mint.json: {e}\n")
         return 3
 
-    # Founder's DM chat_id from config.json. Used for signing URL
-    # routing; the round cards land in the group via _stream_to_telegram.
-    founder_dm = config.get("chat_id") or ""
+    # Founder's DM chat_id from the state pointer (persisted at
+    # mint time). Used for signing-URL routing; the round cards
+    # land in the group via _stream_to_telegram.
+    founder_dm = str(state.get("founder_dm_chat_id") or "")
 
     bot_username = os.environ.get("TELEGRAM_BOT_USERNAME", "AgenticPOA_bot")
     history_neg_id = mint.get("negotiation_id")
