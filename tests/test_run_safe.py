@@ -569,7 +569,7 @@ class TestRunMintRoleFlipping:
 
         captured = {}
 
-        def fake_run(cmd, cwd=None, capture_output=None, text=None):
+        def fake_run(cmd, cwd=None, capture_output=None, text=None, **kwargs):
             captured["cmd"] = cmd
             return MagicMock(returncode=0, stdout="", stderr="")
 
@@ -2520,8 +2520,12 @@ class TestRunMintJoinBranch:
 
         captured = {}
 
-        def fake_run(cmd, cwd=None, capture_output=None, text=None):
-            captured["cmd"] = cmd
+        def fake_run(cmd, cwd=None, capture_output=None, text=None, **kwargs):
+            # Only the create_tokens.py invocation matters for this
+            # test; ignore the openclaw cron list/install calls that
+            # ensure_cron makes after a successful mint.
+            if any("create_tokens" in str(c) for c in cmd):
+                captured["cmd"] = cmd
             return MagicMock(returncode=0, stdout="", stderr="")
 
         with patch.object(rs.subprocess, "run", side_effect=fake_run), \
@@ -2549,8 +2553,9 @@ class TestRunMintJoinBranch:
 
         captured = {}
 
-        def fake_run(cmd, cwd=None, capture_output=None, text=None):
-            captured["cmd"] = cmd
+        def fake_run(cmd, cwd=None, capture_output=None, text=None, **kwargs):
+            if any("create_tokens" in str(c) for c in cmd):
+                captured["cmd"] = cmd
             return MagicMock(returncode=0, stdout="", stderr="")
 
         with patch.object(rs.subprocess, "run", side_effect=fake_run), \
@@ -2659,9 +2664,13 @@ class TestNegotiateInvestorBranch:
         mock_joiner.assert_not_called()
         mock_demo_await.assert_not_called()
 
-    def test_two_party_joiner_uses_joiner_await_path(self, tmp_path, sample_constraints):
-        """Investor in two-party mode routes through the joiner helper
-        (which waits for creator to finalize before running local finalize)."""
+    def test_two_party_investor_mint_does_not_finalize(self, tmp_path, sample_constraints):
+        """Symmetric Path 1: two-party investor mint exits immediately after
+        posting joined+waiting cards. Stream + joiner-finalize are owned
+        by `_run_investor_resume` (cron-triggered when sshsign reports
+        the founder's `founder_streaming_at` is set). The investor mint
+        flow itself never reaches `_joiner_await_sign_and_finalize` —
+        that lives in the resume path."""
         (tmp_path / "config.json").write_text(json.dumps({
             "constraints": sample_constraints,
             "founder_name": "F", "founder_title": "CEO", "message": "m",
@@ -2676,17 +2685,19 @@ class TestNegotiateInvestorBranch:
 
         mock_creator = MagicMock(return_value=0)
         mock_joiner = MagicMock(return_value=0)
+        mock_stream = MagicMock()
         signing = {"type": "signing", "pending_id": "pnd_i"}
 
         with patch.object(rs, "run_mint", side_effect=fake_mint), \
-             patch.object(rs, "_stream_to_telegram", return_value=(0, signing)), \
+             patch.object(rs, "_stream_to_telegram", mock_stream), \
              patch.object(rs, "_creator_await_sign_and_finalize", mock_creator), \
              patch.object(rs, "_joiner_await_sign_and_finalize", mock_joiner), \
              patch.object(rs, "resolve_chat_id", return_value="12345"):
             rc = rs.run_negotiate(str(tmp_path), chat_id_flag="12345")
 
         assert rc == 0
-        mock_joiner.assert_called_once()
+        mock_stream.assert_not_called()
+        mock_joiner.assert_not_called()
         mock_creator.assert_not_called()
 
     def test_demo_mode_uses_demo_await(self, tmp_path, sample_constraints):
@@ -2719,7 +2730,11 @@ class TestNegotiateInvestorBranch:
         mock_creator.assert_not_called()
         mock_joiner.assert_not_called()
 
-    def test_investor_two_party_skips_gate_and_pushes_joined_card(self, tmp_path):
+    def test_investor_two_party_posts_joined_and_exits(self, tmp_path):
+        """Symmetric Path 1: two-party investor mint posts a 'joined'
+        confirmation + a 'waiting for founder' card, then EXITS without
+        spawning the stream. Cron's `_run_investor_resume` handles the
+        rest when `founder_streaming_at` flips."""
         self._write_config(tmp_path)
 
         def fake_mint(output_dir, config, **kwargs):
@@ -2744,11 +2759,11 @@ class TestNegotiateInvestorBranch:
 
         assert rc == 0
         mock_gate.assert_not_called()
-        mock_stream.assert_called_once()
-        # A "joined" card was pushed before streaming started
-        joined_msgs = [c.kwargs.get("message", "") for c in sender.call_args_list]
-        assert any("joined" in m.lower() and "starting" in m.lower()
-                   for m in joined_msgs)
+        mock_stream.assert_not_called()
+        # A "joined" card was pushed before exit
+        joined_msgs = [c.kwargs.get("message", "") for c in sender.call_args_list
+                       if c.kwargs.get("message")]
+        assert any("joined" in m.lower() for m in joined_msgs)
 
 
 class TestK3InvestorGroupRouting:
@@ -2775,87 +2790,59 @@ class TestK3InvestorGroupRouting:
             return 0
         return fake_mint
 
-    def test_investor_resolves_group_and_passes_to_stream(self, tmp_path):
-        """When the founder has bound a group, the investor's run_negotiate
-        must pick up group_chat_id and thread it into _stream_to_telegram."""
+    def test_investor_mint_does_not_stream(self, tmp_path):
+        """Symmetric Path 1: the investor's run_negotiate does NOT spawn
+        the stream itself. `_run_investor_resume` (cron-triggered) is
+        the sole spawner. This used to live in run_negotiate but the
+        180s timeout was hopelessly too short for Path 1's "founder
+        creates group" wait — see the post-mortem in run_safe.py."""
         self._write_cfg(tmp_path)
         mock_stream = MagicMock(return_value=(0, None))
 
         with patch.object(rs, "run_mint", side_effect=self._fake_mint_investor(tmp_path)), \
              patch.object(rs, "_resolve_group_chat_id", return_value="-1001234567890"), \
-             patch.object(rs, "_investor_wait_for_founder_streaming", return_value="streaming"), \
              patch.object(rs, "_stream_to_telegram", mock_stream), \
              patch.object(rs, "resolve_chat_id", return_value="222222"), \
              patch.object(rs, "send_telegram", MagicMock()):
             rs.run_negotiate(str(tmp_path), chat_id_flag="222222")
 
-        mock_stream.assert_called_once()
-        assert mock_stream.call_args.kwargs["group_chat_id"] == "-1001234567890"
-        # investor's DM chat_id threaded as primary
-        assert mock_stream.call_args.kwargs["chat_id"] == "222222"
+        mock_stream.assert_not_called()
 
-    def test_investor_kickoff_card_targets_group_when_bound(self, tmp_path):
-        """Investor's 'joined — both sides live' card posts to the
-        bound group, not the investor's DM."""
+    def test_investor_mint_does_not_post_to_group(self, tmp_path):
+        """Symmetric Path 1: investor mint posts joined+waiting cards
+        to the investor DM only. The group announcement (if any) lives
+        in `_run_investor_resume` (the 'both sides online' card)."""
         self._write_cfg(tmp_path)
         sender = MagicMock()
 
         with patch.object(rs, "run_mint", side_effect=self._fake_mint_investor(tmp_path)), \
              patch.object(rs, "_resolve_group_chat_id", return_value="-1001234567890"), \
-             patch.object(rs, "_investor_wait_for_founder_streaming", return_value="streaming"), \
              patch.object(rs, "_stream_to_telegram", return_value=(0, None)), \
              patch.object(rs, "resolve_chat_id", return_value="222222"), \
              patch.object(rs, "send_telegram", sender):
             rs.run_negotiate(str(tmp_path), chat_id_flag="222222")
 
-        group_sends = [c for c in sender.call_args_list
-                       if c.args and c.args[0] == "-1001234567890"]
-        assert group_sends, "investor must announce arrival in the group"
-        # Use a role-distinct copy so both sides don't read the SAME kickoff
-        # ("founder ready" vs "investor joined").
-        body = group_sends[0].kwargs.get("message", "")
-        assert "investor" in body.lower(), f"kickoff not role-specific: {body!r}"
-
-    def test_investor_kickoff_absent_when_not_bound(self, tmp_path):
-        """When no group is bound at investor-join time (inverted-
-        invitation: investor joins BEFORE founder /binds), the wait
-        gate still fires — but its waiting card lands in the investor's
-        DM, not in any group, since no group exists yet."""
-        self._write_cfg(tmp_path)
-        sender = MagicMock()
-
-        with patch.object(rs, "run_mint", side_effect=self._fake_mint_investor(tmp_path)), \
-             patch.object(rs, "_resolve_group_chat_id", return_value=None), \
-             patch.object(rs, "_investor_wait_for_founder_streaming", return_value="streaming"), \
-             patch.object(rs, "_stream_to_telegram", return_value=(0, None)), \
-             patch.object(rs, "resolve_chat_id", return_value="222222"), \
-             patch.object(rs, "send_telegram", sender):
-            rs.run_negotiate(str(tmp_path), chat_id_flag="222222")
-
-        targets = [c.args[0] for c in sender.call_args_list if c.args]
-        # No send should target any negative chat id (no group bound).
+        targets = [str(c.args[0]) for c in sender.call_args_list if c.args]
+        # No send from mint should land in a group (negative chat id).
         assert all(not t.startswith("-") for t in targets), \
-            f"unexpected group send: {targets}"
+            f"investor mint must not post to group; saw {targets}"
 
-    def test_investor_joiner_finalize_gets_group_chat_id(self, tmp_path):
-        """The investor's joiner-await path must also receive
-        group_chat_id so the PDF double-posts to both the group AND
-        the investor's DM, not only the DM."""
+    def test_investor_joiner_finalize_not_in_run_negotiate(self, tmp_path):
+        """The joiner-finalize path is no longer reachable from
+        run_negotiate — it moved to `_run_investor_resume`."""
         self._write_cfg(tmp_path)
         mock_joiner = MagicMock(return_value=0)
         signing = {"type": "signing", "pending_id": "pnd_i"}
 
         with patch.object(rs, "run_mint", side_effect=self._fake_mint_investor(tmp_path)), \
              patch.object(rs, "_resolve_group_chat_id", return_value="-1001234567890"), \
-             patch.object(rs, "_investor_wait_for_founder_streaming", return_value="streaming"), \
              patch.object(rs, "_stream_to_telegram", return_value=(0, signing)), \
              patch.object(rs, "_joiner_await_sign_and_finalize", mock_joiner), \
              patch.object(rs, "resolve_chat_id", return_value="222222"), \
              patch.object(rs, "send_telegram", MagicMock()):
             rs.run_negotiate(str(tmp_path), chat_id_flag="222222")
 
-        mock_joiner.assert_called_once()
-        assert mock_joiner.call_args.kwargs["group_chat_id"] == "-1001234567890"
+        mock_joiner.assert_not_called()
 
     def test_founder_mint_does_not_post_to_group(self, tmp_path):
         """Path 1: founder's mint runs before any group is bound, and

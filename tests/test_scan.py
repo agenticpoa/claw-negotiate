@@ -313,12 +313,13 @@ class TestRunScan:
         self, founder_output_dir, fake_client, monkeypatch,
     ):
         monkeypatch.setattr(rs, "_resolve_group_chat_id", lambda *a, **kw: None)
-        # Two pointers pointing at the same output_dir for simplicity.
+        # Two founder pointers (no role field defaults to founder).
         for nid in ("neg_a", "neg_b"):
             state_store.write_state({
                 "negotiation_id": nid,
                 "output_dir": str(founder_output_dir),
                 "session_code": f"INV-{nid.upper()}",
+                "role": "founder",
             })
         with patch.object(rs, "_run_founder_resume", return_value=0) as resume:
             rc = rs.run_scan(session_client=fake_client)
@@ -347,6 +348,214 @@ class TestRunScan:
         assert rc == 0
         # Both pointers processed despite one raising.
         assert set(call_order) == {"neg_bad", "neg_good"}
+
+    def test_dispatches_by_role(self, founder_output_dir, fake_client):
+        """Symmetric Path 1: state pointers carry a `role` field;
+        scan must call `_run_investor_resume` for investor pointers
+        and `_run_founder_resume` for founder pointers."""
+        state_store.write_state({
+            "negotiation_id": "neg_f",
+            "output_dir": str(founder_output_dir),
+            "session_code": "INV-F",
+            "role": "founder",
+        })
+        state_store.write_state({
+            "negotiation_id": "neg_i",
+            "output_dir": str(founder_output_dir),
+            "session_code": "INV-I",
+            "role": "investor",
+        })
+
+        founder_calls = []
+        investor_calls = []
+
+        def _fake_founder(state, **kwargs):
+            founder_calls.append(state["negotiation_id"])
+            return 0
+
+        def _fake_investor(state, **kwargs):
+            investor_calls.append(state["negotiation_id"])
+            return 0
+
+        with patch.object(rs, "_run_founder_resume", side_effect=_fake_founder), \
+             patch.object(rs, "_run_investor_resume", side_effect=_fake_investor):
+            rs.run_scan(session_client=fake_client)
+
+        assert founder_calls == ["neg_f"]
+        assert investor_calls == ["neg_i"]
+
+    def test_missing_role_defaults_to_founder(self, founder_output_dir, fake_client):
+        """Back-compat: state pointers written before the `role` field
+        existed default to founder."""
+        state_store.write_state({
+            "negotiation_id": "neg_legacy",
+            "output_dir": str(founder_output_dir),
+            "session_code": "INV-LEGACY",
+            # NO role field
+        })
+        with patch.object(rs, "_run_founder_resume", return_value=0) as f, \
+             patch.object(rs, "_run_investor_resume", return_value=0) as i:
+            rs.run_scan(session_client=fake_client)
+        assert f.call_count == 1
+        assert i.call_count == 0
+
+
+class TestRunInvestorResume:
+    """Symmetric Path 1: investor-side cron resume. Mirrors
+    `_run_founder_resume` but gates on the founder's
+    `founder_streaming_at` flipping, and dedupes via a flag we
+    persist into the state pointer.
+    """
+
+    def _state(self, founder_output_dir):
+        return {
+            "negotiation_id": "neg_inv",
+            "output_dir": str(founder_output_dir),
+            "session_code": "INV-INV",
+            "role": "investor",
+            "investor_dm_chat_id": "8888888",
+        }
+
+    def _session(self, *, status="joined", group_chat_id=-1001234567890,
+                 founder_streaming_at=None):
+        return {
+            "session_id": "session_neg_inv",
+            "session_code": "INV-INV",
+            "status": status,
+            "group_chat_id": group_chat_id,
+            "members": [
+                {"role": "founder", "user_id": "u_f",
+                 "founder_streaming_at": founder_streaming_at,
+                 "founder_resumed_at": founder_streaming_at},
+                {"role": "investor", "user_id": "u_i",
+                 "bot_handle": "AgenticPOAInvestor_bot"},
+            ],
+        }
+
+    def test_founder_not_streaming_skips(self, founder_output_dir):
+        """Founder hasn't /bound + flipped streaming_at yet. Investor
+        stays in the wait state — no group card, no stream spawn."""
+        state = self._state(founder_output_dir)
+        state_store.write_state(state)
+
+        client = MagicMock()
+        client.get_session.return_value = self._session(founder_streaming_at=None)
+        sender = MagicMock()
+
+        with patch.object(rs, "_stream_to_telegram") as stream:
+            rc = rs._run_investor_resume(state, session_client=client, sender=sender)
+
+        assert rc == 1
+        stream.assert_not_called()
+        # No group sends until founder is ready.
+        targets = [str(c.args[0]) for c in sender.call_args_list if c.args]
+        assert all(not t.startswith("-") for t in targets), targets
+
+    def test_terminal_session_cleans_pointer(self, founder_output_dir):
+        """Status=canceled → post status card to investor DM, delete
+        pointer, return 2."""
+        state = self._state(founder_output_dir)
+        state_store.write_state(state)
+
+        client = MagicMock()
+        client.get_session.return_value = self._session(status="canceled")
+        sender = MagicMock()
+
+        with patch.object(rs, "_stream_to_telegram") as stream:
+            rc = rs._run_investor_resume(state, session_client=client, sender=sender)
+
+        assert rc == 2
+        stream.assert_not_called()
+        assert state_store.read_state("neg_inv") is None
+
+    def test_happy_path_streams_and_finalizes(self, founder_output_dir, monkeypatch):
+        """founder_streaming_at set + group bound → write started flag,
+        post 'both online' card to group, spawn stream, run joiner-
+        finalize, clean up pointer."""
+        state = self._state(founder_output_dir)
+        state_store.write_state(state)
+
+        client = MagicMock()
+        client.get_session.return_value = self._session(
+            founder_streaming_at=1700000000,
+            group_chat_id=-1001234567890,
+        )
+        sender = MagicMock()
+        signing = {"type": "signing", "pending_id": "pnd_inv"}
+
+        monkeypatch.setattr(rs, "_resolve_group_chat_id",
+                            lambda *a, **kw: "-1001234567890")
+
+        with patch.object(rs, "_stream_to_telegram",
+                          return_value=(0, signing)) as stream, \
+             patch.object(rs, "_joiner_await_sign_and_finalize",
+                          return_value=0) as joiner:
+            rc = rs._run_investor_resume(state, session_client=client, sender=sender)
+
+        assert rc == 0
+        stream.assert_called_once()
+        # group_chat_id threaded to the stream
+        assert stream.call_args.kwargs["group_chat_id"] == "-1001234567890"
+        # investor DM threaded as primary chat_id (signing URL routing)
+        assert stream.call_args.kwargs["chat_id"] == "8888888"
+        joiner.assert_called_once()
+        # State pointer cleaned up after joiner finalize.
+        assert state_store.read_state("neg_inv") is None
+        # Both-online card posted to the group.
+        group_sends = [c for c in sender.call_args_list
+                       if c.args and str(c.args[0]) == "-1001234567890"]
+        assert group_sends, "must announce 'both online' in the group"
+
+    def test_dedup_via_started_flag(self, founder_output_dir, monkeypatch):
+        """If `investor_streaming_started` is already set on the
+        state pointer, this resume is a no-op — another tick or the
+        in-process bind path already owns the stream."""
+        state = self._state(founder_output_dir)
+        state["investor_streaming_started"] = True
+        state_store.write_state(state)
+
+        client = MagicMock()
+        sender = MagicMock()
+
+        with patch.object(rs, "_stream_to_telegram") as stream:
+            rc = rs._run_investor_resume(state, session_client=client, sender=sender)
+
+        assert rc == 0
+        stream.assert_not_called()
+        # We didn't even need to query sshsign.
+        client.get_session.assert_not_called()
+
+    def test_pointer_marked_started_before_stream_spawn(self, founder_output_dir, monkeypatch):
+        """The dedup flag must be persisted BEFORE _stream_to_telegram
+        is invoked. Otherwise a 30s cron tick during a 5-minute stream
+        could double-spawn upstream."""
+        state = self._state(founder_output_dir)
+        state_store.write_state(state)
+
+        client = MagicMock()
+        client.get_session.return_value = self._session(
+            founder_streaming_at=1700000000,
+            group_chat_id=-1001234567890,
+        )
+        sender = MagicMock()
+        observed_at_stream_call: list[bool] = []
+
+        def _stream(*a, **kw):
+            persisted = state_store.read_state("neg_inv") or {}
+            observed_at_stream_call.append(
+                bool(persisted.get("investor_streaming_started"))
+            )
+            return (1, None)  # short-circuit out
+
+        monkeypatch.setattr(rs, "_resolve_group_chat_id",
+                            lambda *a, **kw: "-1001234567890")
+
+        with patch.object(rs, "_stream_to_telegram", side_effect=_stream):
+            rs._run_investor_resume(state, session_client=client, sender=sender)
+
+        assert observed_at_stream_call == [True], (
+            "started flag must be persisted BEFORE _stream_to_telegram"
+        )
 
 
 class TestBindInProcessResumeFastPath:

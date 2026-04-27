@@ -809,11 +809,15 @@ def run_mint(output_dir: str, config: dict, telegram_user_id: int | None = None)
 
     (out / "mint.json").write_text(json.dumps(mint_output, indent=2))
 
-    # P7-5: leave a pointer so a later cron-scanned `scan` turn can
-    # resume this negotiation if OC reaps the founder's foreground
-    # process before the investor joins. Founder-only (investor has
-    # no resume flow) and two-party-only (demo mode runs inline).
-    if mint_output["mode"] == "two_party" and user_role == "founder":
+    # P7-5 + symmetric Path 1: leave a state pointer for BOTH founder
+    # and investor in two-party mode so a later cron-scanned `scan`
+    # turn can resume the negotiation when OC reaps the foreground
+    # process. Founder pointers drive Phase A/B (create-group card →
+    # post-/bind stream); investor pointers drive the post-mint wait
+    # for `founder_streaming_at` (replacing the old in-process 180s
+    # poll that timed out before the founder finished /binding).
+    # Demo mode runs inline; no state needed.
+    if mint_output["mode"] == "two_party":
         session_code = mint_output.get("session_code")
         if session_code:
             try:
@@ -821,25 +825,28 @@ def run_mint(output_dir: str, config: dict, telegram_user_id: int | None = None)
                     "negotiation_id": negotiation_id,
                     "output_dir": str(out),
                     "session_code": session_code,
+                    "role": user_role,
                 }
-                # Persist founder DM chat_id so a cron-triggered scan/
-                # resume can route the create-group card back to the
-                # founder when OC has reaped the foreground process.
-                # In a DM, chat_id == user_id (positive int), so the
-                # telegram_user_id captured at mint is exactly what
-                # _run_founder_resume needs.
+                # Persist the user's DM chat_id so a cron-triggered
+                # scan/resume can route role-specific cards (founder:
+                # create-group; investor: heartbeat / both-online)
+                # back to the right user even after the foreground
+                # process is reaped. In a DM, chat_id == user_id
+                # (positive int).
                 if telegram_user_id:
-                    state_payload["founder_dm_chat_id"] = str(telegram_user_id)
+                    if user_role == "founder":
+                        state_payload["founder_dm_chat_id"] = str(telegram_user_id)
+                    elif user_role == "investor":
+                        state_payload["investor_dm_chat_id"] = str(telegram_user_id)
                 state_store.write_state(state_payload)
             except state_store.StateCorruptError as e:
-                # Non-fatal: the founder can still wait inline this
+                # Non-fatal: the user can still wait inline this
                 # turn; they just won't survive a reap. Surface the
                 # reason so ops can fix the state dir.
                 sys.stderr.write(f"state_store.write_state failed: {e}\n")
-        # Install the global cron scan job (idempotent). Logged but
-        # not fatal — if OC rejects --every 30s or the pairing wall
-        # blocks us, the mint still succeeds and ops can install the
-        # job manually.
+        # Install the global cron scan job (idempotent). Both roles
+        # need cron — investor's resume runs from the same loop as
+        # the founder's, just dispatched on the pointer's `role`.
         interval = os.environ.get("CLAW_NEGOTIATE_SCAN_INTERVAL", "30s")
         ok, err = ensure_cron(interval=interval)
         if not ok and err:
@@ -2182,13 +2189,25 @@ def run_negotiate(output_dir: str, chat_id_flag: str | None = None) -> int:
                 return invite_rc
             return 0
         elif mint.get("user_role") == "investor":
-            # Investor just joined — push a short "joined; starting" card
-            # so they know the flow is progressing before upstream's first
-            # offer lands.
+            # Symmetric Path 1 (post-mortem of INV-T6869 on 2026-04-27):
+            # the investor's foreground used to call
+            # `_investor_wait_for_founder_streaming` with a 180s cap.
+            # In Path 1 the founder takes minutes-to-hours to create
+            # the group + /bind, so 180s is hopelessly too short - the
+            # investor's process exited (rc=4) long before the founder
+            # set `founder_streaming_at`. Result: founder later spawned
+            # its stream and waited forever for the investor's offer.
+            #
+            # Fix: post the "joined; waiting" cards and EXIT. Cron's
+            # scan iterates the investor pointer the same way it
+            # iterates founder pointers; `_run_investor_resume` fires
+            # when sshsign reports the founder's streaming_at is set.
             sender = send_telegram
-            sender(chat_id, message=(
-                "\u2705 Joined the negotiation. Starting now\u2026"  # ✅
-            ))
+            sender(chat_id, message="\u2705 Joined the negotiation.")
+            wait_body = format_event({"type": "investor_waiting_for_founder"})
+            if wait_body:
+                sender(chat_id, message=wait_body)
+            return 0
     else:
         # Demo (solo) mode: push the "starting" card directly from the
         # script now that SKILL.md tells the model not to emit its own
@@ -2198,93 +2217,20 @@ def run_negotiate(output_dir: str, chat_id_flag: str | None = None) -> int:
         #   🔐 setup → 🔒 auth → 🤝 invite | ✅ joined → rounds
         send_telegram(chat_id, message="\U0001f680 Starting negotiation\u2026")  # 🚀
 
-    # Phase 8 K2/K3: if the session has been bound to a Telegram group
-    # via /bind (K1), route rounds / outcome / status cards / the PDF to
-    # the group; keep signing URL + personal errors in the DM. A None
-    # here means demo mode or a two-party session the founder never
-    # bound — behavior stays identical to Phase 7.
-    #
-    # K3 detail: this block fires for BOTH roles, so the investor's bot
-    # picks up the same group_chat_id the founder bound and streams into
-    # the same venue. The kickoff card is role-aware so the group sees
-    # one distinct arrival message per side (instead of two identical
-    # "starting" cards).
+    # Past this point we're on the DEMO mode path. Two-party founder
+    # returned at line ~2190 (after posting invitation card); two-party
+    # investor returned at line ~2213 (after posting joined+waiting
+    # cards). Both two-party stream invocations now live exclusively
+    # in `_run_founder_resume` Phase B and `_run_investor_resume`,
+    # both driven by cron. Eliminating the in-process foreground
+    # stream prevents the OC reaper / double-spawn class of bugs that
+    # broke INV-GD4KZ and INV-T6869.
     sshsign_host = os.environ.get("SSHSIGN_HOST", "sshsign.dev")
     group_chat_id: str | None = None
-    if mint.get("mode") == "two_party":
-        session_id_for_wait = _sshsign_session_id(mint.get("negotiation_id") or "")
-        group_chat_id = _resolve_group_chat_id(session_id_for_wait)
-        role = (mint.get("user_role") or "").lower()
-
-        # P7-5+Path1 investor-side gate: don't let run_distributed
-        # spawn until founder_streaming_at is set on sshsign.
-        # Otherwise upstream hangs on "waiting for founder's opening
-        # offer". Gate fires for investor regardless of whether a
-        # group is bound at investor-join time — Path 1 specifically
-        # handles "investor joins, then founder creates the group" —
-        # the wait helper notices group_chat_id appearing mid-poll
-        # and switches its target chat from investor DM to the bound
-        # group on the fly.
-        if role == "investor":
-            founder_handle = ""
-            try:
-                fetch_sess = SshsignSession(
-                    host=os.environ.get("SSHSIGN_HOST", sshsign_host),
-                ).get_session(session_id=session_id_for_wait)
-                meta_pub_raw = fetch_sess.get("metadata_public") or "{}"
-                meta_pub = (
-                    json.loads(meta_pub_raw) if isinstance(meta_pub_raw, str)
-                    else (meta_pub_raw or {})
-                )
-                founder_handle = (meta_pub.get("founder_bot_handle") or "").strip()
-            except (SshsignSessionError, json.JSONDecodeError, AttributeError):
-                pass
-
-            wait_status = _investor_wait_for_founder_streaming(
-                session_id=session_id_for_wait,
-                group_chat_id=group_chat_id,
-                investor_dm_chat_id=chat_id,
-                founder_bot_handle=founder_handle,
-            )
-            if wait_status != "streaming":
-                # Timeout or terminal: surface happened already; the
-                # caller (run_negotiate) should NOT spawn the stream.
-                return 0 if wait_status == "terminal" else 4
-
-            # Path 1: the wait may have observed group_chat_id
-            # appearing mid-poll. Re-resolve so _stream_to_telegram
-            # routes round cards into the now-bound group, not the
-            # investor's DM where the waiting card initially landed.
-            group_chat_id = _resolve_group_chat_id(
-                session_id_for_wait,
-            ) or group_chat_id
-
-        if group_chat_id:
-            if role == "founder":
-                kickoff = (
-                    "\U0001f3ac Founder's agent is live — rounds start next."  # 🎬
-                )
-            elif role == "investor":
-                kickoff = (
-                    "\U0001f4bc Investor's agent joined — both sides live now."  # 💼
-                )
-            else:
-                kickoff = (
-                    "\U0001f3ac Live negotiation starting — watch here."  # 🎬
-                )
-            send_telegram(group_chat_id, message=kickoff)
-
     bot_username = os.environ.get("TELEGRAM_BOT_USERNAME", "AgenticPOA_bot")
-    # P8-1: in two-party mode, upstream's run_distributed only emits the
-    # final `signing` event to stdout — offer/counter/accept rounds
-    # happen but are only visible in sshsign's negotiation_offers log.
-    # Passing `negotiation_id` enables the supplemental history poller
-    # so the group sees rounds live. Demo mode (run_local) emits rounds
-    # on stdout directly; no poll needed, and not passing the id keeps
-    # the behavior identical to Phase 7.
-    history_neg_id = (
-        mint.get("negotiation_id") if mint.get("mode") == "two_party" else None
-    )
+    # Demo (single-party) doesn't need the sshsign history poller —
+    # upstream's `run_local` emits round events on stdout directly.
+    history_neg_id = None
     stream_rc, signing_event = _stream_to_telegram(
         output_dir=out,
         chat_id=chat_id,
@@ -2301,32 +2247,7 @@ def run_negotiate(output_dir: str, chat_id_flag: str | None = None) -> int:
     if not pending_id:
         return 0
 
-    # Two-party mode: role determines who finalizes.
-    #   Creator (founder): wait for own sig, finalize locally, push PDF,
-    #     then call complete-session so the investor's OC unblocks.
-    #   Non-creator (investor): wait for own sig, then poll the session
-    #     until status=completed (founder finalized on their side), then
-    #     finalize locally using both signatures and push PDF.
-    if mint.get("mode") == "two_party":
-        is_creator = mint.get("user_role") == "founder"
-        if is_creator:
-            return _creator_await_sign_and_finalize(
-                output_dir=out,
-                chat_id=chat_id,
-                sshsign_host=sshsign_host,
-                pending_id=pending_id,
-                session_id=_sshsign_session_id(mint.get("negotiation_id") or ""),
-                group_chat_id=group_chat_id,
-            )
-        return _joiner_await_sign_and_finalize(
-            output_dir=out,
-            chat_id=chat_id,
-            sshsign_host=sshsign_host,
-            pending_id=pending_id,
-            session_id=_sshsign_session_id(mint.get("negotiation_id") or ""),
-            group_chat_id=group_chat_id,
-        )
-
+    # Demo mode: single-party finalize.
     return _await_sign_and_push(
         output_dir=out,
         chat_id=chat_id,
@@ -3311,6 +3232,175 @@ def _run_founder_resume(
     return rc
 
 
+def _run_investor_resume(
+    state: dict,
+    session_client=None,
+    sender=send_telegram,
+    now_fn=None,
+    sshsign_host: str | None = None,
+) -> int:
+    """Symmetric Path 1: investor-side cron resume.
+
+    Mirrors `_run_founder_resume` for the investor. Triggered by
+    `run_scan` whenever the investor's state pointer is found and
+    sshsign shows the founder's `founder_streaming_at` is set
+    (meaning the founder has /bound and is streaming). Replaces
+    the old in-process `_investor_wait_for_founder_streaming` poll
+    that timed out at 180s — way too short for Path 1's
+    "founder creates group" wait.
+
+    Returns:
+      0 on success (stream + finalize completed), or whatever rc
+        the joiner-finalize helper produced.
+      1 founder hasn't started streaming yet; nothing to do this tick.
+      2 session terminal/missing/stale; pointer already cleaned up.
+      3 sshsign transport error; safe to retry on the next tick.
+
+    Idempotency: dedup is a `investor_streaming_started` flag we
+    persist into the state pointer the moment we begin streaming.
+    A subsequent cron tick re-reads the pointer, sees the flag,
+    and bails. Avoids double-spawning upstream (the same class of
+    bug the founder side hit on INV-GD4KZ).
+    """
+    import time
+    if now_fn is None:
+        now_fn = time.time
+
+    negotiation_id = state.get("negotiation_id") or ""
+    output_dir_raw = state.get("output_dir") or ""
+    if not negotiation_id or not output_dir_raw:
+        sys.stderr.write(
+            "investor resume: state missing negotiation_id or output_dir; skipping\n"
+        )
+        return 2
+
+    if state.get("investor_streaming_started"):
+        # Already streaming on a prior tick. Stay idle.
+        return 0
+
+    out = Path(output_dir_raw)
+    if not out.exists():
+        sys.stderr.write(
+            f"investor resume: output_dir {out} missing; cleaning state pointer\n"
+        )
+        state_store.delete_state(negotiation_id)
+        return 2
+
+    sshsign_host = sshsign_host or os.environ.get("SSHSIGN_HOST", "sshsign.dev")
+    client = session_client or SshsignSession(host=sshsign_host)
+    session_id = _sshsign_session_id(negotiation_id)
+
+    try:
+        sess = client.get_session(session_id=session_id)
+    except SessionNotFoundError:
+        state_store.delete_state(negotiation_id)
+        return 2
+    except SshsignSessionError as e:
+        sys.stderr.write(f"investor resume: get-session failed: {e}\n")
+        return 3
+
+    status = (sess.get("status") or "").lower()
+    if status in ("canceled", "rescinded", "rescinded_after_sign", "completed", "expired"):
+        # Surface a status card to the investor so they aren't left
+        # staring at a stale "waiting" card.
+        body = format_event({"type": "investor_session_ended", "status": status})
+        target = state.get("investor_dm_chat_id") or ""
+        if body and target:
+            sender(target, message=body)
+        state_store.delete_state(negotiation_id)
+        return 2
+
+    members = sess.get("members") or []
+    founder_row = next(
+        (m for m in members if (m.get("role") or "").lower() == "founder"),
+        None,
+    )
+    if not founder_row:
+        # Race: founder member row not present yet. Skip this tick.
+        return 1
+
+    if not founder_row.get("founder_streaming_at"):
+        # Founder hasn't /bound + started streaming yet. Investor stays
+        # in the wait state. The cron will retry every tick.
+        return 1
+
+    group_chat_id = _resolve_group_chat_id(session_id, session_client=client)
+    if not group_chat_id:
+        # founder_streaming_at is set but no group_chat_id resolves —
+        # shouldn't happen since the founder sets streaming_at AFTER
+        # /bind writes group_chat_id. Defensive: treat as not-yet-ready
+        # and let the next tick retry.
+        return 1
+
+    # Mark as started BEFORE we spawn the stream subprocess. This is
+    # the dedup gate: even if the stream takes 5 minutes and the cron
+    # ticks 30 times during that window, every tick sees the flag and
+    # exits without double-spawning.
+    new_state = dict(state)
+    new_state["investor_streaming_started"] = True
+    try:
+        state_store.write_state(new_state)
+    except state_store.StateCorruptError as e:
+        sys.stderr.write(f"investor resume: write_state failed: {e}\n")
+        # Continue anyway — worse case we double-spawn on the next
+        # tick. Logging this for ops awareness.
+
+    # Both sides online card to the GROUP — mirrors what the old
+    # in-process wait helper used to post.
+    online_body = format_event({"type": "investor_both_online"})
+    if online_body:
+        sender(group_chat_id, message=online_body)
+
+    # Re-hydrate mint + constraints from disk.
+    try:
+        config = json.loads((out / "config.json").read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        sys.stderr.write(f"investor resume: loading config.json: {e}\n")
+        return 3
+    try:
+        mint = json.loads((out / "mint.json").read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        sys.stderr.write(f"investor resume: loading mint.json: {e}\n")
+        return 3
+
+    investor_dm = str(state.get("investor_dm_chat_id") or "")
+    bot_username = os.environ.get("TELEGRAM_BOT_USERNAME", "AgenticPOAInvestor_bot")
+    history_neg_id = mint.get("negotiation_id")
+
+    stream_rc, signing_event = _stream_to_telegram(
+        output_dir=out,
+        chat_id=investor_dm,
+        constraints=config.get("constraints"),
+        bot_username=bot_username,
+        group_chat_id=group_chat_id,
+        negotiation_id=history_neg_id,
+        sshsign_host=sshsign_host,
+    )
+
+    if stream_rc != 0 or not signing_event:
+        # Stream failed before signing. Leave pointer in place so a
+        # retry can re-attempt; in practice run_distributed completion
+        # should always emit a signing event when it gets that far.
+        return stream_rc
+
+    pending_id = signing_event.get("pending_id") or ""
+    if not pending_id:
+        return 0
+
+    # Joiner finalize path — investor waits for founder's complete-
+    # session, then runs local finalize + posts the executed PDF.
+    rc = _joiner_await_sign_and_finalize(
+        output_dir=out,
+        chat_id=investor_dm,
+        sshsign_host=sshsign_host,
+        pending_id=pending_id,
+        session_id=session_id,
+        group_chat_id=group_chat_id,
+    )
+    state_store.delete_state(negotiation_id)
+    return rc
+
+
 def run_scan(
     session_client=None,
     sender=send_telegram,
@@ -3335,13 +3425,24 @@ def run_scan(
         return 0
 
     for state in pointers:
+        # Dispatch by role. Pointers written before symmetric Path 1
+        # (no `role` field) default to founder for back-compat.
+        role = (state.get("role") or "founder").lower()
         try:
-            _run_founder_resume(
-                state,
-                session_client=session_client,
-                sender=sender,
-                now_fn=now_fn,
-            )
+            if role == "investor":
+                _run_investor_resume(
+                    state,
+                    session_client=session_client,
+                    sender=sender,
+                    now_fn=now_fn,
+                )
+            else:
+                _run_founder_resume(
+                    state,
+                    session_client=session_client,
+                    sender=sender,
+                    now_fn=now_fn,
+                )
         except Exception as e:
             # Contain per-pointer failures so one bad session doesn't
             # halt the tick; the next cron run re-attempts.
