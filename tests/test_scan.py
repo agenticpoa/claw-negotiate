@@ -194,6 +194,42 @@ class TestRunFounderResumePath1StateMachine:
         # Critical: NO new card emitted — we're already in phase A-done.
         assert sender.call_count == 0
 
+    def test_phase_a_local_marker_suppresses_duplicate_card(
+        self, state_record, fake_client, monkeypatch, founder_output_dir,
+    ):
+        """If two scan/reconcile paths race before sshsign's resumed_at
+        reflects the first one, the local marker still prevents a duplicate
+        founder DM prompt.
+        """
+        fake_client.get_session.return_value["group_chat_id"] = 0
+        fake_client.get_session.return_value["metadata_public"] = (
+            '{"founder_bot_handle": "AgenticPOA_bot"}'
+        )
+        fake_client.get_session.return_value["members"][1]["bot_handle"] = (
+            "AgenticPOAInvestor_bot"
+        )
+        (founder_output_dir / ".group_prompted_neg_abc").write_text("1\n")
+        monkeypatch.setattr(rs, "_resolve_group_chat_id", lambda *a, **kw: None)
+        sender = MagicMock()
+
+        with patch.object(rs, "_stream_to_telegram") as stream:
+            rc = rs._run_founder_resume(
+                state_record, session_client=fake_client, sender=sender,
+                now_fn=lambda: 1714000000,
+            )
+
+        assert rc == 0
+        stream.assert_not_called()
+        sender.assert_not_called()
+        fields_written = [
+            (kw.get("field") or a[1])
+            for a, kw in (
+                (c.args, c.kwargs)
+                for c in fake_client.update_session_member.call_args_list
+            )
+        ]
+        assert "founder_resumed_at" in fields_written
+
     def test_phase_b_runs_stream_when_group_appears(
         self, state_record, fake_client, monkeypatch,
     ):

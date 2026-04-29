@@ -316,6 +316,25 @@ class TestHasActiveNegotiation:
 # ─── integration: run_prepare blocks correctly ────────────────────────────
 
 class TestRunPrepareWithGates:
+    def test_startgroup_payload_is_noop_before_gates(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("NEGOTIATE_SAFE_BOT_ROLE", "founder")
+        sender = MagicMock()
+        with patch.object(rs, "_identity_configured") as identity, \
+             patch.object(rs, "extract_constraints") as parse, \
+             patch.object(rs, "_has_active_negotiation") as active, \
+             patch.object(rs, "resolve_chat_id", return_value="-100123"):
+            rc = rs.run_prepare(
+                "/start@AgenticPOA_bot INV-7K3X9",
+                str(tmp_path / "out"),
+                sender=sender,
+            )
+        assert rc == 0
+        identity.assert_not_called()
+        parse.assert_not_called()
+        active.assert_not_called()
+        msgs = [c.kwargs.get("message") or c.args[1] for c in sender.call_args_list]
+        assert any("/bind INV-7K3X9" in m for m in msgs)
+
     def test_wrong_bot_role_blocks_before_parse(self, tmp_path, monkeypatch):
         monkeypatch.setenv("NEGOTIATE_SAFE_BOT_ROLE", "founder")
         sender = MagicMock()

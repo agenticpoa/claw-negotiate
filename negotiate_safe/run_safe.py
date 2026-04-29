@@ -427,6 +427,23 @@ _INVESTOR_HINT_RE = re.compile(
     re.IGNORECASE,
 )
 
+_STARTGROUP_PAYLOAD_RE = re.compile(
+    r"^\s*/start(?:@\w+)?\s+(INV-[A-Z0-9]+)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _telegram_startgroup_payload(message: str) -> str | None:
+    """Return INV code from Telegram's startgroup deep-link payload.
+
+    Tapping an "add bot to group" button can produce a `/start@bot INV-...`
+    message in the target group. That is transport plumbing, not a new SAFE
+    request, so prepare should acknowledge it and stop before role/active
+    negotiation gates.
+    """
+    m = _STARTGROUP_PAYLOAD_RE.match(message or "")
+    return m.group(1).upper() if m else None
+
 
 def _classify_bot_role() -> str | None:
     """Return the bot's configured role per env, or None if unset.
@@ -718,6 +735,17 @@ def run_prepare(
 
     # Resolve chat_id first so we can push an interstitial before the slow parse.
     chat_id = resolve_chat_id(chat_id_flag)
+
+    startgroup_code = _telegram_startgroup_payload(message)
+    if startgroup_code:
+        if chat_id:
+            sender(chat_id, message=(
+                "✅ Bot added.\n\n"
+                "When both bots are in this group, paste:\n"
+                f"`/bind {startgroup_code}`"
+            ))
+        write_trace(out, "prepare.noop", phase="prepare", reason="startgroup_payload", chat_id=chat_id, session_code=startgroup_code)
+        return 0
 
     # Gate 1: bot-role pre-check. Reject obviously wrong-bot requests
     # (investor-shaped to founder bot or vice versa) BEFORE we burn a
@@ -3169,11 +3197,21 @@ def _run_founder_resume(
             "founder_bot_handle": founder_handle,
             "investor_bot_handle": investor_handle,
         })
+        should_send_group_prompt = False
+        marker = out / f".group_prompted_{negotiation_id}"
+        try:
+            with marker.open("x") as f:
+                f.write("1\n")
+            should_send_group_prompt = True
+        except FileExistsError:
+            pass
+        except OSError:
+            should_send_group_prompt = not marker.exists()
         # Founder DM chat_id was persisted to the state pointer at
         # mint time. config.json is the constraints/identity blob;
         # it does NOT carry chat_id, so we MUST read from state here.
         founder_dm_for_card = str(state.get("founder_dm_chat_id") or "")
-        if cg_body and founder_dm_for_card:
+        if cg_body and founder_dm_for_card and should_send_group_prompt:
             sender(founder_dm_for_card, message=cg_body, reply_markup=cg_markup)
 
         try:

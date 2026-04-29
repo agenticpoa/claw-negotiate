@@ -87,8 +87,14 @@ def _send_group_setup_if_needed(
     if not dm_chat_id:
         return False
     marker = _group_prompt_marker(output_dir, negotiation_id)
-    if marker.exists():
+    try:
+        with marker.open("x") as f:
+            f.write("1\n")
+    except FileExistsError:
         return False
+    except OSError:
+        if marker.exists():
+            return False
 
     founder_handle = ""
     investor_handle = ""
@@ -127,10 +133,6 @@ def _send_group_setup_if_needed(
     if not body:
         return False
     sender(dm_chat_id, message=body, reply_markup=markup)
-    try:
-        marker.write_text("1")
-    except OSError:
-        pass
     return True
 
 
