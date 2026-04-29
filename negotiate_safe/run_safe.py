@@ -2127,7 +2127,10 @@ def run_negotiate(output_dir: str, chat_id_flag: str | None = None) -> int:
     tg_user_id: int | None = None
     if chat_id:
         try:
-            cid = int(chat_id)
+            cid_raw = str(chat_id)
+            if ":" in cid_raw:
+                cid_raw = cid_raw.rsplit(":", 1)[-1]
+            cid = int(cid_raw)
             if cid > 0:
                 tg_user_id = cid
         except ValueError:
@@ -3686,7 +3689,16 @@ def run_bind(
     except (json.JSONDecodeError, TypeError):
         meta = {}
     expected_user_id = (meta.get("telegram") or {}).get("founder_user_id")
-    if not expected_user_id or int(expected_user_id) != int(from_user_id):
+    if not expected_user_id:
+        session_id_for_state = sess.get("session_id") or ""
+        negotiation_id_for_state = _negotiation_id_from_sshsign_session_id(session_id_for_state)
+        local_state = state_store.read_state(negotiation_id_for_state) if negotiation_id_for_state else None
+        expected_user_id = (local_state or {}).get("founder_dm_chat_id")
+    try:
+        caller_matches_founder = bool(expected_user_id) and int(str(expected_user_id)) == int(from_user_id)
+    except (TypeError, ValueError):
+        caller_matches_founder = False
+    if not caller_matches_founder:
         body = format_event({"type": "bind_wrong_user"})
         if body:
             sender(str(group_chat_id), message=body)

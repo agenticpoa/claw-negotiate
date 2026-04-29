@@ -295,6 +295,64 @@ class TestAuditList:
             client.audit_session("neg_1")
 
 
+class TestDeliveryClaims:
+    def test_claim_delivery_builds_correct_argv(self):
+        runner = MagicMock(return_value=_cp(0, json.dumps({
+            "session_id": "neg_1",
+            "key": "group:round:0:founder",
+            "target": "-100",
+            "delivered_by": "alice",
+            "delivered_at": "2026-04-29T18:30:00Z",
+            "created": True,
+        })))
+        client = ss.SshsignSession(runner=runner)
+
+        result = client.claim_delivery(
+            "neg_1",
+            "group:round:0:founder",
+            target="-100",
+            message_id="77",
+        )
+
+        assert result["created"] is True
+        argv = runner.call_args[0][0]
+        assert argv[:3] == ["ssh", "sshsign.dev", "claim-delivery"]
+        assert argv[argv.index("--session-id") + 1] == "neg_1"
+        assert argv[argv.index("--key") + 1] == "group:round:0:founder"
+        assert argv[argv.index("--target") + 1] == "-100"
+        assert argv[argv.index("--message-id") + 1] == "77"
+
+    def test_get_delivery_builds_correct_argv(self):
+        runner = MagicMock(return_value=_cp(0, json.dumps({
+            "session_id": "neg_1",
+            "key": "group:round:0:founder",
+            "delivered_by": "alice",
+            "delivered_at": "2026-04-29T18:30:00Z",
+        })))
+        client = ss.SshsignSession(runner=runner)
+        client.get_delivery("neg_1", "group:round:0:founder")
+        argv = runner.call_args[0][0]
+        assert argv[:3] == ["ssh", "sshsign.dev", "get-delivery"]
+        assert argv[argv.index("--key") + 1] == "group:round:0:founder"
+
+    def test_list_deliveries_returns_list(self):
+        deliveries = [{
+            "session_id": "neg_1",
+            "key": "group:round:0:founder",
+            "delivered_by": "alice",
+            "delivered_at": "2026-04-29T18:30:00Z",
+        }]
+        runner = MagicMock(return_value=_cp(0, json.dumps(deliveries)))
+        client = ss.SshsignSession(runner=runner)
+        assert client.list_deliveries("neg_1") == deliveries
+
+    def test_list_deliveries_rejects_non_list_response(self):
+        runner = MagicMock(return_value=_cp(0, json.dumps({"not": "a list"})))
+        client = ss.SshsignSession(runner=runner)
+        with pytest.raises(ss.SshsignSessionError, match="expected delivery list"):
+            client.list_deliveries("neg_1")
+
+
 class TestUpdateSessionMember:
     def test_builds_correct_argv_for_resumed_at(self):
         runner = MagicMock(return_value=_cp(0, json.dumps({"ok": True})))

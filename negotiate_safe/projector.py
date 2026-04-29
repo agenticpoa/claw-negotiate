@@ -23,6 +23,28 @@ def delivery_key(event: dict) -> str:
     return f"{etype}:{event.get('id') or event.get('round') or ''}"
 
 
+def _delivery_target(*, event: dict, dm_chat_id: str, group_chat_id: str | None) -> str:
+    if event.get("type") == "signing" and group_chat_id:
+        return f"dm:{dm_chat_id};group:{group_chat_id}"
+    return str(group_chat_id or dm_chat_id)
+
+
+def _claim_delivery(
+    *,
+    delivery_client,
+    session_id: str,
+    key: str,
+    target: str,
+) -> bool:
+    if delivery_client is None:
+        if delivery_store.has_delivery(session_id, key):
+            return False
+        return True
+
+    payload = delivery_client.claim_delivery(session_id, key, target=target)
+    return bool(payload.get("created"))
+
+
 def project_event(
     *,
     session_id: str,
@@ -32,15 +54,32 @@ def project_event(
     group_chat_id: str | None,
     sender: Callable = send_telegram,
     dm_sender: Callable = send_signing_url_to_dm,
+    delivery_client=None,
 ) -> bool:
+    role = (constraints or {}).get("role") or ""
+    if event.get("type") in ("offer", "counter", "accept"):
+        party = event.get("party") or ""
+        if role in ("founder", "investor") and party and party != role:
+            return False
+
     key = delivery_key(event)
-    if delivery_store.has_delivery(session_id, key):
-        return False
     if not should_publish_stream_event(event, constraints, group_chat_id):
         return False
 
     message = format_event(event, constraints=constraints)
     if not message:
+        return False
+    target = _delivery_target(
+        event=event,
+        dm_chat_id=str(dm_chat_id),
+        group_chat_id=str(group_chat_id) if group_chat_id else None,
+    )
+    if not _claim_delivery(
+        delivery_client=delivery_client,
+        session_id=session_id,
+        key=key,
+        target=target,
+    ):
         return False
     route_stream_message(
         event=event,
@@ -51,11 +90,8 @@ def project_event(
         sender=sender,
         dm_sender=dm_sender,
     )
-    if event.get("type") == "signing" and group_chat_id:
-        target = f"dm:{dm_chat_id};group:{group_chat_id}"
-    else:
-        target = str(group_chat_id or dm_chat_id)
-    delivery_store.mark_delivery(session_id, key, target)
+    if delivery_client is None:
+        delivery_store.mark_delivery(session_id, key, target)
     return True
 
 
@@ -68,6 +104,7 @@ def project_history(
     group_chat_id: str | None,
     sender: Callable = send_telegram,
     dm_sender: Callable = send_signing_url_to_dm,
+    delivery_client=None,
 ) -> int:
     count = 0
     for row in history_rows:
@@ -82,6 +119,7 @@ def project_history(
             group_chat_id=group_chat_id,
             sender=sender,
             dm_sender=dm_sender,
+            delivery_client=delivery_client,
         ):
             count += 1
     return count

@@ -16,6 +16,7 @@ from pathlib import Path
 
 import projector
 from artifacts import build_artifact_uri
+from format_event import format_event
 from reconcile import has_executed_delivered, mark_executed_delivered
 from session_flow import sshsign_session_id
 from sshsign_session import LeaseHeldError, SshsignSession, SshsignSessionError
@@ -68,6 +69,64 @@ def _session_group_chat_id(sess: dict) -> str | None:
     if raw in (None, "", 0, "0"):
         return None
     return str(raw)
+
+
+def _group_prompt_marker(output_dir: Path, negotiation_id: str) -> Path:
+    return output_dir / f".group_prompted_{negotiation_id}"
+
+
+def _send_group_setup_if_needed(
+    *,
+    output_dir: Path,
+    negotiation_id: str,
+    session_code: str,
+    sess: dict,
+    dm_chat_id: str,
+    sender,
+) -> bool:
+    if not dm_chat_id:
+        return False
+    marker = _group_prompt_marker(output_dir, negotiation_id)
+    if marker.exists():
+        return False
+
+    founder_handle = ""
+    investor_handle = ""
+    investor_label = "your investor"
+    try:
+        meta_pub_raw = sess.get("metadata_public") or "{}"
+        meta_pub = json.loads(meta_pub_raw) if isinstance(meta_pub_raw, str) else (meta_pub_raw or {})
+        founder_handle = (meta_pub.get("founder_bot_handle") or "").strip()
+        inv_name = (meta_pub.get("investor_name") or "").strip()
+        inv_firm = (meta_pub.get("investor_firm") or "").strip()
+        if inv_name and inv_firm:
+            investor_label = f"{inv_name} at {inv_firm}"
+        elif inv_name or inv_firm:
+            investor_label = inv_name or inv_firm
+        for member in sess.get("members") or []:
+            if not isinstance(member, dict):
+                continue
+            if (member.get("role") or "").lower() == "investor":
+                investor_handle = (member.get("bot_handle") or "").strip()
+                break
+    except (json.JSONDecodeError, AttributeError):
+        pass
+
+    body = format_event({
+        "type": "create_group_for_founder",
+        "session_code": session_code,
+        "founder_bot_handle": founder_handle,
+        "investor_bot_handle": investor_handle,
+        "investor_label": investor_label,
+    })
+    if not body:
+        return False
+    sender(dm_chat_id, message=body)
+    try:
+        marker.write_text("1")
+    except OSError:
+        pass
+    return True
 
 
 def _due_role(history_rows: list[dict]) -> str:
@@ -263,7 +322,26 @@ def reconcile_state(
     if status not in ("joined", "created"):
         return ReconcileResult(f"terminal:{status}")
     group_chat_id = _session_group_chat_id(sess)
-    if status != "joined" or not group_chat_id:
+    if status != "joined":
+        return ReconcileResult("waiting_for_group")
+    if not group_chat_id:
+        if role == "founder":
+            sent = _send_group_setup_if_needed(
+                output_dir=output_dir,
+                negotiation_id=negotiation_id,
+                session_code=state.get("session_code") or sess.get("session_code") or "",
+                sess=sess,
+                dm_chat_id=dm_chat_id,
+                sender=sender,
+            )
+            if sent:
+                write_trace(
+                    output_dir,
+                    "orchestrator.group_prompted",
+                    negotiation_id=negotiation_id,
+                    role=role,
+                    chat_id=dm_chat_id,
+                )
         return ReconcileResult("waiting_for_group")
 
     rows = history_fn(negotiation_id, sshsign_host=sshsign_host) or []
@@ -275,6 +353,7 @@ def reconcile_state(
         group_chat_id=group_chat_id,
         sender=sender,
         dm_sender=dm_sender,
+        delivery_client=client,
     )
 
     if _accepted(rows):
@@ -317,6 +396,7 @@ def reconcile_state(
                             group_chat_id=group_chat_id,
                             sender=sender,
                             dm_sender=dm_sender,
+                            delivery_client=client,
                         ):
                             projected += 1
                         return ReconcileResult(
@@ -475,6 +555,7 @@ def reconcile_state(
                 group_chat_id=group_chat_id,
                 sender=sender,
                 dm_sender=dm_sender,
+                delivery_client=client,
             ):
                 projected += 1
     finally:

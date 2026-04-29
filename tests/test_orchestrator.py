@@ -105,6 +105,63 @@ def test_reconcile_waits_when_counterparty_due(tmp_path, monkeypatch):
     client.acquire_lease.assert_not_called()
 
 
+def test_reconcile_prompts_founder_to_bind_group_after_investor_joins(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAW_NEGOTIATE_DELIVERY_DIR", str(tmp_path / "deliveries"))
+    client = _client()
+    client.get_session.return_value = {
+        "session_id": "session_neg_1",
+        "session_code": "INV-1",
+        "status": "joined",
+        "group_chat_id": 0,
+        "metadata_public": json.dumps({
+            "founder_bot_handle": "AgenticPOA_bot",
+            "investor_name": "Nora Vassileva",
+            "investor_firm": "SD Fund",
+        }),
+        "members": [{"role": "investor", "bot_handle": "@AgenticPOAInvestor_bot"}],
+    }
+    sender = MagicMock()
+
+    result = orchestrator.reconcile_state(
+        _state(tmp_path, "founder"),
+        session_client=client,
+        sender=sender,
+        history_fn=lambda *a, **k: [],
+        turn_runner=MagicMock(),
+    )
+
+    assert result.status == "waiting_for_group"
+    message = sender.call_args.kwargs["message"]
+    assert "/bind INV-1" in message
+    assert "Nora Vassileva at SD Fund" in message
+
+
+def test_reconcile_does_not_repeat_group_bind_prompt(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAW_NEGOTIATE_DELIVERY_DIR", str(tmp_path / "deliveries"))
+    client = _client()
+    client.get_session.return_value = {
+        "session_id": "session_neg_1",
+        "session_code": "INV-1",
+        "status": "joined",
+        "group_chat_id": 0,
+    }
+    state = _state(tmp_path, "founder")
+    out = Path(state["output_dir"])
+    (out / ".group_prompted_neg_1").write_text("1")
+    sender = MagicMock()
+
+    result = orchestrator.reconcile_state(
+        state,
+        session_client=client,
+        sender=sender,
+        history_fn=lambda *a, **k: [],
+        turn_runner=MagicMock(),
+    )
+
+    assert result.status == "waiting_for_group"
+    sender.assert_not_called()
+
+
 def test_reconcile_requests_local_signature_after_accept(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAW_NEGOTIATE_DELIVERY_DIR", str(tmp_path / "deliveries"))
     client = _client()

@@ -318,6 +318,43 @@ class SshsignSession:
             f"expected audit list, got: {type(result).__name__}"
         )
 
+    def claim_delivery(
+        self,
+        session_id: str,
+        key: str,
+        target: str = "",
+        message_id: str = "",
+    ) -> dict[str, Any]:
+        """Member-only. Atomically claim a durable idempotency key.
+
+        The first caller receives ``{"created": true}``; later callers get
+        the existing delivery with ``created`` omitted/false and must suppress
+        the Telegram side effect.
+        """
+        flags = ["--session-id", session_id, "--key", key]
+        if target:
+            flags += ["--target", str(target)]
+        if message_id:
+            flags += ["--message-id", str(message_id)]
+        return self._run("claim-delivery", *flags)
+
+    def get_delivery(self, session_id: str, key: str) -> dict[str, Any]:
+        """Member-only. Read one durable delivery claim."""
+        return self._run(
+            "get-delivery",
+            "--session-id", session_id,
+            "--key", key,
+        )
+
+    def list_deliveries(self, session_id: str) -> list[dict[str, Any]]:
+        """Member-only. Return all durable delivery claims for a session."""
+        result = self._run("list-deliveries", "--session-id", session_id)
+        if isinstance(result, list):
+            return result
+        raise SshsignSessionError(
+            f"expected delivery list, got: {type(result).__name__}"
+        )
+
     # P7-5: creator-only field updates on the caller's own member row.
     # Whitelist enforced client-side AND server-side; the server is the
     # authority, this check is a fast-fail for typos.

@@ -560,6 +560,19 @@ class TestNegotiate:
         assert kwargs["chat_id"] == "12345"
         assert kwargs["constraints"] == sample_constraints
 
+    def test_telegram_prefixed_chat_id_is_threaded_to_mint(
+        self, tmp_path, sample_constraints,
+    ):
+        self._write_config(tmp_path, sample_constraints)
+
+        with patch.object(rs, "run_mint", return_value=0) as mock_mint, \
+             patch.object(rs, "_stream_to_telegram", return_value=(0, None)), \
+             patch.object(rs, "resolve_chat_id", return_value="telegram:12345"):
+            rc = rs.run_negotiate(str(tmp_path), chat_id_flag="telegram:12345")
+
+        assert rc == 0
+        assert mock_mint.call_args.kwargs["telegram_user_id"] == 12345
+
     def test_chat_negotiate_suppresses_mint_stdout(
         self, tmp_path, sample_constraints, capsys,
     ):
@@ -4242,6 +4255,38 @@ class TestRunBind:
 
         assert rc == 2
         client.bind_group.assert_not_called()
+
+    def test_missing_founder_user_id_can_fall_back_to_local_state(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CLAW_NEGOTIATE_STATE_DIR", str(tmp_path / "state"))
+        rs.state_store.write_state({
+            "negotiation_id": "neg_abc",
+            "output_dir": str(tmp_path),
+            "session_code": "INV-OLD",
+            "role": "founder",
+            "founder_dm_chat_id": "111",
+        })
+        client = MagicMock()
+        client.get_session.return_value = {
+            "session_id": "session_neg_abc",
+            "session_code": "INV-OLD",
+            "metadata_member": json.dumps({
+                "investor_name": "Alex",
+                "investor_firm": "Blue",
+            }),
+        }
+        client.bind_group.return_value = {"status": "joined"}
+
+        sender = MagicMock()
+        rc = rs.run_bind(
+            session_code="INV-OLD",
+            group_chat_id=-1001234,
+            from_user_id=111,
+            sender=sender,
+            session_client=client,
+        )
+
+        assert rc == 0
+        client.bind_group.assert_called_once_with("session_neg_abc", -1001234)
 
     def test_ssh_transport_error_returns_3(self):
         from sshsign_session import SshsignSessionError
