@@ -4288,6 +4288,35 @@ class TestRunBind:
         assert rc == 0
         client.bind_group.assert_called_once_with("session_neg_abc", -1001234)
 
+    def test_bind_reconstructs_missing_founder_state_and_reconciles(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CLAW_NEGOTIATE_STATE_DIR", str(tmp_path / "state"))
+        monkeypatch.setenv("CLAW_NEGOTIATE_OUTPUT_DIR", str(tmp_path))
+        (tmp_path / "config.json").write_text(json.dumps({"constraints": {"role": "founder"}}))
+        (tmp_path / "mint.json").write_text(json.dumps({"negotiation_id": "neg_abc"}))
+
+        client = MagicMock()
+        client.get_session.return_value = self._founder_session(
+            founder_user_id=111,
+            session_id="session_neg_abc",
+        ) | {"status": "joined"}
+        client.bind_group.return_value = {"status": "joined"}
+        reconcile = MagicMock()
+        monkeypatch.setattr(rs.orchestrator, "reconcile_state", reconcile)
+
+        rc = rs.run_bind(
+            session_code="INV-TEST1",
+            group_chat_id=-1001234,
+            from_user_id=111,
+            sender=MagicMock(),
+            session_client=client,
+        )
+
+        assert rc == 0
+        state = rs.state_store.read_state("neg_abc")
+        assert state["role"] == "founder"
+        assert state["founder_dm_chat_id"] == "111"
+        reconcile.assert_called_once()
+
     def test_ssh_transport_error_returns_3(self):
         from sshsign_session import SshsignSessionError
         client = MagicMock()
@@ -4303,6 +4332,32 @@ class TestRunBind:
         )
 
         assert rc == 3
+
+
+class TestRunScan:
+    def test_deletes_stale_pointer_whose_output_dir_now_belongs_to_newer_mint(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CLAW_NEGOTIATE_STATE_DIR", str(tmp_path / "state"))
+        monkeypatch.setenv("CLAW_NEGOTIATE_SCAN_MIN_INTERVAL", "0")
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "mint.json").write_text(json.dumps({"negotiation_id": "neg_new"}))
+        rs.state_store.write_state({
+            "negotiation_id": "neg_old",
+            "output_dir": str(out),
+            "session_code": "INV-OLD",
+        })
+        reconcile = MagicMock(return_value=[])
+        monkeypatch.setattr(rs.orchestrator, "reconcile_active", reconcile)
+
+        rc = rs.run_scan(now_fn=lambda: 100.0)
+
+        assert rc == 0
+        assert rs.state_store.read_state("neg_old") is None
+        reconcile.assert_called_once_with(
+            states=[],
+            session_client=None,
+            sender=rs.send_telegram,
+        )
 
     def test_cli_dispatches_bind_extracting_code_from_message(self, tmp_path, monkeypatch):
         monkeypatch.setattr(sys, "argv", [

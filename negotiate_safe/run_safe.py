@@ -3606,7 +3606,17 @@ def run_scan(
         sys.stderr.write(f"scan throttle: {e}\n")
 
     _hydrate_scan_env_from_openclaw_config()
-    states = state_store.list_active()
+    states = []
+    for state in state_store.list_active():
+        negotiation_id = state.get("negotiation_id") or ""
+        output_dir = Path(state.get("output_dir") or "")
+        if negotiation_id and output_dir and not _state_matches_output_dir(negotiation_id, output_dir):
+            try:
+                state_store.delete_state(negotiation_id)
+            except Exception as e:  # noqa: BLE001
+                sys.stderr.write(f"scan: stale cleanup: {e}\n")
+            continue
+        states.append(state)
     results = orchestrator.reconcile_active(
         states=states,
         session_client=session_client,
@@ -3619,6 +3629,40 @@ def run_scan(
             except Exception as e:  # noqa: BLE001
                 sys.stderr.write(f"scan: terminal cleanup: {e}\n")
     return 0
+
+
+def _reconstruct_founder_state_for_bind(
+    *,
+    negotiation_id: str,
+    session_code: str,
+    founder_dm_chat_id: str,
+    output_dir: str | None = None,
+) -> dict | None:
+    """Build the minimal founder state pointer when the local JSON is missing.
+
+    `/bind` is the founder's explicit wakeup. If the durable session and
+    local config/mint files exist, the skill should not get stuck just
+    because the tiny state pointer was lost or not written.
+    """
+    if not negotiation_id:
+        return None
+    out = Path(output_dir or os.environ.get("CLAW_NEGOTIATE_OUTPUT_DIR", "/tmp/safe_negotiate"))
+    if not _state_matches_output_dir(negotiation_id, out):
+        return None
+    if not (out / "config.json").exists() or not (out / "mint.json").exists():
+        return None
+    state = {
+        "negotiation_id": negotiation_id,
+        "output_dir": str(out),
+        "session_code": session_code,
+        "role": "founder",
+        "founder_dm_chat_id": str(founder_dm_chat_id or ""),
+    }
+    try:
+        state_store.write_state(state)
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write(f"bind: reconstruct state failed: {e}\n")
+    return state
 
 
 def run_bind(
@@ -3753,6 +3797,12 @@ def run_bind(
     if status == "joined":
         negotiation_id = _negotiation_id_from_sshsign_session_id(session_id)
         state = state_store.read_state(negotiation_id)
+        if not state:
+            state = _reconstruct_founder_state_for_bind(
+                negotiation_id=negotiation_id,
+                session_code=sess.get("session_code") or session_code,
+                founder_dm_chat_id=str(expected_user_id or from_user_id),
+            )
         if state:
             orchestrator.reconcile_state(
                 state,
