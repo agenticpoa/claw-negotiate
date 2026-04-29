@@ -58,11 +58,65 @@ class GroupAlreadyBoundError(SshsignSessionError):
     to change the binding."""
 
 
+class LeaseHeldError(SshsignSessionError):
+    """Another live worker owns the requested workflow lease."""
+
+    def __init__(self, message: str, holder: str = "", expires_at: str = ""):
+        super().__init__(message)
+        self.holder = holder
+        self.expires_at = expires_at
+
+
+class LeaseNotHeldError(SshsignSessionError):
+    """No current lease row exists for the requested key."""
+
+
+class LeaseHolderMismatchError(SshsignSessionError):
+    """The caller's holder/generation is stale or does not own the lease."""
+
+
+class LeaseExpiredError(SshsignSessionError):
+    """The caller's lease existed but has expired."""
+
+
+class InvalidLeaseError(SshsignSessionError):
+    """Invalid lease action, TTL, or generation."""
+
+
 # Map sshsign's error strings back to Python exception classes. sshsign
 # returns plain-text error strings via JSON {"error": "..."}, so we match
 # on substrings. Brittle-ish but gives callers useful types.
+def _error_from_payload(payload: dict[str, Any]) -> SshsignSessionError:
+    msg = str(payload.get("error") or "")
+    if msg == "lease_held":
+        return LeaseHeldError(
+            msg,
+            holder=str(payload.get("holder") or ""),
+            expires_at=str(payload.get("expires_at") or ""),
+        )
+    if msg == "lease_not_held":
+        return LeaseNotHeldError(msg)
+    if msg == "lease_holder_mismatch":
+        return LeaseHolderMismatchError(msg)
+    if msg == "lease_expired":
+        return LeaseExpiredError(msg)
+    if msg in ("invalid_lease_action", "invalid_lease_ttl", "invalid_lease_generation"):
+        return InvalidLeaseError(msg)
+    return _error_from_message(msg)
+
+
 def _error_from_message(msg: str) -> SshsignSessionError:
     m = msg.lower()
+    if "lease_held" in m:
+        return LeaseHeldError(msg)
+    if "lease_not_held" in m:
+        return LeaseNotHeldError(msg)
+    if "lease_holder_mismatch" in m:
+        return LeaseHolderMismatchError(msg)
+    if "lease_expired" in m:
+        return LeaseExpiredError(msg)
+    if "invalid_lease" in m:
+        return InvalidLeaseError(msg)
     if "not found" in m or "session not found" in m:
         return SessionNotFoundError(msg)
     if "expired" in m:
@@ -138,7 +192,7 @@ class SshsignSession:
             ) from e
 
         if isinstance(payload, dict) and payload.get("error"):
-            raise _error_from_message(str(payload["error"]))
+            raise _error_from_payload(payload)
         return payload
 
     # ------------------------------------------------------------------
@@ -314,4 +368,76 @@ class SshsignSession:
             "--session-id", session_id,
             "--field", field,
             "--text-value", str(text_value),
+        )
+
+    def acquire_lease(
+        self,
+        session_id: str,
+        role: str,
+        action: str,
+        holder: str,
+        ttl_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        flags = [
+            "--session-id", session_id,
+            "--role", role,
+            "--action", action,
+            "--holder", holder,
+        ]
+        if ttl_seconds is not None:
+            flags += ["--ttl", str(int(ttl_seconds))]
+        return self._run("acquire-lease", *flags)
+
+    def refresh_lease(
+        self,
+        session_id: str,
+        role: str,
+        action: str,
+        holder: str,
+        generation: int,
+        ttl_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        flags = [
+            "--session-id", session_id,
+            "--role", role,
+            "--action", action,
+            "--holder", holder,
+            "--generation", str(int(generation)),
+        ]
+        if ttl_seconds is not None:
+            flags += ["--ttl", str(int(ttl_seconds))]
+        return self._run("refresh-lease", *flags)
+
+    def check_lease(
+        self,
+        session_id: str,
+        role: str,
+        action: str,
+        holder: str,
+        generation: int,
+    ) -> dict[str, Any]:
+        return self._run(
+            "check-lease",
+            "--session-id", session_id,
+            "--role", role,
+            "--action", action,
+            "--holder", holder,
+            "--generation", str(int(generation)),
+        )
+
+    def release_lease(
+        self,
+        session_id: str,
+        role: str,
+        action: str,
+        holder: str,
+        generation: int,
+    ) -> dict[str, Any]:
+        return self._run(
+            "release-lease",
+            "--session-id", session_id,
+            "--role", role,
+            "--action", action,
+            "--holder", holder,
+            "--generation", str(int(generation)),
         )

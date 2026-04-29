@@ -70,6 +70,31 @@ def _escape_md(s: str) -> str:
     )
 
 
+def _format_founder_identity(
+    founder_name: str | None,
+    founder_title: str | None,
+    company_name: str | None,
+) -> str | None:
+    if founder_name and founder_title and company_name:
+        return f"{founder_name}, {founder_title} of {company_name}"
+    if founder_name and founder_title:
+        return f"{founder_name}, {founder_title}"
+    if founder_name and company_name:
+        return f"{founder_name} of {company_name}"
+    if founder_name:
+        return founder_name
+    return company_name or None
+
+
+def _format_investor_identity(
+    investor_name: str | None,
+    investor_firm: str | None,
+) -> str | None:
+    if investor_name and investor_firm:
+        return f"{investor_name} at {investor_firm}"
+    return investor_name or investor_firm or None
+
+
 _PARTY_ICON = {"founder": "\U0001f464", "investor": "\U0001f4bc"}  # 👤, 💼
 
 _OFFER_LABELS = {"offer": "Offer", "counter": "Counter", "accept": "Accepted"}
@@ -83,14 +108,14 @@ _OFFER_LABELS = {"offer": "Offer", "counter": "Counter", "accept": "Accepted"}
 def format_confirm(event: dict[str, Any]) -> str:
     c = event["constraints"]
     labels = {
-        "required": "required (I won't agree without them)",
-        "preferred": "preferred (I'll push for it but can concede)",
-        "indifferent": "indifferent",
+        "required": "required",
+        "preferred": "preferred",
+        "indifferent": "no preference",
     }
     mfn_labels = {
-        "required": "required (I won't agree without it)",
-        "preferred": "preferred (I'll push for it but can concede)",
-        "indifferent": "indifferent",
+        "required": "required",
+        "preferred": "preferred",
+        "indifferent": "no preference",
     }
     role = (c.get("role") or "founder").lower()
     role_label = "founder" if role == "founder" else "investor"
@@ -104,50 +129,43 @@ def format_confirm(event: dict[str, Any]) -> str:
 
     # Build "You" and "Counterparty" lines based on the user's role. Show
     # only what was captured — omit missing pieces so the line stays clean.
-    def _format_founder_side() -> str:
-        parts = []
-        if founder_name and founder_title:
-            parts.append(f"{founder_name}, {founder_title}")
-        elif founder_name:
-            parts.append(founder_name)
-        if company_name:
-            prefix = "of " if parts else ""
-            parts.append(f"{prefix}{company_name}")
-        return ", ".join(parts) if parts else None
-
-    def _format_investor_side() -> str:
-        parts = []
-        if investor_name:
-            parts.append(investor_name)
-        if investor_firm:
-            prefix = "at " if parts else ""
-            parts.append(f"{prefix}{investor_firm}")
-        return ", ".join(parts) if parts else None
+    founder_line = _format_founder_identity(
+        founder_name, founder_title, company_name,
+    )
+    investor_line = _format_investor_identity(investor_name, investor_firm)
 
     if role == "founder":
-        you_line = _format_founder_side()
-        counterparty_line = _format_investor_side()
+        you_line = founder_line
+        counterparty_line = investor_line
+        confirm_cta = "Reply **GO** to create the invitation code, or send edits."
     else:
-        you_line = _format_investor_side()
-        counterparty_line = _format_founder_side()
+        you_line = investor_line
+        counterparty_line = founder_line
+        confirm_cta = "Reply **GO** to join the negotiation, or send edits."
 
-    identity_lines = [f"{role_icon} Negotiating as **{role_label}**."]
+    identity_lines = [
+        f"{role_icon} **Review your {role_label}-side authorization**",
+    ]
     if you_line:
         identity_lines.append(f"**You:** {you_line}")
     if counterparty_line:
         identity_lines.append(f"**Counterparty:** {counterparty_line}")
 
-    return (
-        "\n".join(identity_lines) + "\n\n"
-        "Please review the terms below and confirm:\n\n"
-        f"**Valuation cap:** {fmt_dollars(c['valuation_cap_min'])} – {fmt_dollars(c['valuation_cap_max'])}\n"
-        f"**Discount:** {fmt_percent(c['discount_min'])} or better\n"
-        f"**Pro-rata rights:** {labels[c['pro_rata']]}\n"
-        f"**MFN clause:** {mfn_labels[c['mfn']]}\n\n"
-        "I'll negotiate within these terms only. "
-        "You'll sign the final agreement yourself.\n\n"
-        "If these terms look right, reply **GO**. Otherwise, please send your edits."
-    )
+    lines = [
+        "\n".join(identity_lines),
+        "",
+        "Your agent will only agree to terms within these limits:",
+        "",
+        f"• Valuation cap: **{fmt_dollars(c['valuation_cap_min'])} – {fmt_dollars(c['valuation_cap_max'])}**",
+        f"• Discount: **at least {fmt_percent(c['discount_min'])}**",
+        f"• Pro-rata rights: {labels[c['pro_rata']]}",
+        f"• MFN: {mfn_labels[c['mfn']]}",
+        "",
+        "You will personally review and sign any final SAFE.",
+        "",
+        confirm_cta,
+    ]
+    return "\n".join(lines)
 
 
 def format_authorized(event: dict[str, Any]) -> str:
@@ -169,25 +187,24 @@ def format_authorized(event: dict[str, Any]) -> str:
     pr_labels = {
         "required": "required",
         "preferred": "preferred",
-        "indifferent": "indifferent",
+        "indifferent": "no preference",
     }
     ttl_hours = event.get("ttl_hours") or 1
 
     lines = [
         "\U0001f512 **Your agent's authorization is set**",  # 🔒
         "",
-        "Your agent will only agree to terms inside these bounds:",
+        "Your agent will only agree to terms within these limits:",
         "",
     ]
     if cap_min is not None and cap_max is not None:
         lines.append(
-            f"• Cap: **{fmt_dollars(cap_min)} – {fmt_dollars(cap_max)}** "
-            "(cannot go higher, cannot go lower)"
+            f"• Cap: **{fmt_dollars(cap_min)} – {fmt_dollars(cap_max)}**"
         )
     if disc_min is not None:
-        lines.append(f"• Discount: **\u2265 {fmt_percent(disc_min)}**")
+        lines.append(f"• Discount: **at least {fmt_percent(disc_min)}**")
     lines.append(f"• Pro-rata rights: {pr_labels.get(pro_rata, pro_rata)}")
-    lines.append(f"• MFN clause: {pr_labels.get(mfn, mfn)}")
+    lines.append(f"• MFN: {pr_labels.get(mfn, mfn)}")
     lines.extend([
         "",
         f"\u23f1\ufe0f  Valid for {ttl_hours} hour"  # ⏱
@@ -489,25 +506,35 @@ def format_invitation(event: dict[str, Any]) -> str:
     # Including a placeholder line for "your terms" makes the
     # required edit obvious; the investor knows to swap it for their
     # own cap/discount/etc. without us having to explain.
+    identity_fragment = ""
+    investor_name = (event.get("investor_name") or "").strip()
+    investor_firm = (event.get("investor_firm") or "").strip()
+    if investor_name and investor_firm:
+        identity_fragment = f"I am {investor_name} at {investor_firm}, "
+    elif investor_name:
+        identity_fragment = f"I am {investor_name}, "
+    elif investor_firm:
+        identity_fragment = f"I am at {investor_firm}, "
+
     join_template = (
         f"Joining {code} via {founder_bot}, "
-        f"cap up to $X, Y% discount, pro-rata required"
+        f"{identity_fragment}cap up to $X, Y% discount, pro-rata required"
         if founder_bot
-        else f"Joining {code} as investor, cap up to $X, Y% discount, "
-             "pro-rata required"
+        else f"Joining {code} as investor, {identity_fragment}cap up to $X, "
+             "Y% discount, pro-rata required"
     )
 
     lines = [
-        "🤝 **Live negotiation ready.**",  # 🤝
+        "🤝 **Ready to start live negotiation.**",  # 🤝
         "",
-        f"**Send {counterparty} this exact message** "
+        f"**Send this setup note to {counterparty}** "
         "(via Signal, SMS, email — whatever you already use):",
         "",
         "─────────────────────────",
-        "Negotiating a SAFE — your turn.",
+        "Please join our SAFE negotiation.",
         "",
-        "DM your investor agent on Telegram with this exact message "
-        "(replace cap/discount with your terms):",
+        "DM your investor agent on Telegram with this template, replacing "
+        "the cap and discount with your investor-side limits:",
         "",
         f"`{join_template}`",
         "─────────────────────────",

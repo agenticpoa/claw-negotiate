@@ -62,6 +62,9 @@ Identity fields (strings or null):
 - `founder_title`: the founder's title (CEO, Cofounder, etc.) — omit if not stated.
 - `investor_name`: the individual investor's full name (the person signing, not the fund).
 - `investor_firm`: the investor's firm, VC, or fund name.
+- Founder-side shorthand like "with Nora at Babes Fund", "my investor Nora at Babes Fund",
+  or "raising from Nora at Babes Fund" means `investor_name` is "Nora" and
+  `investor_firm` is "Babes Fund".
 Use null for any field the user did not mention; do not invent names.
 
 Role detection rules:
@@ -95,6 +98,9 @@ Output: {"role": "founder", "mode": "two_party", "session_code": null, "founder_
 Input: "Real negotiation with my investor. Cap $8M-$12M, 20% discount, pro-rata, MFN preferred. $500K. I'll share the code with them."
 Output: {"role": "founder", "mode": "two_party", "session_code": null, "founder_bot_handle": null, "valuation_cap_min": 8000000, "valuation_cap_max": 12000000, "discount_min": 0.20, "pro_rata": "required", "mfn": "preferred", "company_name": null, "founder_name": null, "founder_title": null, "investor_name": null, "investor_firm": null, "investment_amount": 500000.0}
 
+Input: "Live negotiation with Nora at Babes Fund. She'll join separately and I'll share the invitation code. Cap $30M to $40M, 10% discount, pro-rata required."
+Output: {"role": "founder", "mode": "two_party", "session_code": null, "founder_bot_handle": null, "valuation_cap_min": 30000000, "valuation_cap_max": 40000000, "discount_min": 0.10, "pro_rata": "required", "mfn": "indifferent", "company_name": null, "founder_name": null, "founder_title": null, "investor_name": "Nora", "investor_firm": "Babes Fund", "investment_amount": null}
+
 Investor-side examples (demo mode — AI plays the founder):
 
 Input: "As Alex Chen from Blue Fund, evaluate an investment in QuantumLabs (CEO Dr. Rivera). Cap between $20M and $40M, need at least a 15% discount. Pro-rata required, MFN nice to have. $500K check."
@@ -115,6 +121,9 @@ Investor join WITH the founder bot handle (the standard inverted-invitation shap
 
 Input: "Joining INV-7K3X9 via @AgenticPOA_bot, cap up to $40M, 10% discount, pro-rata required."
 Output: {"role": "investor", "mode": "two_party", "session_code": "INV-7K3X9", "founder_bot_handle": "@AgenticPOA_bot", "valuation_cap_min": 0, "valuation_cap_max": 40000000, "discount_min": 0.10, "pro_rata": "required", "mfn": "indifferent", "company_name": null, "founder_name": null, "founder_title": null, "investor_name": null, "investor_firm": null, "investment_amount": null}
+
+Input: "Joining INV-7K3X9 via @AgenticPOA_bot, I am Nora Vassileva at SD Fund, cap up to $35M, 10% discount, pro-rata required."
+Output: {"role": "investor", "mode": "two_party", "session_code": "INV-7K3X9", "founder_bot_handle": "@AgenticPOA_bot", "valuation_cap_min": 0, "valuation_cap_max": 35000000, "discount_min": 0.10, "pro_rata": "required", "mfn": "indifferent", "company_name": null, "founder_name": null, "founder_title": null, "investor_name": "Nora Vassileva", "investor_firm": "SD Fund", "investment_amount": null}
 
 Input: "Join INV-DEMO99 as investor. Founder bot is @alice_negotiator_bot. Cap $20M-$45M, 12% discount, pro-rata required. $750K."
 Output: {"role": "investor", "mode": "two_party", "session_code": "INV-DEMO99", "founder_bot_handle": "@alice_negotiator_bot", "valuation_cap_min": 20000000, "valuation_cap_max": 45000000, "discount_min": 0.12, "pro_rata": "required", "mfn": "indifferent", "company_name": null, "founder_name": null, "founder_title": null, "investor_name": null, "investor_firm": null, "investment_amount": 750000.0}

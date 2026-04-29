@@ -15,25 +15,47 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import re
 import subprocess
 import sys
-import urllib.parse
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from artifacts import (
+    build_artifact_uri as _build_artifact_uri,
+    parse_artifact_uri as _parse_artifact_uri,
+    write_counterparty_pending as _write_counterparty_pending,
+)
+from cancel_flow import cancel_preflight, cancel_success_event_type
 from parse_constraints import extract_constraints
 from parse_identity import extract_identity
+from identity import (
+    build_env_updates as _build_env_updates,
+    persist_env_updates as _persist_env_updates,
+    profile_from_env,
+)
+from links import (
+    BIND_CODE_RE as _BIND_CODE_RE,
+    build_invite_url as _build_invite_url,
+    extract_bind_code as _extract_bind_code,
+)
+from minting import build_create_tokens_cmd, build_service_name, identity_value
 from format_event import format_event
+from session_flow import (
+    register_signing_session as _register_signing_session,
+    join_signing_session as _join_signing_session,
+)
 from telegram_push import (
     resolve_chat_id,
     send_telegram,
     send_signing_url_to_dm,
-    SigningUrlTargetError,
 )
+from telegram import route_stream_message, stream_target
 from typing_loop import TypingLoop, get_bot_token
 from sshsign_session import (
     SshsignSession,
@@ -44,8 +66,49 @@ from sshsign_session import (
     SessionRoleConflictError,
     SessionNotMemberError,
     GroupAlreadyBoundError,
+    LeaseHeldError,
+    LeaseHolderMismatchError,
+    LeaseExpiredError,
 )
 import state_store
+import orchestrator
+from operator_ready import (
+    build_operator_updates,
+    doctor_checks,
+    format_doctor,
+    load_skill_manifest,
+    persist_operator_updates,
+)
+from reconcile import (
+    reconcile_active_sessions,
+    classify_founder_resume,
+    classify_investor_resume,
+    FOUNDER_ALREADY_STREAMING,
+    FOUNDER_PROMPT_GROUP,
+    FOUNDER_START_STREAM,
+    FOUNDER_STALE_NO_MEMBER,
+    FOUNDER_WAIT_COUNTERPARTY,
+    FOUNDER_WAIT_GROUP_ALREADY_PROMPTED,
+    has_executed_delivered,
+    INVESTOR_ALREADY_STREAMING,
+    INVESTOR_START_STREAM,
+    INVESTOR_STALE_NO_FOUNDER,
+    INVESTOR_WAIT_FOUNDER_STREAM,
+    INVESTOR_WAIT_GROUP_BIND,
+    is_terminal_status,
+    latest_signing_pending_id,
+    mark_executed_delivered,
+    normalize_status,
+    reconcile_state_by_negotiation_id,
+    reconcile_session,
+)
+from trace_log import write_trace
+from upstream import (
+    augment_signing_url as _augment_signing_url,
+    finalize_executed_pdf as _finalize_executed_pdf,
+    ssh_history as _ssh_history,
+    synthesize_offer_event as _synthesize_offer_event,
+)
 
 
 IDENTITY_SENTINEL_PATH = Path("/tmp/safe_negotiate/pending_negotiation.txt")
@@ -60,9 +123,82 @@ def _identity_configured() -> bool:
     investor joining a two-party code via their own OC). Either way the
     wizard has already run to completion and we skip the prompt.
     """
+    profile = profile_from_env()
+    role = _classify_bot_role()
+    if role == "founder":
+        return bool(
+            identity_value(profile.get("founder_name"))
+            and identity_value(profile.get("company_name"), field="company")
+        )
+    if role == "investor":
+        return bool(
+            identity_value(profile.get("investor_name"))
+            and identity_value(profile.get("investor_firm"))
+        )
     return bool(
-        (os.environ.get("FOUNDER_NAME") or "").strip()
-        or (os.environ.get("INVESTOR_NAME") or "").strip()
+        identity_value(profile.get("founder_name"))
+        or identity_value(profile.get("investor_name"))
+    )
+
+
+def _enrich_constraints_from_profile(constraints: dict, env: dict | None = None) -> dict:
+    """Fill this user's party identity from saved onboarding profile."""
+    out = dict(constraints)
+    profile = profile_from_env(env)
+    role = (out.get("role") or "").lower()
+    if role == "founder":
+        mapping = {
+            "founder_name": ("founder_name", ""),
+            "founder_title": ("founder_title", ""),
+            "company_name": ("company_name", "company"),
+        }
+    elif role == "investor":
+        mapping = {
+            "investor_name": ("investor_name", ""),
+            "investor_firm": ("investor_firm", ""),
+        }
+    else:
+        return out
+
+    for constraint_key, (profile_key, field) in mapping.items():
+        if out.get(constraint_key):
+            continue
+        value = identity_value(profile.get(profile_key), field=field)
+        if value:
+            out[constraint_key] = value
+    return out
+
+
+def _missing_counterparty_identity(constraints: dict) -> list[str]:
+    """Return missing counterparty identity fields for founder two-party starts."""
+    if (constraints.get("mode") or "").lower() != "two_party":
+        return []
+    if (constraints.get("role") or "").lower() != "founder":
+        return []
+    if constraints.get("session_code"):
+        return []
+    missing: list[str] = []
+    if not identity_value(constraints.get("investor_name"), drop_placeholders=False):
+        missing.append("investor name")
+    if not identity_value(constraints.get("investor_firm"), drop_placeholders=False):
+        missing.append("investor firm")
+    return missing
+
+
+def _identity_setup_prompt() -> str:
+    role = _classify_bot_role()
+    if role == "investor":
+        return (
+            "\U0001f44b Welcome! Before we negotiate, tell me who you are.\n\n"
+            "Reply with your investor profile, for example:\n"
+            "• \"I'm Nora Vassileva, partner at SD Fund\"\n\n"
+            "I'll remember it for future negotiations."
+        )
+    return (
+        "\U0001f44b Welcome! Before we negotiate, tell me who you are.\n\n"
+        "Reply with your founder profile, for example:\n"
+        "• \"I'm Juan Figuera, CEO of APOA Inc\"\n\n"
+        "I'll remember it for future negotiations."
     )
 
 
@@ -101,6 +237,105 @@ def _negotiation_id_from_sshsign_session_id(sshsign_session_id: str) -> str:
     if sshsign_session_id.startswith("session_"):
         return sshsign_session_id[len("session_"):]
     return sshsign_session_id
+
+
+def _lease_holder(output_dir: Path, role: str, action: str) -> str:
+    """Stable-ish holder label for sshsign workflow leases.
+
+    It intentionally contains no secrets; it only helps operators see which
+    process owns a live claim when a second process gets `lease_held`.
+    """
+    host = (os.environ.get("HOSTNAME") or "local").split(".")[0]
+    return f"claw-negotiate:{host}:{os.getpid()}:{role}:{action}:{output_dir.name}"
+
+
+def _acquire_workflow_lease(
+    client,
+    *,
+    output_dir: Path,
+    session_id: str,
+    role: str,
+    action: str,
+    ttl_seconds: int = 120,
+) -> dict | None:
+    holder = _lease_holder(output_dir, role, action)
+    try:
+        payload = client.acquire_lease(
+            session_id=session_id,
+            role=role,
+            action=action,
+            holder=holder,
+            ttl_seconds=ttl_seconds,
+        )
+        if isinstance(payload, dict):
+            return payload
+        # Unit-test mocks often leave acquire_lease as a bare MagicMock.
+        # Return a syntactically valid handle so the flow can exercise
+        # sequencing without depending on a full fake sshsign server.
+        return {
+            "session_id": session_id,
+            "role": role,
+            "action": action,
+            "holder": holder,
+            "generation": 1,
+        }
+    except LeaseHeldError as e:
+        sys.stderr.write(
+            f"{action} lease held for {session_id}/{role} "
+            f"by {e.holder or 'another worker'} until {e.expires_at or 'unknown'}\n"
+        )
+        return None
+
+
+def _check_workflow_lease(client, lease: dict | None) -> bool:
+    if not lease:
+        return False
+    try:
+        client.check_lease(
+            session_id=lease["session_id"],
+            role=lease["role"],
+            action=lease["action"],
+            holder=lease["holder"],
+            generation=int(lease["generation"]),
+        )
+        return True
+    except (LeaseHolderMismatchError, LeaseExpiredError, SshsignSessionError) as e:
+        sys.stderr.write(f"workflow lease check failed: {e}\n")
+        return False
+
+
+def _release_workflow_lease(client, lease: dict | None) -> None:
+    if not lease:
+        return
+    try:
+        client.release_lease(
+            session_id=lease["session_id"],
+            role=lease["role"],
+            action=lease["action"],
+            holder=lease["holder"],
+            generation=int(lease["generation"]),
+        )
+    except SshsignSessionError as e:
+        # Release is cleanup. The server TTL is the final backstop.
+        sys.stderr.write(f"workflow lease release failed: {e}\n")
+
+
+def _has_authoritative_offer_history(
+    negotiation_id: str,
+    sshsign_host: str = "sshsign.dev",
+    history_fn=None,
+) -> bool:
+    """True when sshsign already has at least one offer row.
+
+    The upstream distributed runner currently rehydrates history only for
+    the non-first mover. If the first mover restarts after offers exist,
+    it can replay Round 0 and corrupt the public transcript, so recovery
+    must fail closed until the runner can resume from history correctly.
+    """
+    if history_fn is None:
+        history_fn = _ssh_history
+    rows = history_fn(negotiation_id, sshsign_host=sshsign_host)
+    return bool(rows)
 
 
 def _resolve_group_chat_id(
@@ -406,6 +641,23 @@ def _has_active_negotiation() -> tuple[bool, str | None]:
     return (False, None)
 
 
+def _pid_file_has_live_negotiation(output_dir: Path) -> bool:
+    """Return true when output_dir/.session.pid points at our live process."""
+    pid_path = output_dir / ".session.pid"
+    try:
+        pid = int(pid_path.read_text().strip())
+        os.kill(pid, 0)
+    except (OSError, ValueError, FileNotFoundError):
+        return False
+
+    cmdline_path = Path(f"/proc/{pid}/cmdline")
+    try:
+        cmdline = cmdline_path.read_bytes().decode("utf-8", "replace")
+    except (OSError, FileNotFoundError):
+        return True
+    return "run_safe.py" in cmdline or "negotiate_safe" in cmdline
+
+
 def run_prepare(
     message: str,
     output_dir: str,
@@ -421,6 +673,7 @@ def run_prepare(
     """
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
+    write_trace(out, "prepare.start", phase="prepare")
 
     # Resolve chat_id first so we can push an interstitial before the slow parse.
     chat_id = resolve_chat_id(chat_id_flag)
@@ -433,6 +686,7 @@ def run_prepare(
     if role_err:
         if chat_id:
             sender(chat_id, message=role_err)
+        write_trace(out, "prepare.rejected", phase="prepare", reason="role_pre_parse", chat_id=chat_id)
         return 1
 
     # Gate 2: single-active-negotiation. Each bot+droplet handles one
@@ -448,6 +702,7 @@ def run_prepare(
         })
         if chat_id and body:
             sender(chat_id, message=body)
+        write_trace(out, "prepare.rejected", phase="prepare", reason="active_negotiation", descriptor=descriptor, chat_id=chat_id)
         return 1
 
     # First-run guard: if the user hasn't configured their identity yet,
@@ -461,17 +716,12 @@ def run_prepare(
         except OSError as e:
             sys.stderr.write(f"Could not stash pending message: {e}\n")
         if chat_id:
-            sender(chat_id, message=(
-                "\U0001f44b Welcome! Before we negotiate, tell me who you are.\n\n"  # 👋
-                "Reply with a short self-intro, for example:\n"
-                "• \"I'm Juan Figuera, CEO of APOA Inc\" (founder)\n"
-                "• \"Mark Stone, partner at Blue Fund\" (investor)\n\n"
-                "I'll remember it for next time."
-            ))
+            sender(chat_id, message=_identity_setup_prompt())
+        write_trace(out, "prepare.identity_required", phase="prepare", chat_id=chat_id)
         return 2
 
     if chat_id:
-        sender(chat_id, message="\u23f3 Analyzing\u2026")  # ⏳
+        sender(chat_id, message="\u23f3 Reading your negotiation terms\u2026")  # ⏳
 
     # Keep the typing indicator alive during the Anthropic call and the rest
     # of prepare. Stopped in `finally` so the confirm card isn't competing
@@ -489,12 +739,14 @@ def run_prepare(
                     "\u26a0\ufe0f Couldn't parse your request. "  # ⚠️
                     "Please rephrase your terms and try again."
                 ))
+            write_trace(out, "prepare.parse_error", phase="prepare", error=str(e), chat_id=chat_id)
             return 1
 
         required_fields = ("valuation_cap_min", "valuation_cap_max", "discount_min", "pro_rata", "mfn")
         missing = [f for f in required_fields if constraints.get(f) is None]
         if missing:
             sys.stderr.write(f"Ambiguous constraints (null values): {missing}. Ask the user to clarify.\n")
+            write_trace(out, "prepare.ambiguous", phase="prepare", missing=missing, chat_id=chat_id)
             return 1
 
         # Gate 3: bot-role post-parse backstop. The regex pre-check
@@ -507,6 +759,27 @@ def run_prepare(
         if role_err:
             if chat_id:
                 sender(chat_id, message=role_err)
+            write_trace(out, "prepare.rejected", phase="prepare", reason="role_post_parse", role=constraints.get("role"), chat_id=chat_id)
+            return 1
+
+        constraints = _enrich_constraints_from_profile(constraints)
+        missing_counterparty = _missing_counterparty_identity(constraints)
+        if missing_counterparty:
+            if chat_id:
+                sender(chat_id, message=(
+                    "I need the investor's name and firm for the signing view "
+                    "and final SAFE.\n\n"
+                    "Please resend the request with the investor included, for example:\n"
+                    "\"Live negotiation with Nora Vassileva at SD Fund. "
+                    "Cap $30M to $40M, 10% discount, pro-rata required.\""
+                ))
+            write_trace(
+                out,
+                "prepare.counterparty_identity_required",
+                phase="prepare",
+                missing=missing_counterparty,
+                chat_id=chat_id,
+            )
             return 1
 
         # Two-party join path: the investor pasted a session_code. Validate
@@ -522,6 +795,7 @@ def run_prepare(
                         "\u26a0\ufe0f " + (err or "Couldn't find that negotiation.")  # ⚠️
                         + "\n\nDouble-check the code with your counterparty."
                     ))
+                write_trace(out, "prepare.join_lookup_failed", phase="prepare", session_code=constraints.get("session_code"), error=err, chat_id=chat_id)
                 return 1
             constraints = _enrich_constraints_from_session(constraints, sess_payload)
             joined_session = sess_payload
@@ -573,7 +847,17 @@ def run_prepare(
             )
         (out / "config.json").write_text(json.dumps(config, indent=2))
 
-        sys.stdout.write(json.dumps(constraints, indent=2) + "\n")
+        if not chat_id:
+            sys.stdout.write(json.dumps(constraints, indent=2) + "\n")
+        write_trace(
+            out,
+            "prepare.completed",
+            phase="prepare",
+            role=constraints.get("role"),
+            mode=constraints.get("mode"),
+            session_code=constraints.get("session_code"),
+            chat_id=chat_id,
+        )
         return 0
     finally:
         typing.stop()
@@ -604,13 +888,16 @@ def run_mint(output_dir: str, config: dict, telegram_user_id: int | None = None)
     verify that the caller of /bind matches the session creator.
     """
     repo = os.environ.get("NEGOTIATE_REPO_PATH", "")
+    write_trace(output_dir, "mint.start", phase="mint", role=(config.get("constraints") or {}).get("role"), mode=(config.get("constraints") or {}).get("mode"))
     if not repo:
         sys.stderr.write("NEGOTIATE_REPO_PATH not set.\n")
+        write_trace(output_dir, "mint.failed", phase="mint", reason="missing_repo")
         return 2
 
     repo = Path(repo).resolve()
     if not (repo / "create_tokens.py").exists():
         sys.stderr.write(f"create_tokens.py not found under {repo}\n")
+        write_trace(output_dir, "mint.failed", phase="mint", reason="missing_create_tokens", repo=str(repo))
         return 2
 
     constraints = config["constraints"]
@@ -637,125 +924,24 @@ def run_mint(output_dir: str, config: dict, telegram_user_id: int | None = None)
     )
     expires_str = expires_at.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    pro_rata_required = constraints.get("pro_rata") == "required"
-    mfn_required = constraints.get("mfn") == "required"
-    discount_min = float(constraints.get("discount_min", 0.20))
-    discount_max = discount_min + 0.10
-
-    # `get(k, default)` returns default only when the key is MISSING; the
-    # parser emits null for unknown fields (key-present, value-None), which
-    # would leak through and break subprocess.run. Use `or default` to catch both.
-    amount = constraints.get("investment_amount") or 500_000.0
-
-    # Dual-role: user's constraints bind whichever side the user is playing.
-    # The OTHER side's constraints come from env-var defaults so the AI
-    # opposing agent has sensible negotiating bounds.
-    user_role = (constraints.get("role") or "founder").lower()
-    if user_role not in ("founder", "investor"):
-        user_role = "founder"
-    user_flag_prefix = "--founder-" if user_role == "founder" else "--investor-"
-    ai_flag_prefix = "--investor-" if user_role == "founder" else "--founder-"
-    ai_env_prefix = "INVESTOR_" if user_role == "founder" else "FOUNDER_"
-
-    # Identity resolution — aligned with upstream agenticpoa/negotiate
-    # `.env.example`. Precedence per field: NL > env > demo-preset > literal
-    # fallback. Upstream convention: FOUNDER_* describes the founder side
-    # (regardless of who the user is), INVESTOR_* describes the investor
-    # side. In demo mode the user's own identity ends up in whichever set
-    # matches their role; the OTHER side gets demo-flavored presets (e.g.
-    # "Demo Investor, Demo Fund") so the AI counterparty has a name that
-    # reads as intentional rather than placeholder-y in the HN screenshot.
-    mode = (constraints.get("mode") or "demo").lower()
-    is_demo = mode == "demo"
-
-    # Demo presets apply only to the side the user ISN'T playing.
-    demo_founder_name = "Demo Founder" if is_demo and user_role == "investor" else ""
-    demo_founder_title = "CEO" if is_demo and user_role == "investor" else ""
-    demo_investor_name = "Demo Investor" if is_demo and user_role == "founder" else ""
-    demo_investor_firm = "Demo Capital" if is_demo and user_role == "founder" else ""
-
-    founder_name = (
-        constraints.get("founder_name")
-        or os.environ.get("FOUNDER_NAME")
-        or demo_founder_name
-        or "Founder"
+    service = build_service_name(
+        str(constraints.get("company_name") or os.environ.get("COMPANY_NAME") or "Company"),
+        negotiation_id,
     )
-    founder_title = (
-        constraints.get("founder_title")
-        or os.environ.get("FOUNDER_TITLE")
-        or demo_founder_title
-        or "CEO"
+    cmd, user_role = build_create_tokens_cmd(
+        repo=repo,
+        negotiation_id=negotiation_id,
+        constraints=constraints,
+        neg_dir=neg_dir,
+        expires_str=expires_str,
+        service=service,
+        shared_session=bool(shared_session),
     )
-    investor_name = (
-        constraints.get("investor_name")
-        or os.environ.get("INVESTOR_NAME")
-        or demo_investor_name
-        or "Investor"
-    )
-    investor_firm = (
-        constraints.get("investor_firm")
-        or os.environ.get("INVESTOR_FIRM")
-        or demo_investor_firm
-        or "Investor Firm"
-    )
-    company = (
-        constraints.get("company_name")
-        or os.environ.get("COMPANY_NAME")
-        or "Company"
-    )
-
-    slug = "".join(c.lower() if c.isalnum() else "-" for c in company).strip("-")
-    service = f"safe:{slug}:{negotiation_id}"
-
-    cmd = [
-        sys.executable, str(repo / "create_tokens.py"),
-        "--negotiation-id", negotiation_id,
-        "--principal-id", os.environ.get("USER_DID") or "did:apoa:default",
-        "--expires", expires_str,
-        "--service", service,
-        "--company-name", company,
-        "--founder-name", founder_name,
-        "--founder-title", founder_title,
-        "--investor-name", investor_name,
-        "--investor-firm", investor_firm,
-        "--investment-amount", str(amount),
-        f"{user_flag_prefix}cap-min", str(constraints["valuation_cap_min"]),
-        f"{user_flag_prefix}cap-max", str(constraints["valuation_cap_max"]),
-        f"{user_flag_prefix}discount-min", str(constraints["discount_min"]),
-        f"{user_flag_prefix}discount-max", str(discount_max),
-        f"{user_flag_prefix}pro-rata-required", "true" if pro_rata_required else "false",
-        f"{user_flag_prefix}mfn-required", "true" if mfn_required else "false",
-        "--keys-dir", str(neg_dir / "keys"),
-        "--tokens-dir", str(neg_dir / "tokens"),
-        "--config-dir", str(neg_dir),
-        "--create-keys",
-    ]
-
-    ai_flag_suffixes = {
-        "CAP_MIN": "cap-min",
-        "CAP_MAX": "cap-max",
-        "DISCOUNT_MIN": "discount-min",
-        "DISCOUNT_MAX": "discount-max",
-        "PRO_RATA_REQUIRED": "pro-rata-required",
-        "MFN_REQUIRED": "mfn-required",
-    }
-
-    # In join mode (shared_session set), the investor only mints their OWN
-    # token — the founder already minted theirs on their OC. Pass --role to
-    # create_tokens.py to skip the counterparty-token generation.
-    # Skip the AI-side env overrides too — there is no AI side in two-party
-    # mode; the counterparty's constraints live in their own APOA token.
-    if shared_session:
-        cmd.extend(["--role", user_role])
-    else:
-        for env_key_suffix, flag_suffix in ai_flag_suffixes.items():
-            val = os.environ.get(f"{ai_env_prefix}{env_key_suffix}")
-            if val:
-                cmd.extend([f"{ai_flag_prefix}{flag_suffix}", val])
 
     result = subprocess.run(cmd, cwd=repo, capture_output=True, text=True)
     if result.returncode != 0:
         sys.stderr.write(f"Mint failed:\n{result.stdout}\n{result.stderr}\n")
+        write_trace(output_dir, "mint.failed", phase="mint", reason="create_tokens", returncode=result.returncode)
         return result.returncode
 
     mint_output = {
@@ -768,6 +954,7 @@ def run_mint(output_dir: str, config: dict, telegram_user_id: int | None = None)
         "service": service,
         "user_role": user_role,
         "mode": (constraints.get("mode") or "demo").lower(),
+        "negotiate_repo_path": str(repo),
     }
 
     # Two-party mode: register (creator) or join (joiner) the signing
@@ -784,6 +971,7 @@ def run_mint(output_dir: str, config: dict, telegram_user_id: int | None = None)
                 repo=repo,
             )
             if joined is None:
+                write_trace(output_dir, "mint.failed", phase="mint", reason="join_signing_session", negotiation_id=negotiation_id)
                 return 3
             mint_output.update(joined)
         else:
@@ -792,6 +980,7 @@ def run_mint(output_dir: str, config: dict, telegram_user_id: int | None = None)
                 telegram_user_id=telegram_user_id,
             )
             if session_registered is None:
+                write_trace(output_dir, "mint.failed", phase="mint", reason="register_signing_session", negotiation_id=negotiation_id)
                 return 3
             mint_output.update(session_registered)
 
@@ -847,7 +1036,7 @@ def run_mint(output_dir: str, config: dict, telegram_user_id: int | None = None)
         # Install the global cron scan job (idempotent). Both roles
         # need cron — investor's resume runs from the same loop as
         # the founder's, just dispatched on the pointer's `role`.
-        interval = os.environ.get("CLAW_NEGOTIATE_SCAN_INTERVAL", "30s")
+        interval = os.environ.get("CLAW_NEGOTIATE_SCAN_INTERVAL", "5s")
         ok, err = ensure_cron(interval=interval)
         if not ok and err:
             sys.stderr.write(f"ensure_cron: {err}\n")
@@ -861,101 +1050,17 @@ def run_mint(output_dir: str, config: dict, telegram_user_id: int | None = None)
         "session_code": mint_output.get("session_code"),
     }) + "\n")
     sys.stdout.flush()
+    write_trace(
+        output_dir,
+        "mint.completed",
+        phase="mint",
+        negotiation_id=negotiation_id,
+        role=user_role,
+        mode=mint_output["mode"],
+        session_code=mint_output.get("session_code"),
+    )
 
     return 0
-
-
-def _register_signing_session(
-    mint_output: dict,
-    constraints: dict,
-    user_role: str,
-    neg_dir: Path,
-    session_client=None,
-    telegram_user_id: int | None = None,
-) -> dict | None:
-    """Call sshsign.dev create-session for a two-party negotiation.
-
-    Reads the user's APOA pubkey PEM from the minted keys on disk and
-    publishes it + a minimal metadata envelope so the counterparty can
-    retrieve it on join. Returns a dict of session fields to merge into
-    mint.json, or None on error.
-    """
-    role_to_pubkey_path = {
-        "founder": neg_dir / "keys" / "founder_public.pem",
-        "investor": neg_dir / "keys" / "investor_public.pem",
-    }
-    pubkey_path = role_to_pubkey_path.get(user_role)
-    if pubkey_path is None or not pubkey_path.exists():
-        sys.stderr.write(
-            f"APOA pubkey for role={user_role} not found at {pubkey_path}\n"
-        )
-        return None
-
-    try:
-        apoa_pubkey_pem = pubkey_path.read_text()
-    except OSError as e:
-        sys.stderr.write(f"reading {pubkey_path}: {e}\n")
-        return None
-
-    # company_name lives in metadata_public so a prospective investor can see
-    # "you're joining a negotiation for Acme Corp" BEFORE committing to join
-    # (join-session requires a PUT; pre-join the investor only has get-session
-    # which hides metadata_member). Founder chose to share the code with this
-    # investor, so the company identity is already public-between-them.
-    metadata_public = {"use_case": "safe", "version": 1}
-    if constraints.get("company_name"):
-        metadata_public["company_name"] = constraints["company_name"]
-    # Inverted-invitation: founder publishes its own Telegram bot
-    # handle here so the investor's bot can read it on join (BEFORE
-    # joining the session, while metadata_member is still hidden).
-    # The investor uses this for: (a) showing the founder bot's handle
-    # in the investor's confirm card, (b) building the post-join
-    # waiting card with correct attribution, (c) overriding any typo
-    # in the human-shared invitation message — sshsign is authoritative.
-    if user_role == "founder":
-        bot_handle = (os.environ.get("TELEGRAM_BOT_USERNAME") or "").strip()
-        if bot_handle:
-            metadata_public["founder_bot_handle"] = bot_handle
-    # Member-only metadata carries the display fields the joiner needs for
-    # their confirm card + signing view (title, both sides' names/firms)
-    # and the /bind ACL field (founder's Telegram user_id). Now that the
-    # client sends base64-encoded JSON via --metadata-member-b64 (P8-2),
-    # string values with spaces or inner quotes survive SSH argv — no
-    # need to restrict to integer-only fields.
-    metadata_member: dict = {}
-    for field in (
-        "founder_name", "founder_title",
-        "investor_name", "investor_firm",
-        "investment_amount",
-    ):
-        val = constraints.get(field)
-        if val not in (None, ""):
-            metadata_member[field] = val
-    if telegram_user_id and user_role == "founder":
-        metadata_member["telegram"] = {"founder_user_id": int(telegram_user_id)}
-
-    client = session_client or SshsignSession(
-        host=os.environ.get("SSHSIGN_HOST", "sshsign.dev"),
-    )
-    try:
-        sess = client.create_session(
-            session_id=_sshsign_session_id(mint_output["negotiation_id"]),
-            role=user_role,
-            apoa_pubkey_pem=apoa_pubkey_pem,
-            party_did=os.environ.get("USER_DID") or None,
-            metadata_public=metadata_public,
-            metadata_member=metadata_member,
-        )
-    except SshsignSessionError as e:
-        sys.stderr.write(f"create-session failed: {e}\n")
-        return None
-
-    return {
-        "session_code": sess.get("session_code"),
-        "session_created_at": sess.get("created_at"),
-        "session_expires_at": sess.get("expires_at"),
-        "session_status": sess.get("status"),
-    }
 
 
 def _wait_for_counterparty(
@@ -1050,106 +1155,6 @@ def _wait_for_counterparty(
         typing.stop()
 
 
-def _ssh_history(
-    negotiation_id: str,
-    sshsign_host: str = "sshsign.dev",
-    runner=subprocess.run,
-) -> list[dict] | None:
-    """Return sshsign's `history --negotiation-id` rows, or None on error.
-
-    Shape (per commands.go:1128): a JSON array of
-        {round, from, type, metadata, previous_tx, audit_tx_id, created_at}
-    Rows with a non-list response or a non-zero exit are treated as "no data
-    yet" and surface as None — the poller re-tries on the next interval.
-    """
-    try:
-        result = runner(
-            ["ssh", sshsign_host, "history", "--negotiation-id", negotiation_id],
-            capture_output=True, text=True, timeout=15,
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        return None
-    if result.returncode != 0 or not (result.stdout or "").strip():
-        return None
-    try:
-        data = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return None
-    return data if isinstance(data, list) else None
-
-
-def _synthesize_offer_event(entry: dict) -> dict | None:
-    """Translate a sshsign history row into an upstream-compatible event.
-
-    Upstream's `run_local` emits `offer` / `counter` / `accept` NDJSON
-    events on stdout via emit_json_event. `run_distributed` currently
-    does not (only the final `signing` event leaks through). P8-1:
-    reconstruct those events from sshsign's authoritative
-    `negotiation_offers` log so the group sees rounds live.
-
-    Upstream writes {**offer.terms, "_message": offer.message} into the
-    metadata column (negotiate.py:936), so we pop `_message` out and
-    keep the rest as `terms`.
-
-    Returns None for rows we can't render (unknown type, missing round).
-    """
-    if not isinstance(entry, dict):
-        return None
-    etype = entry.get("type")
-    if etype not in ("offer", "counter", "accept"):
-        return None
-    try:
-        round_num = int(entry.get("round", 0))
-    except (TypeError, ValueError):
-        return None
-    if round_num <= 0:
-        return None
-    party = entry.get("from") or ""
-    if party not in ("founder", "investor"):
-        return None
-
-    raw_meta = entry.get("metadata")
-    terms: dict = {}
-    message = ""
-    if isinstance(raw_meta, str) and raw_meta.strip():
-        try:
-            parsed = json.loads(raw_meta)
-        except json.JSONDecodeError:
-            parsed = None
-        if isinstance(parsed, dict):
-            message = str(parsed.pop("_message", "") or "")
-            terms = parsed
-    elif isinstance(raw_meta, dict):
-        meta_copy = dict(raw_meta)
-        message = str(meta_copy.pop("_message", "") or "")
-        terms = meta_copy
-
-    return {
-        "type": etype,
-        "party": party,
-        "round": round_num,
-        "terms": terms,
-        "message": message,
-    }
-
-
-def _augment_signing_url(event: dict, bot_username: str) -> dict:
-    """Append a bare Telegram deep-link callback to the signing event's approval_url.
-
-    After signing, the browser redirects to `https://t.me/<bot>` which opens the
-    Telegram chat without sending any message (for returning users — which the
-    user always is at this point, since they just invoked the skill). The script
-    is already polling get-envelope and will push the signed confirmation and PDF
-    autonomously; this callback just brings the user back to the chat window.
-    """
-    url = (event.get("approval_url") or "").strip()
-    if not url or not bot_username:
-        return event
-    callback = urllib.parse.quote(f"https://t.me/{bot_username}")
-    sep = "&" if "?" in url else "?"
-    return {**event, "approval_url": f"{url}{sep}callback={callback}"}
-
-
 def _stream_to_telegram(
     output_dir: Path,
     chat_id: str,
@@ -1164,7 +1169,7 @@ def _stream_to_telegram(
     negotiation_id: str | None = None,
     sshsign_host: str = "sshsign.dev",
     history_fn=None,
-    history_interval: float = 2.0,
+    history_interval: float = 1.0,
 ) -> tuple[int, dict | None]:
     """Spawn the streaming helper; push each event to Telegram as it fires.
 
@@ -1200,18 +1205,32 @@ def _stream_to_telegram(
     env["PYTHONUNBUFFERED"] = "1"
 
     cmd = [sys.executable, "-u", str(stream_helper), "--output-dir", str(output_dir)]
+    try:
+        mint_for_stream = json.loads((output_dir / "mint.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        mint_for_stream = {}
+    negotiate_repo_path = mint_for_stream.get("negotiate_repo_path") or ""
+    if negotiate_repo_path:
+        cmd.extend(["--negotiate-repo", str(negotiate_repo_path)])
 
-    stream_target = group_chat_id or chat_id
+    target_chat = stream_target(chat_id, group_chat_id)
+    try:
+        (output_dir / "events.ndjson").unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        sys.stderr.write(f"stream: clearing stale events archive failed: {e}\n")
 
     if typing_factory is None:
-        typing = TypingLoop(chat_id=stream_target, bot_token=get_bot_token())
+        typing = TypingLoop(chat_id=target_chat, bot_token=get_bot_token())
     else:
-        typing = typing_factory(stream_target)
+        typing = typing_factory(target_chat)
     typing.start()
 
     events: list[dict] = []
     seen: set[tuple[str, int, str]] = set()
     emit_lock = threading.Lock()
+    stderr_lines: list[str] = []
 
     def _emit(event: dict) -> None:
         """Format + route + record. Dedups offer/counter/accept by
@@ -1236,23 +1255,15 @@ def _stream_to_telegram(
             event = _augment_signing_url(event, bot_username)
 
         message = format_event(event, constraints=constraints)
-        if message:
-            if etype == "signing":
-                try:
-                    dm_sender(chat_id, message=message)
-                except SigningUrlTargetError:
-                    sys.stderr.write(
-                        f"stream: refusing to send signing URL to "
-                        f"non-DM target chat_id={chat_id!r}\n"
-                    )
-                if group_chat_id:
-                    placeholder = (
-                        "⏳ Signing… check your own DM for the "  # ⏳
-                        "signing link. Never share this link."
-                    )
-                    sender(stream_target, message=placeholder)
-            else:
-                sender(stream_target, message=message)
+        route_stream_message(
+            event=event,
+            message=message,
+            chat_id=chat_id,
+            group_chat_id=group_chat_id,
+            constraints=constraints,
+            sender=sender,
+            dm_sender=dm_sender,
+        )
 
         if etype == "outcome" and event.get("result") == "max_rounds":
             cp_label = _counterparty_label_from_constraints(constraints or {})
@@ -1261,7 +1272,7 @@ def _stream_to_telegram(
                 "counterparty_label": cp_label,
             })
             if follow:
-                sender(stream_target, message=follow)
+                sender(target_chat, message=follow)
 
     def _drain_history() -> None:
         if history_fn is not None:
@@ -1292,6 +1303,20 @@ def _stream_to_telegram(
 
         stop_event = threading.Event()
         poller: threading.Thread | None = None
+        stderr_thread: threading.Thread | None = None
+
+        if proc.stderr is not None:
+            def _drain_stderr() -> None:
+                for raw_err in proc.stderr:
+                    line = raw_err.rstrip()
+                    if not line:
+                        continue
+                    stderr_lines.append(line)
+                    sys.stderr.write(f"stream helper: {line}\n")
+
+            stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+            stderr_thread.start()
+
         if negotiation_id or history_fn is not None:
             def _poll() -> None:
                 while not stop_event.is_set():
@@ -1315,9 +1340,20 @@ def _stream_to_telegram(
                 continue
             if not isinstance(event, dict):
                 continue
+            if event.get("type") == "signing":
+                # In distributed mode, upstream can emit the signing event
+                # before our periodic history poll has rendered the final
+                # accept/deal row. Drain first so the group sees the deal
+                # before the private signing prompt.
+                try:
+                    _drain_history()
+                except Exception as e:
+                    sys.stderr.write(f"stream: pre-signing history drain failed: {e}\n")
             _emit(event)
 
         proc.wait()
+        if stderr_thread is not None:
+            stderr_thread.join(timeout=1.0)
 
         if poller is not None:
             # One final drain: upstream emits `signing` on stdout before the
@@ -1341,6 +1377,10 @@ def _stream_to_telegram(
         pass
 
     signing_event = next((e for e in events if e.get("type") == "signing"), None)
+    if proc.returncode:
+        err_tail = " | ".join(stderr_lines[-5:])
+        if err_tail:
+            sys.stderr.write(f"stream: helper exited {proc.returncode}: {err_tail}\n")
     return proc.returncode or 0, signing_event
 
 
@@ -1353,16 +1393,16 @@ def _counterparty_label_from_constraints(constraints: dict) -> str:
     """
     role = (constraints.get("role") or "founder").lower()
     if role == "founder":
-        parts = [p for p in (
-            constraints.get("investor_name"),
-            constraints.get("investor_firm"),
-        ) if p]
-        return ", ".join(parts)
-    parts = [p for p in (
-        constraints.get("founder_name"),
-        constraints.get("company_name"),
-    ) if p]
-    return ", ".join(parts)
+        name = constraints.get("investor_name")
+        firm = constraints.get("investor_firm")
+        if name and firm:
+            return f"{name} at {firm}"
+        return name or firm or ""
+    name = constraints.get("founder_name")
+    company = constraints.get("company_name")
+    if name and company:
+        return f"{name} at {company}"
+    return name or company or ""
 
 
 # ─── Post-stream: envelope polling + finalize + PDF push ────────────────────
@@ -1471,154 +1511,6 @@ def _poll_session_complete(
         sleep_fn(interval)
         elapsed += interval
     return False
-
-
-def _finalize_executed_pdf(
-    output_dir: Path,
-    pending_id: str,
-    sshsign_host: str,
-) -> Path | None:
-    """Call upstream's run_finalize via importlib; return executed PDF path if generated.
-
-    Bypasses upstream main()/auto_setup() by invoking run_finalize directly with
-    a fully-constructed Namespace built from our mint.json + config files.
-    """
-    import importlib.util
-
-    repo_str = os.environ.get("NEGOTIATE_REPO_PATH", "")
-    if not repo_str:
-        return None
-    repo = Path(repo_str).resolve()
-
-    mint = json.loads((output_dir / "mint.json").read_text())
-
-    # In two-party join mode only the joiner's config exists locally; the
-    # counterparty's was minted on the other OC. Load what exists, fall
-    # back to {} so we can stitch kwargs from env / constraints below.
-    def _maybe_load_cfg(path_field: str) -> dict:
-        path = mint.get(path_field, "")
-        if not path:
-            return {}
-        try:
-            return json.loads(Path(path).read_text())
-        except (OSError, json.JSONDecodeError):
-            return {}
-
-    f_cfg = _maybe_load_cfg("founder_config_path")
-    i_cfg = _maybe_load_cfg("investor_config_path")
-    neg_id = mint["negotiation_id"]
-    config_anchor = mint.get("founder_config_path") or mint.get("investor_config_path") or ""
-    neg_dir = Path(config_anchor).parent if config_anchor else output_dir
-    neg_output = neg_dir / "output"
-
-    spec = importlib.util.spec_from_file_location("negotiate_upstream_fin", repo / "negotiate.py")
-    if spec is None or spec.loader is None:
-        return None
-    sys.path.insert(0, str(repo))
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    try:
-        spec.loader.exec_module(module)
-    except Exception:
-        return None
-
-    user_role = mint.get("user_role", "founder")
-
-    # Load the user's own prepared constraints so we can fall back to
-    # NL-derived values (or env) for any identity field the local cfg
-    # doesn't have — the joiner doesn't mint the counterparty's config.
-    try:
-        constraints = json.loads((output_dir / "config.json").read_text()).get("constraints") or {}
-    except (OSError, json.JSONDecodeError):
-        constraints = {}
-
-    def _pick(cfg_keys, constraint_key, env_key, default=""):
-        for cfg, k in cfg_keys:
-            if cfg.get(k):
-                return cfg[k]
-        if constraints.get(constraint_key):
-            return constraints[constraint_key]
-        return os.environ.get(env_key) or default
-
-    # Counterparty pubkey path: when joining, _join_signing_session
-    # writes the founder's pubkey to neg_dir/keys/founder_public.pem
-    # (stashed in mint.counterparty_pubkey_path). Fall back to that.
-    counterparty_pubkey = mint.get("counterparty_pubkey_path", "")
-
-    founder_pubkey = f_cfg.get("pubkey") or (
-        counterparty_pubkey if user_role == "investor" else ""
-    )
-    investor_pubkey = i_cfg.get("pubkey") or (
-        counterparty_pubkey if user_role == "founder" else ""
-    )
-
-    kwargs = dict(
-        negotiate_repo=repo,
-        negotiation_id=neg_id,
-        founder_token_path=mint.get("founder_token_path", ""),
-        investor_token_path=mint.get("investor_token_path", ""),
-        founder_pubkey_path=founder_pubkey,
-        investor_pubkey_path=investor_pubkey,
-        company_name=_pick(
-            [(f_cfg, "company_name")], "company_name", "COMPANY_NAME", "Company",
-        ),
-        founder_name=_pick(
-            [(f_cfg, "name"), (f_cfg, "founder_name")],
-            "founder_name", "FOUNDER_NAME", "Founder",
-        ),
-        founder_title=_pick(
-            [(f_cfg, "title")], "founder_title", "FOUNDER_TITLE", "",
-        ),
-        investor_name=_pick(
-            [(i_cfg, "name"), (i_cfg, "investor_name")],
-            "investor_name", "INVESTOR_NAME", "Investor",
-        ),
-        investor_firm=_pick(
-            [(i_cfg, "firm")], "investor_firm", "INVESTOR_FIRM", "",
-        ),
-        investment_amount=(
-            f_cfg.get("investment_amount")
-            or i_cfg.get("investment_amount")
-            or constraints.get("investment_amount")
-            or 500_000.0
-        ),
-        sshsign_host=sshsign_host,
-        output_dir=str(neg_output),
-        signing_key_id=(
-            f_cfg.get("founder_signing_key_id")
-            or i_cfg.get("investor_signing_key_id")
-            or f_cfg.get("signing_key_id")
-            or i_cfg.get("signing_key_id", "")
-        ),
-        founder_signing_key_id=(
-            f_cfg.get("founder_signing_key_id") or f_cfg.get("signing_key_id", "")
-        ),
-        investor_signing_key_id=(
-            i_cfg.get("investor_signing_key_id") or i_cfg.get("signing_key_id", "")
-        ),
-        json_events=False,
-        poll=False,
-    )
-    import dataclasses
-    if "signer_role" in {f.name for f in dataclasses.fields(module.NegotiationConfig)}:
-        kwargs["signer_role"] = user_role
-    config = module.NegotiationConfig(**kwargs)
-
-    ns = config.to_namespace()
-    ns.finalize = pending_id
-
-    original_cwd = os.getcwd()
-    os.chdir(str(repo))
-    try:
-        module.run_finalize(ns)
-    except Exception as e:
-        sys.stderr.write(f"Finalize error: {e}\n")
-        return None
-    finally:
-        os.chdir(original_cwd)
-
-    executed = neg_output / f"{neg_id}_executed.pdf"
-    return executed if executed.exists() else None
 
 
 def _is_still_active_session(output_dir: Path) -> bool:
@@ -1751,84 +1643,10 @@ def _await_sign_and_push(
         sender(ui_target, media_path=str(pdf_path))
         if group_chat_id and str(group_chat_id) != str(chat_id):
             sender(chat_id, media_path=str(pdf_path))
+        mark_executed_delivered(output_dir)
         return 0
     finally:
         typing.stop()
-
-
-def _build_artifact_uri(
-    session_id: str,
-    pdf_path: Path,
-    creator_pending_id: str = "",
-    creator_role: str = "",
-) -> str:
-    """URI that marks the session as finalized AND carries the creator's
-    pending_id so the joiner can reproduce the PDF locally.
-
-    Content-addressed artifact hosting is deferred to a future sshsign
-    change. Until then, both OCs reconstruct the PDF from their own
-    envelope + sshsign's get-envelope for the OTHER side. To do that
-    the joiner needs the creator's pending_id, which we embed here as
-    a query param. Format: sshsign://session/<id>/executed.pdf?
-    creator_pending=<pid>&creator_role=<role>.
-    """
-    base = f"sshsign://session/{session_id}/executed.pdf"
-    params = []
-    if creator_pending_id:
-        params.append(f"creator_pending={urllib.parse.quote(creator_pending_id)}")
-    if creator_role:
-        params.append(f"creator_role={urllib.parse.quote(creator_role)}")
-    if params:
-        return base + "?" + "&".join(params)
-    return base
-
-
-def _write_counterparty_pending(
-    output_dir: Path,
-    session_id: str,  # noqa: ARG001 — kept for signature compat; neg_id comes from mint.json
-    role: str,
-    pending_id: str,
-) -> None:
-    """Write the counterparty's pending_id to the local negotiate output
-    dir in the format upstream's finalize expects:
-      <neg_dir>/output/<neg_id>_<role>_pending.txt
-
-    Without this, the joiner's finalize call only sees its own role's
-    pending file and produces a single-signature PDF instead of the
-    executed (both-signatures) version.
-
-    Uses the raw negotiation_id from mint.json for the filename (NOT
-    the sshsign-prefixed session_id form) so it matches what upstream
-    writes on its side.
-    """
-    try:
-        mint = json.loads((output_dir / "mint.json").read_text())
-        neg_id = mint.get("negotiation_id") or ""
-        founder_cfg = mint.get("founder_config_path") or ""
-        investor_cfg = mint.get("investor_config_path") or ""
-        anchor = founder_cfg or investor_cfg
-        if not anchor or not neg_id:
-            return
-        neg_dir = Path(anchor).parent
-        neg_output = neg_dir / "output"
-        neg_output.mkdir(parents=True, exist_ok=True)
-        pending_file = neg_output / f"{neg_id}_{role}_pending.txt"
-        pending_file.write_text(pending_id.strip() + "\n")
-    except (OSError, json.JSONDecodeError, KeyError) as e:
-        sys.stderr.write(f"writing counterparty pending: {e}\n")
-
-
-def _parse_artifact_uri(uri: str) -> tuple[str, str]:
-    """Extract (creator_pending_id, creator_role) from a session artifact
-    URI. Returns ("", "") for unparseable or missing params."""
-    if "?" not in uri:
-        return "", ""
-    query = uri.split("?", 1)[1]
-    params = urllib.parse.parse_qs(query)
-    return (
-        params.get("creator_pending", [""])[0],
-        params.get("creator_role", [""])[0],
-    )
 
 
 def _creator_await_sign_and_finalize(
@@ -1881,6 +1699,24 @@ def _creator_await_sign_and_finalize(
             interval=poll_interval,
         )
 
+    client = session_client or SshsignSession(host=sshsign_host)
+    finalize_lease: dict | None = None
+
+    def _leased_finalize(path: Path, pid: str, host: str):
+        nonlocal finalize_lease
+        if session_id and finalize_lease is None:
+            finalize_lease = _acquire_workflow_lease(
+                client,
+                output_dir=path,
+                session_id=session_id,
+                role="creator",
+                action="finalize",
+                ttl_seconds=300,
+            )
+            if finalize_lease is None:
+                return None
+        return finalize_fn(path, pid, host)
+
     rc = _await_sign_and_push(
         output_dir=output_dir,
         chat_id=chat_id,
@@ -1890,13 +1726,14 @@ def _creator_await_sign_and_finalize(
         poll_interval=poll_interval,
         sender=sender,
         poll_fn=poll_fn,
-        finalize_fn=finalize_fn,
+        finalize_fn=_leased_finalize,
         is_active_fn=is_active_fn,
         typing_factory=typing_factory,
         group_chat_id=group_chat_id,
         pre_finalize_wait_fn=_wait_for_both_signed,
     )
     if rc != 0 or not session_id:
+        _release_workflow_lease(client, finalize_lease)
         return rc
 
     # Locate the executed PDF so we can cite a stable URI back to the
@@ -1916,8 +1753,9 @@ def _creator_await_sign_and_finalize(
     except (OSError, json.JSONDecodeError, KeyError):
         pdf_path = output_dir / "executed.pdf"
 
-    client = session_client or SshsignSession(host=sshsign_host)
     try:
+        if finalize_lease and not _check_workflow_lease(client, finalize_lease):
+            return 3
         client.complete_session(
             session_id=session_id,
             executed_artifact=_build_artifact_uri(
@@ -1928,6 +1766,103 @@ def _creator_await_sign_and_finalize(
         )
     except SshsignSessionError as e:
         sys.stderr.write(f"complete-session failed (non-fatal): {e}\n")
+    finally:
+        _release_workflow_lease(client, finalize_lease)
+    return 0
+
+
+def _creator_reconcile_finalization(
+    *,
+    output_dir: Path,
+    chat_id: str,
+    sshsign_host: str,
+    session_id: str,
+    group_chat_id: str | None = None,
+    sender=send_telegram,
+    session_status_fn=None,
+    finalize_fn=None,
+    session_client=None,
+) -> int:
+    """Retry creator-side finalization once sshsign says both signatures exist.
+
+    This is the cron-safe recovery path for the common timing hole:
+    creator signs first, waits for the counterparty, times out, and exits;
+    later the counterparty signs. At that point no stream should be spawned
+    again, but the creator can still finalize and call complete-session from
+    its local mint/config files.
+
+    Returns:
+      0 delivered (or already delivered)
+      1 not ready to finalize
+      2 finalize failed
+      3 complete-session failed after delivery (artifact still reached chat)
+    """
+    if has_executed_delivered(output_dir):
+        return 0
+
+    pending_id = latest_signing_pending_id(output_dir)
+    if not pending_id:
+        return 1
+
+    if session_status_fn is None:
+        session_status_fn = _ssh_session_status
+    status = session_status_fn(session_id, sshsign_host)
+    if status != "complete":
+        return 1
+
+    if finalize_fn is None:
+        finalize_fn = _finalize_executed_pdf
+    client = session_client or SshsignSession(host=sshsign_host)
+    lease = _acquire_workflow_lease(
+        client,
+        output_dir=output_dir,
+        session_id=session_id,
+        role="creator",
+        action="finalize",
+        ttl_seconds=300,
+    )
+    if lease is None:
+        return 1
+
+    ui_target = group_chat_id or chat_id
+    sender(ui_target, message="\U0001f4c4 Generating executed file\u2026")  # 📄
+    try:
+        pdf_path = finalize_fn(output_dir, pending_id, sshsign_host)
+        if not pdf_path:
+            sender(ui_target, message=(
+                "Both signatures are on file, but I couldn't generate the "
+                "executed PDF. Check the negotiation output directory on the server."
+            ))
+            return 2
+
+        sender(ui_target, media_path=str(pdf_path))
+        if group_chat_id and str(group_chat_id) != str(chat_id):
+            sender(chat_id, media_path=str(pdf_path))
+        mark_executed_delivered(output_dir)
+
+        creator_role = ""
+        try:
+            mint = json.loads((output_dir / "mint.json").read_text())
+            creator_role = mint.get("user_role", "")
+        except (OSError, json.JSONDecodeError):
+            pass
+
+        if not _check_workflow_lease(client, lease):
+            return 3
+        client.complete_session(
+            session_id=session_id,
+            executed_artifact=_build_artifact_uri(
+                session_id,
+                Path(pdf_path),
+                creator_pending_id=pending_id,
+                creator_role=creator_role,
+            ),
+        )
+    except SshsignSessionError as e:
+        sys.stderr.write(f"reconcile complete-session failed: {e}\n")
+        return 3
+    finally:
+        _release_workflow_lease(client, lease)
     return 0
 
 
@@ -2084,6 +2019,7 @@ def _joiner_await_sign_and_finalize(
         sender(ui_target, media_path=str(pdf_path))
         if group_chat_id and str(group_chat_id) != str(chat_id):
             sender(chat_id, media_path=str(pdf_path))
+        mark_executed_delivered(output_dir)
         return 0
     finally:
         typing.stop()
@@ -2092,9 +2028,11 @@ def _joiner_await_sign_and_finalize(
 def run_negotiate(output_dir: str, chat_id_flag: str | None = None) -> int:
     """Full negotiate flow: mint tokens then stream the negotiation to chat."""
     out = Path(output_dir)
+    write_trace(out, "negotiate.start", phase="negotiate")
     config_path = out / "config.json"
     if not config_path.exists():
         sys.stderr.write(f"No config.json in {output_dir}. Run 'prepare' first.\n")
+        write_trace(out, "negotiate.failed", phase="negotiate", reason="missing_config")
         return 2
 
     config = json.loads(config_path.read_text())
@@ -2133,14 +2071,24 @@ def run_negotiate(output_dir: str, chat_id_flag: str | None = None) -> int:
         except ValueError:
             tg_user_id = None
 
-    rc = run_mint(output_dir, config, telegram_user_id=tg_user_id)
+    if chat_id:
+        # run_mint emits a JSON event for non-chat CLI callers. In the
+        # Telegram skill path we already push the user-visible cards
+        # directly, so keep stdout quiet; otherwise OpenClaw may relay the
+        # JSON as a duplicate plain-text authorization card.
+        with contextlib.redirect_stdout(io.StringIO()):
+            rc = run_mint(output_dir, config, telegram_user_id=tg_user_id)
+    else:
+        rc = run_mint(output_dir, config, telegram_user_id=tg_user_id)
     if rc != 0:
+        write_trace(out, "negotiate.failed", phase="negotiate", reason="mint_failed", returncode=rc, chat_id=chat_id)
         return rc
 
     if not chat_id:
         sys.stderr.write(
             "No chat_id: pass --chat-id or ensure /root/.openclaw/agents/main/sessions/sessions.json has a telegram:direct entry.\n"
         )
+        write_trace(out, "negotiate.failed", phase="negotiate", reason="missing_chat_id")
         return 2
 
     # Authorization card — first surfacing of APOA after mint. Fires once,
@@ -2186,7 +2134,15 @@ def run_negotiate(output_dir: str, chat_id_flag: str | None = None) -> int:
                 constraints=config.get("constraints") or {},
             )
             if invite_rc != 0:
+                write_trace(out, "negotiate.failed", phase="negotiate", reason="invitation_failed", returncode=invite_rc, chat_id=chat_id)
                 return invite_rc
+            _founder_wait_for_join_and_prompt_group(
+                output_dir=out,
+                mint=mint,
+                chat_id=chat_id,
+                sender=send_telegram,
+            )
+            write_trace(out, "negotiate.waiting", phase="waiting_for_counterparty", role="founder", chat_id=chat_id, session_code=mint.get("session_code"))
             return 0
         elif mint.get("user_role") == "investor":
             # Symmetric Path 1 (post-mortem of INV-T6869 on 2026-04-27):
@@ -2207,6 +2163,10 @@ def run_negotiate(output_dir: str, chat_id_flag: str | None = None) -> int:
             wait_body = format_event({"type": "investor_waiting_for_founder"})
             if wait_body:
                 sender(chat_id, message=wait_body)
+            state = state_store.read_state(mint.get("negotiation_id") or "")
+            if state:
+                orchestrator.reconcile_state(state, sender=sender)
+            write_trace(out, "negotiate.waiting", phase="waiting_for_founder", role="investor", chat_id=chat_id, session_code=mint.get("session_code"))
             return 0
     else:
         # Demo (solo) mode: push the "starting" card directly from the
@@ -2241,122 +2201,23 @@ def run_negotiate(output_dir: str, chat_id_flag: str | None = None) -> int:
         sshsign_host=sshsign_host,
     )
     if stream_rc != 0 or not signing_event:
+        write_trace(out, "negotiate.stream_finished", phase="negotiate", returncode=stream_rc, signing_event=bool(signing_event), chat_id=chat_id)
         return stream_rc
 
     pending_id = signing_event.get("pending_id") or ""
     if not pending_id:
+        write_trace(out, "negotiate.completed_without_pending", phase="negotiate", chat_id=chat_id)
         return 0
 
     # Demo mode: single-party finalize.
-    return _await_sign_and_push(
+    rc = _await_sign_and_push(
         output_dir=out,
         chat_id=chat_id,
         sshsign_host=sshsign_host,
         pending_id=pending_id,
     )
-
-
-def _join_signing_session(
-    mint_output: dict,
-    shared_session: dict,
-    user_role: str,
-    neg_dir: Path,
-    repo: Path,
-    session_client=None,
-) -> dict | None:
-    """Call sshsign join-session with the joiner's APOA pubkey, then
-    re-fetch the session (now member-authenticated) to retrieve the
-    counterparty's APOA pubkey and write it to disk so the stream helper
-    can reference it.
-
-    On success, returns a dict of session fields to merge into mint.json
-    (session_code, status, counterparty pubkey path). On failure, None.
-    """
-    pubkey_path = neg_dir / "keys" / f"{user_role}_public.pem"
-    if not pubkey_path.exists():
-        sys.stderr.write(
-            f"Cannot join: APOA pubkey for role={user_role} not found at {pubkey_path}\n"
-        )
-        return None
-
-    try:
-        our_pubkey_pem = pubkey_path.read_text()
-    except OSError as e:
-        sys.stderr.write(f"reading {pubkey_path}: {e}\n")
-        return None
-
-    session_code = shared_session.get("session_code")
-    if not session_code:
-        sys.stderr.write("Cannot join: shared_session has no session_code\n")
-        return None
-
-    client = session_client or SshsignSession(
-        host=os.environ.get("SSHSIGN_HOST", "sshsign.dev"),
-    )
-
-    try:
-        join_result = client.join_session(
-            session_code=session_code,
-            role=user_role,
-            apoa_pubkey_pem=our_pubkey_pem,
-            party_did=os.environ.get("USER_DID") or None,
-        )
-    except SshsignSessionError as e:
-        sys.stderr.write(f"join-session failed: {e}\n")
-        return None
-
-    # Inverted-invitation: as soon as we're a member, write our own
-    # bot_handle to the session row so the founder bot can read it
-    # at the next get-session and compose the create-group card with
-    # accurate attribution. Non-fatal: a missing handle just means
-    # the founder card falls back to a generic "your investor's bot"
-    # phrase. Audit on sshsign captures the gap.
-    bot_handle = (os.environ.get("TELEGRAM_BOT_USERNAME") or "").strip()
-    if bot_handle:
-        joined_session_id = (join_result or {}).get("session_id")
-        if joined_session_id:
-            try:
-                client.update_session_member_text(
-                    joined_session_id, field="bot_handle", text_value=bot_handle,
-                )
-            except SshsignSessionError as e:
-                sys.stderr.write(f"join: bot_handle write: {e}\n")
-
-    # Re-fetch as member to pick up the counterparty's pubkey.
-    try:
-        member_view = client.get_session(session_code=session_code)
-    except SshsignSessionError as e:
-        sys.stderr.write(f"post-join get-session failed: {e}\n")
-        # Non-fatal — we joined successfully; stream helper can work without
-        # the counterparty pubkey for the distributed flow since sshsign
-        # validates offers by envelope signature at submission time.
-        member_view = join_result
-
-    counterparty_role = "investor" if user_role == "founder" else "founder"
-    counterparty_pubkey_pem = ""
-    for m in (member_view.get("members") or []):
-        if m.get("role") == counterparty_role:
-            counterparty_pubkey_pem = m.get("apoa_pubkey_pem") or ""
-            break
-
-    # Write counterparty pubkey to the mint dir so _stream_negotiate can
-    # reference it via its usual founder.json/investor.json path.
-    counterparty_pubkey_path = neg_dir / "keys" / f"{counterparty_role}_public.pem"
-    if counterparty_pubkey_pem:
-        try:
-            counterparty_pubkey_path.write_text(counterparty_pubkey_pem)
-        except OSError as e:
-            sys.stderr.write(f"writing counterparty pubkey: {e}\n")
-
-    return {
-        "session_code": session_code,
-        "session_created_at": member_view.get("created_at"),
-        "session_expires_at": member_view.get("expires_at"),
-        "session_status": member_view.get("status"),
-        "counterparty_pubkey_path": (
-            str(counterparty_pubkey_path) if counterparty_pubkey_pem else ""
-        ),
-    }
+    write_trace(out, "negotiate.completed", phase="completed", returncode=rc, pending_id=pending_id, chat_id=chat_id)
+    return rc
 
 
 def _fetch_session_for_join(
@@ -2485,13 +2346,12 @@ def _founder_post_invitation_card(
         ))
         return 3
 
-    label_parts = [
-        p for p in (
-            constraints.get("investor_name"),
-            constraints.get("investor_firm"),
-        ) if p
-    ]
-    counterparty_label = ", ".join(label_parts) if label_parts else "your counterparty"
+    investor_name = constraints.get("investor_name")
+    investor_firm = constraints.get("investor_firm")
+    if investor_name and investor_firm:
+        counterparty_label = f"{investor_name} at {investor_firm}"
+    else:
+        counterparty_label = investor_name or investor_firm or "your counterparty"
 
     invitation_body = format_event({
         "type": "invitation",
@@ -2500,9 +2360,105 @@ def _founder_post_invitation_card(
         "expires_at": mint.get("session_expires_at") or "",
         "ttl_hours": 24,
         "counterparty_label": counterparty_label,
+        "investor_name": investor_name or "",
+        "investor_firm": investor_firm or "",
     })
     if invitation_body:
         sender(chat_id, message=invitation_body)
+    return 0
+
+
+def _founder_wait_for_join_and_prompt_group(
+    output_dir: Path,
+    mint: dict,
+    chat_id: str,
+    sender=send_telegram,
+    session_client=None,
+    sleep_fn=None,
+    now_fn=None,
+) -> int:
+    """Inline Phase A fallback for founder launches.
+
+    Cron remains the durable recovery path, but the demo should not rely
+    on a later system-event tick to tell the founder what to do after the
+    investor joins. This helper waits briefly after the invite is posted;
+    when sshsign reports `joined`, it re-enters the normal founder resume
+    path, which posts the group setup/bind card and then exits before any
+    negotiation stream is spawned.
+    """
+    import time
+
+    negotiation_id = mint.get("negotiation_id") or ""
+    if not negotiation_id:
+        return 0
+
+    state = state_store.read_state(negotiation_id)
+    if not state or (state.get("role") or "founder") != "founder":
+        return 0
+
+    try:
+        max_wait = int(os.environ.get("CLAW_NEGOTIATE_FOUNDER_JOIN_WAIT", "1800"))
+    except ValueError:
+        max_wait = 1800
+    if max_wait <= 0:
+        return 0
+
+    if sleep_fn is None:
+        sleep_fn = time.sleep
+    if now_fn is None:
+        now_fn = time.time
+    try:
+        poll_interval = max(
+            1,
+            int(os.environ.get("CLAW_NEGOTIATE_FOUNDER_JOIN_POLL", "5")),
+        )
+    except ValueError:
+        poll_interval = 5
+
+    client = session_client or SshsignSession(
+        host=os.environ.get("SSHSIGN_HOST", "sshsign.dev"),
+    )
+    session_id = _sshsign_session_id(negotiation_id)
+    deadline = now_fn() + max_wait
+
+    while now_fn() < deadline:
+        try:
+            sess = client.get_session(session_id=session_id)
+        except SshsignSessionError as e:
+            sys.stderr.write(f"founder inline wait: get-session failed: {e}\n")
+            return 0
+
+        status = normalize_status(sess.get("status"))
+        if status == "joined":
+            write_trace(
+                output_dir,
+                "founder.inline_join_detected",
+                phase="waiting_for_group_bind",
+                negotiation_id=negotiation_id,
+                session_id=session_id,
+                chat_id=chat_id,
+            )
+            _run_founder_resume(
+                state,
+                session_client=client,
+                sender=sender,
+                now_fn=now_fn,
+            )
+            return 0
+        if is_terminal_status(status):
+            state_store.delete_state(negotiation_id)
+            return 0
+
+        sleep_fn(poll_interval)
+
+    write_trace(
+        output_dir,
+        "founder.inline_join_wait_timeout",
+        phase="waiting_for_counterparty",
+        negotiation_id=negotiation_id,
+        session_id=session_id,
+        chat_id=chat_id,
+    )
     return 0
 
 
@@ -2535,13 +2491,9 @@ def _founder_two_party_gate(
 
     # Counterparty label for the card — prefer the user's own NL phrasing
     # (investor_name + firm) over a generic word.
-    label_parts = [
-        p for p in (
-            constraints.get("investor_name"),
-            constraints.get("investor_firm"),
-        ) if p
-    ]
-    counterparty_label = ", ".join(label_parts) if label_parts else "your counterparty"
+    counterparty_label = (
+        _counterparty_label_from_constraints(constraints) or "your counterparty"
+    )
 
     invitation_body = format_event({
         "type": "invitation",
@@ -2550,6 +2502,8 @@ def _founder_two_party_gate(
         "expires_at": mint.get("session_expires_at") or "",
         "ttl_hours": 24,
         "counterparty_label": counterparty_label,
+        "investor_name": constraints.get("investor_name") or "",
+        "investor_firm": constraints.get("investor_firm") or "",
     })
     if invitation_body:
         sender(chat_id, message=invitation_body)
@@ -2587,117 +2541,8 @@ def _founder_two_party_gate(
     return 3
 
 
-def _build_invite_url(session_code: str) -> str:
-    """Generate a one-click invite URL for the given session code, or
-    empty when the provisioning service isn't available.
-
-    The one-click flow depends on an external provisioning service that
-    spins up a fresh OpenClaw instance for the joiner. Until that service
-    is deployed, we return an empty URL so the invitation card falls back
-    to the "reply to your own bot with 'Join INV-XXXXX'" instructions
-    (better than a broken link).
-
-    Environment:
-      PROVISION_BASE_URL — opt-in base URL for the provisioning service.
-        Only when set does the invitation card include a join URL.
-    """
-    code = (session_code or "").strip()
-    if not code:
-        return ""
-    base = (os.environ.get("PROVISION_BASE_URL") or "").strip()
-    if not base:
-        return ""
-    return f"{base.rstrip('/')}/join/{code}"
-
-
-_IDENTITY_TO_ENV: list[tuple[str, str]] = [
-    # (identity-dict key, env var name we set via openclaw config set)
-    # `role` is intentionally omitted — it's derived per-negotiation from the
-    # NL, not pinned to the user's profile (they can play either side in demo
-    # mode).
-    ("name_founder", "FOUNDER_NAME"),
-    ("title_founder", "FOUNDER_TITLE"),
-    ("company", "COMPANY_NAME"),
-    ("name_investor", "INVESTOR_NAME"),
-    ("firm", "INVESTOR_FIRM"),
-]
-
-
-def _build_env_updates(identity: dict) -> dict[str, str]:
-    """Map a parsed identity to the full set of env vars we need to persist.
-
-    When the user self-identifies as founder, we seed FOUNDER_NAME with their
-    name and leave INVESTOR_NAME at its current value (for the demo's AI
-    counterparty). When they self-identify as investor, we seed INVESTOR_NAME
-    and INVESTOR_FIRM. Either way COMPANY_NAME / title fields are set if the
-    user mentioned them.
-    """
-    updates: dict[str, str] = {}
-    name = (identity.get("name") or "").strip()
-    title = (identity.get("title") or "").strip()
-    company = (identity.get("company") or "").strip()
-    firm = (identity.get("firm") or "").strip()
-    role = identity.get("role", "founder")
-
-    if role == "founder":
-        if name:
-            updates["FOUNDER_NAME"] = name
-        if title:
-            updates["FOUNDER_TITLE"] = title
-        if company:
-            updates["COMPANY_NAME"] = company
-    else:
-        if name:
-            updates["INVESTOR_NAME"] = name
-        if firm:
-            updates["INVESTOR_FIRM"] = firm
-        # Investors often self-identify with title too ("Partner", "MD")
-        if title:
-            updates["INVESTOR_FIRM"] = updates.get("INVESTOR_FIRM", firm)  # firm stays
-    return updates
-
-
-def _persist_env_updates(updates: dict[str, str], runner=subprocess.run) -> list[str]:
-    """Apply the identity updates via `openclaw config set` — one call per
-    env var so OpenClaw's config validator sees each change individually.
-
-    Returns the list of env vars that failed to persist (empty on success).
-    """
-    failures: list[str] = []
-    for key, value in updates.items():
-        path = f"skills.entries.negotiate_safe.env.{key}"
-        try:
-            result = runner(
-                ["openclaw", "config", "set", path, value],
-                capture_output=True, text=True, timeout=10,
-            )
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            failures.append(key)
-            continue
-        if result.returncode != 0:
-            failures.append(key)
-    return failures
-
-
-_BIND_CODE_RE = re.compile(r"(INV-[A-Z0-9]+)", re.IGNORECASE)
-
-
-def _extract_bind_code(message: str) -> str | None:
-    """Pull the INV-XXXXX code out of a `/bind ...` message body.
-
-    Tolerates `/bind INV-XYZ`, `/bind@Bot INV-XYZ`, extra whitespace, or
-    the code being the only token. Case-insensitive match; returned code
-    is upper-cased since the server stores codes upper-case.
-    """
-    if not message:
-        return None
-    m = _BIND_CODE_RE.search(message)
-    if not m:
-        return None
-    return m.group(1).upper()
-
-
 CRON_JOB_NAME = "negotiate_safe-scan"
+SYSTEM_CRON_MARKER = "# negotiate_safe-scan"
 
 
 # P7-5 investor-side wait tuning. Exposed as module constants so tests
@@ -2817,9 +2662,8 @@ def _investor_wait_for_founder_streaming(
                 if sess_group_str != target_chat:
                     target_chat = sess_group_str
 
-            status = (sess.get("status") or "").lower()
-            if status in ("canceled", "rescinded", "rescinded_after_sign",
-                          "completed", "expired"):
+            status = normalize_status(sess.get("status"))
+            if is_terminal_status(status):
                 body = format_event({
                     "type": "investor_session_ended", "status": status,
                 })
@@ -2857,6 +2701,7 @@ def _investor_wait_for_founder_streaming(
 def ensure_cron(
     interval: str = "30s",
     runner: "callable | None" = None,
+    system_runner: "callable | None" = None,
 ) -> tuple[bool, str | None]:
     """Install the ``negotiate_safe-scan`` cron job if absent.
 
@@ -2884,8 +2729,19 @@ def ensure_cron(
         means an error prevented us from ensuring the job; error
         message is returned for caller-side logging.
     """
+    allow_system_fallback = runner is None or system_runner is not None
     if runner is None:
         runner = subprocess.run
+    if system_runner is None:
+        system_runner = runner
+
+    def _fallback(reason: str) -> tuple[bool, str | None]:
+        if not allow_system_fallback:
+            return False, reason
+        ok, fallback_err = _ensure_system_cron(runner=system_runner)
+        if ok:
+            return True, None
+        return False, f"{reason}; system cron fallback failed: {fallback_err}"
 
     # list + parse-json to detect the existing job.
     try:
@@ -2894,12 +2750,12 @@ def ensure_cron(
             capture_output=True, text=True, timeout=10,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
-        return False, f"openclaw cron list failed: {e}"
+        return _fallback(f"openclaw cron list failed: {e}")
 
     if list_res.returncode != 0:
         # Pairing wall, unpaired gateway, etc. Log + continue; scan
         # can be installed manually by ops as a fallback.
-        return False, (
+        return _fallback(
             f"openclaw cron list rc={list_res.returncode}: "
             f"{(list_res.stderr or list_res.stdout or '').strip()[:200]}"
         )
@@ -2907,7 +2763,7 @@ def ensure_cron(
     try:
         jobs = json.loads(list_res.stdout or "[]")
     except json.JSONDecodeError as e:
-        return False, f"openclaw cron list: invalid JSON: {e}"
+        return _fallback(f"openclaw cron list: invalid JSON: {e}")
 
     if isinstance(jobs, dict):
         # Some OC versions wrap the list under a top-level key.
@@ -2940,14 +2796,65 @@ def ensure_cron(
     try:
         add_res = runner(add_argv, capture_output=True, text=True, timeout=10)
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
-        return False, f"openclaw cron add failed: {e}"
+        return _fallback(f"openclaw cron add failed: {e}")
 
     if add_res.returncode != 0:
-        return False, (
+        return _fallback(
             f"openclaw cron add rc={add_res.returncode}: "
             f"{(add_res.stderr or add_res.stdout or '').strip()[:200]}"
         )
     return True, None
+
+
+def _ensure_system_cron(runner=subprocess.run) -> tuple[bool, str | None]:
+    """Install a portable OS-cron scan heartbeat when OpenClaw cron is unavailable."""
+    skill_dir = Path(__file__).resolve().parent
+    python_bin = sys.executable or "python3"
+    cron_line = (
+        f"* * * * * cd {skill_dir} && {python_bin} run_safe.py scan "
+        f">> /tmp/negotiate_safe_scan.log 2>&1 {SYSTEM_CRON_MARKER}"
+    )
+    try:
+        list_res = runner(["crontab", "-l"], capture_output=True, text=True, timeout=10)
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        return False, f"crontab -l failed: {e}"
+    current = list_res.stdout if list_res.returncode == 0 else ""
+    if SYSTEM_CRON_MARKER in current:
+        return True, None
+    new_cron = (current.rstrip() + "\n" if current.strip() else "") + cron_line + "\n"
+    try:
+        add_res = runner(
+            ["crontab", "-"],
+            input=new_cron,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        return False, f"crontab install failed: {e}"
+    if add_res.returncode != 0:
+        return False, (add_res.stderr or add_res.stdout or f"exit {add_res.returncode}").strip()
+    return True, None
+
+
+def _hydrate_scan_env_from_openclaw_config() -> None:
+    """Let OS cron run the skill without hand-maintained env files."""
+    cfg_path = Path("/root/.openclaw/openclaw.json")
+    try:
+        cfg = json.loads(cfg_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return
+    env = (
+        cfg.get("skills", {})
+        .get("entries", {})
+        .get("negotiate_safe", {})
+        .get("env", {})
+    )
+    if not isinstance(env, dict):
+        return
+    for key, value in env.items():
+        if isinstance(key, str) and isinstance(value, str):
+            os.environ.setdefault(key, value)
 
 
 def _run_founder_resume(
@@ -3002,6 +2909,20 @@ def _run_founder_resume(
         )
         state_store.delete_state(negotiation_id)
         return 2
+    if not _state_matches_output_dir(negotiation_id, out):
+        sys.stderr.write(
+            f"resume: state {negotiation_id} no longer owns {out}; "
+            "cleaning stale pointer\n"
+        )
+        state_store.delete_state(negotiation_id)
+        return 2
+    write_trace(out, "resume.founder.start", phase="resume", role="founder", negotiation_id=negotiation_id, session_code=state.get("session_code"))
+    had_pid_file_before_resume = (out / ".session.pid").exists()
+    had_live_stream_before_resume = _pid_file_has_live_negotiation(out)
+    try:
+        (out / ".session.pid").write_text(str(os.getpid()))
+    except OSError:
+        pass
 
     sshsign_host = sshsign_host or os.environ.get("SSHSIGN_HOST", "sshsign.dev")
     client = session_client or SshsignSession(host=sshsign_host)
@@ -3017,8 +2938,8 @@ def _run_founder_resume(
         sys.stderr.write(f"resume: get-session failed: {e}\n")
         return 3
 
-    status = (sess.get("status") or "").lower()
-    if status in ("canceled", "rescinded", "rescinded_after_sign", "completed", "expired"):
+    status = normalize_status(sess.get("status"))
+    if is_terminal_status(status):
         # Terminal. Drop the pointer; don't re-emit status cards (the
         # turn that terminated the session already sent the right one).
         sys.stderr.write(
@@ -3028,18 +2949,54 @@ def _run_founder_resume(
         state_store.delete_state(negotiation_id)
         return 2
 
-    if status != "joined":
-        # Investor hasn't joined yet. Scan will try again on next tick.
-        return 1
+    # If a previous founder stream was killed by the host timeout, sshsign
+    # can still say founder_streaming_at is set even though no local stream is
+    # alive. Clear the marker so this scan can safely restart the stream.
+    if had_pid_file_before_resume and not had_live_stream_before_resume:
+        for member in sess.get("members") or []:
+            if (
+                (member.get("role") or "").lower() == "founder"
+                and member.get("founder_streaming_at")
+            ):
+                if _has_authoritative_offer_history(
+                    negotiation_id, sshsign_host=sshsign_host,
+                ):
+                    write_trace(
+                        out,
+                        "resume.founder.stale_streaming_history_present",
+                        phase="resume",
+                        negotiation_id=negotiation_id,
+                        session_id=session_id,
+                    )
+                    return 3
+                try:
+                    client.update_session_member(
+                        session_id, field="founder_streaming_at", value=0,
+                    )
+                    member["founder_streaming_at"] = 0
+                    write_trace(
+                        out,
+                        "resume.founder.cleared_stale_streaming",
+                        phase="resume",
+                        negotiation_id=negotiation_id,
+                        session_id=session_id,
+                    )
+                except SshsignSessionError as e:
+                    sys.stderr.write(
+                        f"resume: clearing stale founder_streaming_at: {e}\n"
+                    )
+                break
 
-    # Find this caller's member row and check dedup / founder_resumed_at.
-    members = sess.get("members") or []
-    founder_row: dict | None = None
-    for m in members:
-        if (m.get("role") or "").lower() == "founder":
-            founder_row = m
-            break
-    if founder_row is None:
+    group_chat_id = _resolve_group_chat_id(session_id, session_client=client)
+    founder_phase, founder_row = classify_founder_resume(
+        sess,
+        group_chat_id=group_chat_id,
+    )
+    if founder_phase == FOUNDER_WAIT_COUNTERPARTY:
+        # Investor hasn't joined yet. Scan will try again on next tick.
+        write_trace(out, "resume.founder.not_ready", phase="waiting_for_counterparty", negotiation_id=negotiation_id, session_id=session_id, status=status)
+        return 1
+    if founder_phase == FOUNDER_STALE_NO_MEMBER or founder_row is None:
         sys.stderr.write("resume: session has no founder member row; cleaning\n")
         state_store.delete_state(negotiation_id)
         return 2
@@ -3062,20 +3019,40 @@ def _run_founder_resume(
     #                            (group already bound, A never ran).
     #   (any,  set,  any)        Done — streaming has begun on a prior
     #                            pass; nothing more to do here.
-    streaming_at = founder_row.get("founder_streaming_at")
     resumed_at = founder_row.get("founder_resumed_at")
-    group_chat_id = _resolve_group_chat_id(session_id, session_client=client)
 
-    if streaming_at:
+    if founder_phase == FOUNDER_ALREADY_STREAMING:
         # Done state. Stream already kicked off on a prior tick.
+        founder_dm = str(state.get("founder_dm_chat_id") or "")
+        reconcile_rc = _creator_reconcile_finalization(
+            output_dir=out,
+            chat_id=founder_dm,
+            sshsign_host=sshsign_host,
+            session_id=session_id,
+            group_chat_id=group_chat_id,
+            sender=sender,
+            session_client=client,
+        )
+        if reconcile_rc in (0, 3):
+            state_store.delete_state(negotiation_id)
+        write_trace(
+            out,
+            "resume.founder.noop",
+            phase="resume",
+            reason="already_streaming",
+            negotiation_id=negotiation_id,
+            session_id=session_id,
+            reconcile_returncode=reconcile_rc,
+        )
         return 0
 
-    if not group_chat_id:
+    if founder_phase in (FOUNDER_PROMPT_GROUP, FOUNDER_WAIT_GROUP_ALREADY_PROMPTED):
         # Phase A or A-done. Founder hasn't /bound a group yet.
-        if resumed_at:
+        if founder_phase == FOUNDER_WAIT_GROUP_ALREADY_PROMPTED:
             # Phase A-done: card already posted on a prior tick;
             # still waiting for the founder to /bind. No-op so we
             # don't spam the create-group card every 10s.
+            write_trace(out, "resume.founder.noop", phase="waiting_for_group_bind", reason="already_prompted_for_group", negotiation_id=negotiation_id, session_id=session_id)
             return 0
 
         # Phase A: post create-group card, set resumed_at, exit.
@@ -3104,9 +3081,9 @@ def _run_founder_resume(
             inv_name = (meta_member.get("investor_name") or "").strip()
             inv_firm = (meta_member.get("investor_firm") or "").strip()
             if inv_name and inv_firm:
-                investor_label = f"{inv_name}, {inv_firm}"
-            elif inv_name:
-                investor_label = inv_name
+                investor_label = f"{inv_name} at {inv_firm}"
+            elif inv_name or inv_firm:
+                investor_label = inv_name or inv_firm
             for m in (sess.get("members") or []):
                 if (m.get("role") or "").lower() == "investor":
                     investor_handle = (m.get("bot_handle") or "").strip()
@@ -3138,6 +3115,22 @@ def _run_founder_resume(
             # write; idempotent (sshsign overwrites). Worst case: we
             # post the card again (mild spam) but never advance to
             # phase B. Acceptable risk for transient sshsign blips.
+        write_trace(out, "resume.founder.group_required", phase="waiting_for_group_bind", negotiation_id=negotiation_id, session_id=session_id, chat_id=founder_dm_for_card)
+        return 0
+
+    if founder_phase != FOUNDER_START_STREAM:
+        sys.stderr.write(f"resume: unknown founder phase {founder_phase}\n")
+        return 3
+
+    lease = _acquire_workflow_lease(
+        client,
+        output_dir=out,
+        session_id=session_id,
+        role="founder",
+        action="negotiate",
+    )
+    if lease is None:
+        write_trace(out, "resume.founder.lease_held", phase="resume", negotiation_id=negotiation_id, session_id=session_id)
         return 0
 
     # group_chat_id is set: Phase B (or combined first-pass if
@@ -3183,35 +3176,43 @@ def _run_founder_resume(
     bot_username = os.environ.get("TELEGRAM_BOT_USERNAME", "AgenticPOA_bot")
     history_neg_id = mint.get("negotiation_id")
 
-    # Set streaming_at BEFORE invoking _stream_to_telegram. The
-    # investor's bounded poll gates run_distributed on this signal;
-    # setting it post-stream would deadlock both sides (investor
-    # only unblocks after founder's stream is DONE, by which time
-    # the founder's run_distributed has exited).
     try:
-        client.update_session_member(
-            session_id, field="founder_streaming_at", value=int(now_fn()),
-        )
-    except SshsignSessionError as e:
-        # Non-fatal: investor will time out at 180s with emergency
-        # card. Stream proceeds; audit trail captures the gap.
-        sys.stderr.write(f"resume: update-session-member streaming_at: {e}\n")
+        # Set streaming_at BEFORE invoking _stream_to_telegram. The
+        # investor's bounded poll gates run_distributed on this signal;
+        # setting it post-stream would deadlock both sides (investor
+        # only unblocks after founder's stream is DONE, by which time
+        # the founder's run_distributed has exited).
+        try:
+            client.update_session_member(
+                session_id, field="founder_streaming_at", value=int(now_fn()),
+            )
+        except SshsignSessionError as e:
+            # Non-fatal: investor will time out at 180s with emergency
+            # card. Stream proceeds; audit trail captures the gap.
+            sys.stderr.write(f"resume: update-session-member streaming_at: {e}\n")
 
-    stream_rc, signing_event = _stream_to_telegram(
-        output_dir=out,
-        chat_id=str(founder_dm),
-        constraints=config.get("constraints"),
-        bot_username=bot_username,
-        group_chat_id=group_chat_id,
-        negotiation_id=history_neg_id,
-        sshsign_host=sshsign_host,
-    )
+        try:
+            stream_rc, signing_event = _stream_to_telegram(
+                output_dir=out,
+                chat_id=str(founder_dm),
+                constraints=config.get("constraints"),
+                bot_username=bot_username,
+                group_chat_id=group_chat_id,
+                negotiation_id=history_neg_id,
+                sshsign_host=sshsign_host,
+            )
+        except Exception as e:
+            write_trace(out, "resume.founder.stream_exception", phase="negotiating", negotiation_id=negotiation_id, session_id=session_id, error=str(e), group_chat_id=group_chat_id)
+            raise
+    finally:
+        _release_workflow_lease(client, lease)
 
     if stream_rc != 0 or not signing_event:
         # Stream failed or exited before a signing event landed. State
         # stays (not terminal yet); next tick will re-check and dedup
         # if resumed_at is still set. Real failures are rare; let the
         # scan loop + audit log guide recovery.
+        write_trace(out, "resume.founder.stream_finished", phase="negotiating", negotiation_id=negotiation_id, session_id=session_id, returncode=stream_rc, signing_event=bool(signing_event), group_chat_id=group_chat_id)
         return stream_rc
 
     pending_id = signing_event.get("pending_id") or ""
@@ -3227,9 +3228,60 @@ def _run_founder_resume(
         session_id=session_id,
         group_chat_id=group_chat_id,
     )
-    # Terminal outcome either way: clean up the pointer.
-    state_store.delete_state(negotiation_id)
+    # If we timed out while waiting for signatures, keep the pointer so
+    # cron can reconcile later once sshsign reports the aggregate session
+    # complete. Other return codes are terminal for this local flow.
+    if rc not in (1, 4):
+        state_store.delete_state(negotiation_id)
+    write_trace(out, "resume.founder.completed", phase="completed", negotiation_id=negotiation_id, session_id=session_id, returncode=rc, pending_id=pending_id, group_chat_id=group_chat_id)
     return rc
+
+
+def _has_other_active_state_for_chat(
+    negotiation_id: str,
+    chat_id: str,
+    role: str,
+) -> bool:
+    """Return true when the same Telegram DM has another active pointer.
+
+    Cron scans all local state pointers, including leftovers from older
+    live-test attempts. When an old sshsign session later becomes
+    terminal, we should retire that pointer without sending a terminal
+    card into a newer active DM flow for the same user.
+    """
+    if not chat_id:
+        return False
+    key = "investor_dm_chat_id" if role == "investor" else "founder_dm_chat_id"
+    try:
+        pointers = state_store.list_active()
+    except Exception as e:  # pragma: no cover - defensive; status card is safer
+        sys.stderr.write(f"active-state lookup failed: {e}\n")
+        return False
+    for pointer in pointers:
+        if pointer.get("negotiation_id") == negotiation_id:
+            continue
+        if str(pointer.get(key) or "") == str(chat_id):
+            return True
+    return False
+
+
+def _state_matches_output_dir(negotiation_id: str, out: Path) -> bool:
+    """Verify a state pointer still owns its output directory.
+
+    The live skill reuses `/tmp/safe_negotiate` across attempts. A stale
+    pointer from an older negotiation can therefore point at a directory
+    whose `mint.json` now belongs to a newer negotiation. Treat that
+    pointer as stale before it can stream the wrong config/history pair.
+    """
+    mint_path = out / "mint.json"
+    if not mint_path.exists():
+        return True
+    try:
+        mint = json.loads(mint_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return True
+    minted_id = mint.get("negotiation_id") or ""
+    return not minted_id or minted_id == negotiation_id
 
 
 def _run_investor_resume(
@@ -3274,10 +3326,6 @@ def _run_investor_resume(
         )
         return 2
 
-    if state.get("investor_streaming_started"):
-        # Already streaming on a prior tick. Stay idle.
-        return 0
-
     out = Path(output_dir_raw)
     if not out.exists():
         sys.stderr.write(
@@ -3285,6 +3333,18 @@ def _run_investor_resume(
         )
         state_store.delete_state(negotiation_id)
         return 2
+    if not _state_matches_output_dir(negotiation_id, out):
+        sys.stderr.write(
+            f"investor resume: state {negotiation_id} no longer owns {out}; "
+            "cleaning stale pointer\n"
+        )
+        state_store.delete_state(negotiation_id)
+        return 2
+    write_trace(out, "resume.investor.start", phase="resume", role="investor", negotiation_id=negotiation_id, session_code=state.get("session_code"))
+    try:
+        (out / ".session.pid").write_text(str(os.getpid()))
+    except OSError:
+        pass
 
     sshsign_host = sshsign_host or os.environ.get("SSHSIGN_HOST", "sshsign.dev")
     client = session_client or SshsignSession(host=sshsign_host)
@@ -3299,38 +3359,66 @@ def _run_investor_resume(
         sys.stderr.write(f"investor resume: get-session failed: {e}\n")
         return 3
 
-    status = (sess.get("status") or "").lower()
-    if status in ("canceled", "rescinded", "rescinded_after_sign", "completed", "expired"):
+    status = normalize_status(sess.get("status"))
+    if is_terminal_status(status):
         # Surface a status card to the investor so they aren't left
-        # staring at a stale "waiting" card.
+        # staring at a stale "waiting" card. If this is an older
+        # terminal pointer for a DM that already has a different active
+        # negotiation, clean it silently; otherwise the current demo DM
+        # gets confusing canceled/expired cards from prior attempts.
         body = format_event({"type": "investor_session_ended", "status": status})
         target = state.get("investor_dm_chat_id") or ""
-        if body and target:
+        suppress_card = _has_other_active_state_for_chat(
+            negotiation_id,
+            target,
+            "investor",
+        )
+        if body and target and not suppress_card:
             sender(target, message=body)
         state_store.delete_state(negotiation_id)
         return 2
 
-    members = sess.get("members") or []
-    founder_row = next(
-        (m for m in members if (m.get("role") or "").lower() == "founder"),
-        None,
+    group_chat_id = _resolve_group_chat_id(session_id, session_client=client)
+    investor_phase, _founder_row = classify_investor_resume(
+        state,
+        sess,
+        group_chat_id=group_chat_id,
     )
-    if not founder_row:
+    if investor_phase == INVESTOR_ALREADY_STREAMING:
+        write_trace(output_dir_raw, "resume.investor.noop", phase="resume", reason="already_streaming", negotiation_id=negotiation_id)
+        return 0
+    if investor_phase == INVESTOR_STALE_NO_FOUNDER:
         # Race: founder member row not present yet. Skip this tick.
         return 1
 
-    if not founder_row.get("founder_streaming_at"):
+    if investor_phase == INVESTOR_WAIT_FOUNDER_STREAM:
         # Founder hasn't /bound + started streaming yet. Investor stays
         # in the wait state. The cron will retry every tick.
+        write_trace(out, "resume.investor.not_ready", phase="waiting_for_founder", negotiation_id=negotiation_id, session_id=session_id)
         return 1
 
-    group_chat_id = _resolve_group_chat_id(session_id, session_client=client)
-    if not group_chat_id:
+    if investor_phase == INVESTOR_WAIT_GROUP_BIND:
         # founder_streaming_at is set but no group_chat_id resolves —
         # shouldn't happen since the founder sets streaming_at AFTER
         # /bind writes group_chat_id. Defensive: treat as not-yet-ready
         # and let the next tick retry.
+        write_trace(out, "resume.investor.not_ready", phase="waiting_for_group_bind", negotiation_id=negotiation_id, session_id=session_id)
         return 1
+
+    if investor_phase != INVESTOR_START_STREAM:
+        sys.stderr.write(f"investor resume: unknown phase {investor_phase}\n")
+        return 3
+
+    lease = _acquire_workflow_lease(
+        client,
+        output_dir=out,
+        session_id=session_id,
+        role="investor",
+        action="negotiate",
+    )
+    if lease is None:
+        write_trace(out, "resume.investor.lease_held", phase="resume", negotiation_id=negotiation_id, session_id=session_id)
+        return 0
 
     # Mark as started BEFORE we spawn the stream subprocess. This is
     # the dedup gate: even if the stream takes 5 minutes and the cron
@@ -3338,6 +3426,9 @@ def _run_investor_resume(
     # exits without double-spawning.
     new_state = dict(state)
     new_state["investor_streaming_started"] = True
+    send_online_card = not bool(new_state.get("investor_both_online_sent"))
+    if send_online_card:
+        new_state["investor_both_online_sent"] = True
     try:
         state_store.write_state(new_state)
     except state_store.StateCorruptError as e:
@@ -3348,7 +3439,7 @@ def _run_investor_resume(
     # Both sides online card to the GROUP — mirrors what the old
     # in-process wait helper used to post.
     online_body = format_event({"type": "investor_both_online"})
-    if online_body:
+    if send_online_card and online_body:
         sender(group_chat_id, message=online_body)
 
     # Re-hydrate mint + constraints from disk.
@@ -3367,20 +3458,37 @@ def _run_investor_resume(
     bot_username = os.environ.get("TELEGRAM_BOT_USERNAME", "AgenticPOAInvestor_bot")
     history_neg_id = mint.get("negotiation_id")
 
-    stream_rc, signing_event = _stream_to_telegram(
-        output_dir=out,
-        chat_id=investor_dm,
-        constraints=config.get("constraints"),
-        bot_username=bot_username,
-        group_chat_id=group_chat_id,
-        negotiation_id=history_neg_id,
-        sshsign_host=sshsign_host,
-    )
+    try:
+        try:
+            stream_rc, signing_event = _stream_to_telegram(
+                output_dir=out,
+                chat_id=investor_dm,
+                constraints=config.get("constraints"),
+                bot_username=bot_username,
+                group_chat_id=group_chat_id,
+                negotiation_id=history_neg_id,
+                sshsign_host=sshsign_host,
+            )
+        except Exception as e:
+            write_trace(out, "resume.investor.stream_exception", phase="negotiating", negotiation_id=negotiation_id, session_id=session_id, error=str(e), group_chat_id=group_chat_id)
+            raise
+    finally:
+        _release_workflow_lease(client, lease)
 
     if stream_rc != 0 or not signing_event:
         # Stream failed before signing. Leave pointer in place so a
         # retry can re-attempt; in practice run_distributed completion
         # should always emit a signing event when it gets that far.
+        retry_state = state_store.read_state(negotiation_id) or {}
+        if retry_state.get("investor_streaming_started"):
+            retry_state.pop("investor_streaming_started", None)
+            try:
+                state_store.write_state(retry_state)
+            except state_store.StateCorruptError as e:
+                sys.stderr.write(
+                    f"investor resume: clearing started flag failed: {e}\n"
+                )
+        write_trace(out, "resume.investor.stream_finished", phase="negotiating", negotiation_id=negotiation_id, session_id=session_id, returncode=stream_rc, signing_event=bool(signing_event), group_chat_id=group_chat_id)
         return stream_rc
 
     pending_id = signing_event.get("pending_id") or ""
@@ -3398,6 +3506,7 @@ def _run_investor_resume(
         group_chat_id=group_chat_id,
     )
     state_store.delete_state(negotiation_id)
+    write_trace(out, "resume.investor.completed", phase="completed", negotiation_id=negotiation_id, session_id=session_id, returncode=rc, pending_id=pending_id, group_chat_id=group_chat_id)
     return rc
 
 
@@ -3406,49 +3515,20 @@ def run_scan(
     sender=send_telegram,
     now_fn=None,
 ) -> int:
-    """P7-5 cron entrypoint.
+    """Option B cron/recovery entrypoint.
 
-    Invoked by an OpenClaw cron job (every 30s, configured at mint
-    time). Iterates every active state pointer under
-    ``~/.openclaw/skill-state/negotiate_safe/`` and, for each, asks
-    sshsign whether the session has advanced enough to warrant a
-    resume. Fully idempotent: running twice in the same tick is safe
-    (the second invocation sees founder_resumed_at set and no-ops).
-
-    Returns 0 always — a single bad pointer shouldn't fail the whole
-    tick. Individual errors go to stderr for audit.
+    Each scan runs short shared-orchestrator reconciliation over local state
+    pointers: project missing local-role cards, and run at most one due AI turn
+    under a sshsign lease. Cron is a wakeup/recovery mechanism, not workflow
+    truth.
     """
-    try:
-        pointers = state_store.list_active()
-    except Exception as e:
-        sys.stderr.write(f"scan: list_active failed: {e}\n")
-        return 0
-
-    for state in pointers:
-        # Dispatch by role. Pointers written before symmetric Path 1
-        # (no `role` field) default to founder for back-compat.
-        role = (state.get("role") or "founder").lower()
-        try:
-            if role == "investor":
-                _run_investor_resume(
-                    state,
-                    session_client=session_client,
-                    sender=sender,
-                    now_fn=now_fn,
-                )
-            else:
-                _run_founder_resume(
-                    state,
-                    session_client=session_client,
-                    sender=sender,
-                    now_fn=now_fn,
-                )
-        except Exception as e:
-            # Contain per-pointer failures so one bad session doesn't
-            # halt the tick; the next cron run re-attempts.
-            sys.stderr.write(
-                f"scan: resume failed for {state.get('negotiation_id')}: {e}\n"
-            )
+    del now_fn
+    _hydrate_scan_env_from_openclaw_config()
+    orchestrator.reconcile_active(
+        states=state_store.list_active(),
+        session_client=session_client,
+        sender=sender,
+    )
     return 0
 
 
@@ -3552,11 +3632,12 @@ def run_bind(
         return 3
 
     # Success: post confirmation IN THE GROUP (not the DM).
-    counterparty_label = (
-        (meta.get("investor_name") or "") + (
-            (", " + meta["investor_firm"]) if meta.get("investor_firm") else ""
-        )
-    ).strip(", ") or "your investor"
+    inv_name = meta.get("investor_name") or ""
+    inv_firm = meta.get("investor_firm") or ""
+    if inv_name and inv_firm:
+        counterparty_label = f"{inv_name} at {inv_firm}"
+    else:
+        counterparty_label = inv_name or inv_firm or "your investor"
     body = format_event({
         "type": "group_bound",
         "session_code": sess.get("session_code") or session_code,
@@ -3574,9 +3655,12 @@ def run_bind(
     if status == "joined":
         negotiation_id = _negotiation_id_from_sshsign_session_id(session_id)
         state = state_store.read_state(negotiation_id)
-        if state is not None:
-            # Fire-and-forget return value; resume owns its own exit code.
-            _run_founder_resume(state, session_client=client, sender=sender)
+        if state:
+            orchestrator.reconcile_state(
+                state,
+                session_client=client,
+                sender=sender,
+            )
 
     return 0
 
@@ -3591,6 +3675,9 @@ def run_setup(
     stashed negotiation message exists from a prior first-run attempt —
     hand off to prepare automatically so the user doesn't have to retype.
     """
+    if message.strip().upper() == "GO" and (Path("/tmp/safe_negotiate") / "config.json").exists():
+        return run_negotiate("/tmp/safe_negotiate", chat_id_flag=chat_id_flag)
+
     chat_id = resolve_chat_id(chat_id_flag)
     typing = TypingLoop(chat_id=chat_id or "", bot_token=get_bot_token())
     typing.start()
@@ -3612,6 +3699,21 @@ def run_setup(
                 sender(chat_id, message=(
                     "\u26a0\ufe0f I need at least your name. "
                     "Try: \"I'm Juan Figuera, CEO of APOA Inc\"."
+                ))
+            return 1
+        role = (identity.get("role") or "founder").lower()
+        if role == "founder" and not identity.get("company"):
+            if chat_id:
+                sender(chat_id, message=(
+                    "\u26a0\ufe0f I also need your company name for the SAFE. "
+                    "Try: \"I'm Juan Figuera, CEO of APOA Inc\"."
+                ))
+            return 1
+        if role == "investor" and not identity.get("firm"):
+            if chat_id:
+                sender(chat_id, message=(
+                    "\u26a0\ufe0f I also need your investor firm or fund. "
+                    "Try: \"I'm Nora Vassileva, partner at SD Fund\"."
                 ))
             return 1
 
@@ -3730,6 +3832,17 @@ def run_cancel(
     client = session_client or SshsignSession(
         host=os.environ.get("SSHSIGN_HOST", "sshsign.dev"),
     )
+    negotiation_id = mint.get("negotiation_id") or ""
+
+    def _cleanup_local_cancel_state() -> None:
+        try:
+            state_store.delete_state(negotiation_id)
+        except Exception as _e:  # noqa: BLE001
+            sys.stderr.write(f"cancel: state cleanup: {_e}\n")
+        try:
+            (out / ".session.pid").unlink()
+        except (OSError, FileNotFoundError):
+            pass
 
     # State 4 check: refuse if already completed.
     try:
@@ -3742,20 +3855,23 @@ def run_cancel(
                 "Try again in a moment."
             ))
         return 3
-    status = (sess.get("status") or "").lower()
-    if status == "completed":
-        body = format_event({"type": "cancel_completed_refused"})
+    status = sess.get("status")
+    preflight = cancel_preflight(status)
+    if preflight.action == "refuse":
+        body = format_event({"type": preflight.event_type})
         if chat_id and body:
             sender(chat_id, message=body)
-        return 1
-    if status in ("canceled", "rescinded_after_sign", "expired"):
+        return preflight.return_code or 1
+    if preflight.action == "noop":
         # Already in a terminal state — nothing to do. Tell the user so
         # they don't think the command silently failed.
+        _cleanup_local_cancel_state()
         if chat_id:
             sender(chat_id, message=(
-                f"\u2139\ufe0f This negotiation is already {status.replace('_', ' ')}."  # ℹ
+                "\u2139\ufe0f This negotiation is already "  # ℹ
+                f"{preflight.status.replace('_', ' ')}."
             ))
-        return 0
+        return preflight.return_code or 0
 
     # State 1/2 vs 3 split based on local .signed marker.
     rescind = _has_signed(out)
@@ -3774,6 +3890,19 @@ def run_cancel(
     try:
         client.cancel_session(session_id=session_id, rescind=rescind)
     except SshsignSessionError as e:
+        try:
+            latest = client.get_session(session_id=session_id)
+            latest_preflight = cancel_preflight(latest.get("status"))
+        except SshsignSessionError:
+            latest_preflight = None
+        if latest_preflight and latest_preflight.action == "noop":
+            _cleanup_local_cancel_state()
+            if chat_id:
+                sender(chat_id, message=(
+                    "\u2139\ufe0f This negotiation is already "  # ℹ
+                    f"{latest_preflight.status.replace('_', ' ')}."
+                ))
+            return latest_preflight.return_code or 0
         sys.stderr.write(f"cancel-session failed: {e}\n")
         if chat_id:
             sender(chat_id, message=(
@@ -3782,43 +3911,24 @@ def run_cancel(
             ))
         return 3
 
-    if rescind:
-        body = format_event({
-            "type": "rescinded_after_sign_initiator",
-            "session_code": session_code,
-        })
-    else:
-        body = format_event({
-            "type": "canceled_before_deal_initiator",
-            "session_code": session_code,
-        })
+    body = format_event({
+        "type": cancel_success_event_type(rescind=rescind),
+        "session_code": session_code,
+    })
     if chat_id and body:
         sender(chat_id, message=body)
 
     # Clean up local state so a future mint isn't blocked by
     # the active-negotiation gate. State pointer might already
     # be gone if scan beat us to it; ignore not-found.
-    try:
-        state_store.delete_state(mint.get("negotiation_id") or "")
-    except Exception as _e:  # noqa: BLE001
-        sys.stderr.write(f"cancel: state cleanup: {_e}\n")
-    try:
-        (out / ".session.pid").unlink()
-    except (OSError, FileNotFoundError):
-        pass
+    _cleanup_local_cancel_state()
     return 0
 
 
 def run_profile(chat_id_flag: str | None = None, sender=send_telegram) -> int:
     """Show the user's saved identity (read from env vars) as a chat card."""
     chat_id = resolve_chat_id(chat_id_flag)
-    profile = {
-        "founder_name": os.environ.get("FOUNDER_NAME", ""),
-        "founder_title": os.environ.get("FOUNDER_TITLE", ""),
-        "company_name": os.environ.get("COMPANY_NAME", ""),
-        "investor_name": os.environ.get("INVESTOR_NAME", ""),
-        "investor_firm": os.environ.get("INVESTOR_FIRM", ""),
-    }
+    profile = profile_from_env()
     body = format_event({"type": "profile", "profile": profile})
     if not body:
         return 2
@@ -3826,6 +3936,50 @@ def run_profile(chat_id_flag: str | None = None, sender=send_telegram) -> int:
         sender(chat_id, message=body)
     else:
         sys.stdout.write(body + "\n")
+    return 0
+
+
+def run_doctor() -> int:
+    """Validate operator install/configuration for this skill."""
+    checks = doctor_checks()
+    sys.stdout.write(format_doctor(checks))
+    return 0 if all(c.ok for c in checks) else 1
+
+
+def run_operator_setup(
+    role: str,
+    bot_username: str = "",
+    sshsign_host: str = "",
+    negotiate_repo_path: str = "",
+    scan_interval: str = "",
+    persister=None,
+) -> int:
+    """Persist operator-level skill env vars via OpenClaw config."""
+    try:
+        updates = build_operator_updates(
+            role=role,
+            bot_username=bot_username,
+            sshsign_host=sshsign_host,
+            negotiate_repo_path=negotiate_repo_path,
+            scan_interval=scan_interval,
+        )
+    except ValueError as exc:
+        sys.stderr.write(str(exc) + "\n")
+        return 2
+    persist_fn = persister or persist_operator_updates
+    failures = persist_fn(updates)
+    for key, value in updates.items():
+        status = "fail" if key in failures else "ok"
+        sys.stdout.write(f"{status:<5} {key}={value}\n")
+    if failures:
+        sys.stderr.write(f"Failed to persist: {', '.join(failures)}\n")
+        return 1
+    return 0
+
+
+def run_manifest() -> int:
+    """Print the install/deploy manifest as JSON."""
+    sys.stdout.write(json.dumps(load_skill_manifest(), indent=2) + "\n")
     return 0
 
 
@@ -3868,6 +4022,25 @@ def main() -> int:
         help="Show the user's currently saved identity",
     )
     profile.add_argument("--chat-id", default="")
+
+    sub.add_parser(
+        "doctor",
+        help="Validate operator install/configuration before running a negotiation.",
+    )
+    sub.add_parser(
+        "manifest",
+        help="Print the skill install/deploy manifest as JSON.",
+    )
+
+    operator_setup = sub.add_parser(
+        "operator-setup",
+        help="Persist operator-level skill configuration (role, bot handle, services).",
+    )
+    operator_setup.add_argument("--role", required=True, choices=["founder", "investor"])
+    operator_setup.add_argument("--bot-username", default="")
+    operator_setup.add_argument("--sshsign-host", default="")
+    operator_setup.add_argument("--negotiate-repo-path", default="")
+    operator_setup.add_argument("--scan-interval", default="")
 
     cancel = sub.add_parser(
         "cancel",
@@ -3947,6 +4120,18 @@ def main() -> int:
         return run_setup(message, chat_id_flag=args.chat_id or None)
     elif args.command == "profile":
         return run_profile(chat_id_flag=args.chat_id or None)
+    elif args.command == "doctor":
+        return run_doctor()
+    elif args.command == "manifest":
+        return run_manifest()
+    elif args.command == "operator-setup":
+        return run_operator_setup(
+            role=args.role,
+            bot_username=args.bot_username,
+            sshsign_host=args.sshsign_host,
+            negotiate_repo_path=args.negotiate_repo_path,
+            scan_interval=args.scan_interval,
+        )
     elif args.command == "cancel":
         return run_cancel(args.output_dir, chat_id_flag=args.chat_id or None)
     elif args.command == "bind":

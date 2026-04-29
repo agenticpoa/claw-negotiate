@@ -1,0 +1,78 @@
+{
+  "name": "negotiate_safe",
+  "version": "0.1.0",
+  "description": "OpenClaw skill for APOA-constrained YC SAFE negotiation.",
+  "entrypoint": "run_safe.py",
+  "skill_file": "SKILL.md",
+  "files": [
+    "SKILL.md",
+    "_turn_once.py",
+    "_stream_negotiate.py",
+    "artifacts.py",
+    "cancel_flow.py",
+    "delivery_store.py",
+    "format_event.py",
+    "identity.py",
+    "links.py",
+    "mint_token.py",
+    "minting.py",
+    "negotiate.py",
+    "operator_ready.py",
+    "orchestrator.py",
+    "parse_constraints.py",
+    "parse_identity.py",
+    "reconcile.py",
+    "run_safe.py",
+    "session_flow.py",
+    "sshsign_session.py",
+    "state_store.py",
+    "projector.py",
+    "telegram.py",
+    "telegram_push.py",
+    "trace_log.py",
+    "typing_loop.py",
+    "upstream.py"
+  ],
+  "required_bins": [
+    "python3",
+    "ssh",
+    "openclaw"
+  ],
+  "required_env": [
+    "ANTHROPIC_API_KEY",
+    "NEGOTIATE_REPO_PATH",
+    "USER_DID",
+    "NEGOTIATE_SAFE_BOT_ROLE",
+    "TELEGRAM_BOT_USERNAME"
+  ],
+  "optional_env": [
+    "SSHSIGN_HOST",
+    "CLAW_NEGOTIATE_SCAN_INTERVAL",
+    "COMPANY_NAME",
+    "FOUNDER_NAME",
+    "FOUNDER_TITLE",
+    "INVESTOR_NAME",
+    "INVESTOR_FIRM",
+    "NEGOTIATION_TTL",
+    "PROVISION_BASE_URL"
+  ],
+  "commands": {
+    "demo_checklist": "python3 scripts/demo_checklist.py",
+    "smoke_install": "python3 scripts/smoke_install.py --skill-dir /root/.agents/skills/negotiate_safe",
+    "doctor": "python3 run_safe.py doctor",
+    "operator_setup": "python3 run_safe.py operator-setup --role founder --bot-username @YourBot --sshsign-host sshsign.dev --negotiate-repo-path /path/to/negotiate",
+    "prepare": "python3 run_safe.py prepare --message-file /tmp/safe_request.txt --output-dir /tmp/safe_negotiate",
+    "negotiate": "python3 run_safe.py negotiate --output-dir /tmp/safe_negotiate",
+    "scan": "python3 run_safe.py scan",
+    "bind": "python3 run_safe.py bind --message \"/bind INV-XXXXX\" --chat-id <group_chat_id> --from-id <telegram_user_id>"
+  },
+  "health_checks": [
+    "doctor",
+    "unit_tests"
+  ],
+  "notes": [
+    "sshsign is the shared workflow source of truth.",
+    "Telegram signing URLs must only route to signer DMs.",
+    "Native sshsign leases gate negotiation streams and creator-side finalization."
+  ]
+}

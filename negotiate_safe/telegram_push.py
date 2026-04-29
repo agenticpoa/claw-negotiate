@@ -11,8 +11,11 @@ from __future__ import annotations
 
 import json
 import subprocess
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+
+from typing_loop import get_bot_token
 
 
 DEFAULT_SESSIONS_PATH = Path("/root/.openclaw/agents/main/sessions/sessions.json")
@@ -35,6 +38,100 @@ class SigningUrlTargetError(ValueError):
     primitive enforces this at the call boundary — runtime proof that no
     code path accidentally routes a signing URL to a shared venue.
     """
+
+
+def _normalize_telegram_target(chat_id: str | int) -> str:
+    """Return the raw Telegram chat id expected by OpenClaw/Telegram.
+
+    OpenClaw envelopes sometimes label chat ids as ``group:-123`` or
+    ``telegram:-123``. The transport boundary must pass the numeric id to
+    ``openclaw message send``; leaking the label through produces Telegram
+    API 400s for group sends.
+    """
+    target = str(chat_id).strip()
+    if ":" in target:
+        target = target.rsplit(":", 1)[-1].strip()
+    return target
+
+
+def _parse_bot_api_result(body: str) -> SendResult:
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return SendResult(ok=False, message_id=None, error="non-JSON response from Telegram")
+    if isinstance(payload, dict) and payload.get("ok"):
+        result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+        mid = result.get("message_id")
+        return SendResult(ok=True, message_id=str(mid) if mid is not None else None, error=None)
+    return SendResult(ok=False, message_id=None, error=json.dumps(payload))
+
+
+def _multipart_body(
+    fields: dict[str, str],
+    file_field: str,
+    file_path: Path,
+    boundary: str,
+) -> bytes:
+    chunks: list[bytes] = []
+    for name, value in fields.items():
+        chunks.append(f"--{boundary}\r\n".encode())
+        chunks.append(
+            f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode()
+        )
+        chunks.append(str(value).encode())
+        chunks.append(b"\r\n")
+    chunks.append(f"--{boundary}\r\n".encode())
+    chunks.append(
+        (
+            f'Content-Disposition: form-data; name="{file_field}"; '
+            f'filename="{file_path.name}"\r\n'
+            "Content-Type: application/octet-stream\r\n\r\n"
+        ).encode()
+    )
+    chunks.append(file_path.read_bytes())
+    chunks.append(b"\r\n")
+    chunks.append(f"--{boundary}--\r\n".encode())
+    return b"".join(chunks)
+
+
+def _send_telegram_bot_api(
+    chat_id: str,
+    message: str | None = None,
+    media_path: str | Path | None = None,
+    bot_token: str | None = None,
+    opener=urllib.request.urlopen,
+) -> SendResult:
+    token = bot_token or get_bot_token()
+    if not token:
+        return SendResult(ok=False, message_id=None, error="Telegram bot token not available")
+
+    target = _normalize_telegram_target(chat_id)
+    try:
+        if media_path:
+            path = Path(media_path)
+            boundary = "----claw-negotiate-boundary"
+            fields = {"chat_id": target}
+            if message:
+                fields["caption"] = message
+            body = _multipart_body(fields, "document", path, boundary)
+            req = urllib.request.Request(
+                f"https://api.telegram.org/bot{token}/sendDocument",
+                data=body,
+                headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+                method="POST",
+            )
+        else:
+            body = json.dumps({"chat_id": target, "text": message or ""}).encode()
+            req = urllib.request.Request(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        with opener(req, timeout=30) as resp:
+            return _parse_bot_api_result(resp.read().decode())
+    except Exception as e:
+        return SendResult(ok=False, message_id=None, error=f"Telegram Bot API send failed: {e}")
 
 
 def resolve_chat_id(
@@ -85,6 +182,7 @@ def send_telegram(
     force_document: bool = False,
     openclaw_bin: str = "openclaw",
     runner=subprocess.run,
+    opener=urllib.request.urlopen,
 ) -> SendResult:
     """Send a message and/or file attachment to a Telegram chat via openclaw CLI.
 
@@ -98,10 +196,20 @@ def send_telegram(
     if not message and not media_path:
         raise ValueError("send_telegram requires message and/or media_path")
 
+    token = get_bot_token()
+    if token:
+        return _send_telegram_bot_api(
+            chat_id=chat_id,
+            message=message,
+            media_path=media_path,
+            bot_token=token,
+            opener=opener,
+        )
+
     cmd = [
         openclaw_bin, "message", "send",
         "--channel", "telegram",
-        "--target", str(chat_id),
+        "--target", _normalize_telegram_target(chat_id),
         "--json",
     ]
     if message:
@@ -114,13 +222,37 @@ def send_telegram(
     try:
         result = runner(cmd, capture_output=True, text=True, timeout=30)
     except subprocess.TimeoutExpired:
-        return SendResult(ok=False, message_id=None, error="timeout")
+        fallback = _send_telegram_bot_api(
+            chat_id=chat_id,
+            message=message,
+            media_path=media_path,
+            opener=opener,
+        )
+        if fallback.ok:
+            return fallback
+        return SendResult(ok=False, message_id=None, error=f"timeout; fallback: {fallback.error}")
     except FileNotFoundError:
-        return SendResult(ok=False, message_id=None, error=f"{openclaw_bin} not found on PATH")
+        fallback = _send_telegram_bot_api(
+            chat_id=chat_id,
+            message=message,
+            media_path=media_path,
+            opener=opener,
+        )
+        if fallback.ok:
+            return fallback
+        return SendResult(ok=False, message_id=None, error=f"{openclaw_bin} not found on PATH; fallback: {fallback.error}")
 
     if result.returncode != 0:
         err = (result.stderr or result.stdout or "").strip() or f"exit {result.returncode}"
-        return SendResult(ok=False, message_id=None, error=err)
+        fallback = _send_telegram_bot_api(
+            chat_id=chat_id,
+            message=message,
+            media_path=media_path,
+            opener=opener,
+        )
+        if fallback.ok:
+            return fallback
+        return SendResult(ok=False, message_id=None, error=f"{err}; fallback: {fallback.error}")
 
     try:
         payload = json.loads(result.stdout)

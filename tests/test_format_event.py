@@ -57,13 +57,13 @@ class TestFormatters:
     def test_confirm_new_copy(self, sample_constraints):
         event = {"type": "confirm", "constraints": sample_constraints}
         out = fe.format_confirm(event)
-        assert "Please review the terms below and confirm:" in out
-        assert "**Valuation cap:** $8M – $12M" in out
-        assert "**Discount:** 20% or better" in out
-        assert "**Pro-rata rights:** required" in out
-        assert "**MFN clause:** preferred" in out
-        assert "reply **GO**" in out
-        assert "please send your edits" in out
+        assert "Review your founder-side authorization" in out
+        assert "Your agent will only agree to terms within these limits:" in out
+        assert "• Valuation cap: **$8M – $12M**" in out
+        assert "• Discount: **at least 20%**" in out
+        assert "• Pro-rata rights: required" in out
+        assert "• MFN: preferred" in out
+        assert "Reply **GO** to create the invitation code" in out
 
     def test_confirm_drops_primer_section(self, sample_constraints):
         out = fe.format_confirm({"type": "confirm", "constraints": sample_constraints})
@@ -75,25 +75,27 @@ class TestFormatters:
         for flag in ("required", "preferred", "indifferent"):
             c = {**sample_constraints, "pro_rata": flag, "mfn": flag}
             out = fe.format_confirm({"type": "confirm", "constraints": c})
-            assert "**Pro-rata rights:**" in out
-            assert "**MFN clause:**" in out
+            assert "• Pro-rata rights:" in out
+            assert "• MFN:" in out
 
     def test_confirm_shows_founder_role_header(self, sample_constraints):
         c = {**sample_constraints, "role": "founder"}
         out = fe.format_confirm({"type": "confirm", "constraints": c})
-        assert "Negotiating as **founder**" in out
+        assert "Review your founder-side authorization" in out
         assert "\U0001f464" in out  # 👤
 
     def test_confirm_shows_investor_role_header(self, sample_constraints):
         c = {**sample_constraints, "role": "investor"}
         out = fe.format_confirm({"type": "confirm", "constraints": c})
-        assert "Negotiating as **investor**" in out
+        assert "Review your investor-side authorization" in out
         assert "\U0001f4bc" in out  # 💼
+        assert "Reply **GO** to join the negotiation" in out
+        assert "create the invitation code" not in out
 
     def test_confirm_defaults_to_founder_when_role_missing(self, sample_constraints):
         c = {k: v for k, v in sample_constraints.items() if k != "role"}
         out = fe.format_confirm({"type": "confirm", "constraints": c})
-        assert "Negotiating as **founder**" in out
+        assert "Review your founder-side authorization" in out
 
     def test_confirm_founder_identity_block(self, sample_constraints):
         c = {
@@ -106,8 +108,8 @@ class TestFormatters:
             "investor_firm": "Bay Capital",
         }
         out = fe.format_confirm({"type": "confirm", "constraints": c})
-        assert "**You:** Jane Doe, CEO, of Acme Corp" in out
-        assert "**Counterparty:** Mark Stone, at Bay Capital" in out
+        assert "**You:** Jane Doe, CEO of Acme Corp" in out
+        assert "**Counterparty:** Mark Stone at Bay Capital" in out
 
     def test_confirm_investor_identity_block(self, sample_constraints):
         c = {
@@ -120,8 +122,8 @@ class TestFormatters:
             "investor_firm": "Blue Fund",
         }
         out = fe.format_confirm({"type": "confirm", "constraints": c})
-        assert "**You:** Alex Chen, at Blue Fund" in out
-        assert "**Counterparty:** Dr. Rivera, CEO, of QuantumLabs" in out
+        assert "**You:** Alex Chen at Blue Fund" in out
+        assert "**Counterparty:** Dr. Rivera, CEO of QuantumLabs" in out
 
     def test_confirm_omits_missing_identity_fields(self, sample_constraints):
         # Only company_name known on the founder side; only firm on investor side
@@ -151,7 +153,7 @@ class TestFormatters:
         out = fe.format_confirm({"type": "confirm", "constraints": c})
         assert "**You:**" not in out
         assert "**Counterparty:**" not in out
-        assert "Negotiating as **founder**" in out  # role header still shown
+        assert "Review your founder-side authorization" in out
 
     # ---- authorized (our emit) ----
 
@@ -170,10 +172,10 @@ class TestFormatters:
         out = fe.format_authorized(event)
         assert "Your agent's authorization is set" in out
         assert "$8M – $12M" in out
-        assert "cannot go higher" in out
+        assert "terms within these limits" in out
         assert "20%" in out
         assert "Pro-rata rights: required" in out
-        assert "MFN clause: preferred" in out
+        assert "MFN: preferred" in out
         assert "cancel" in out.lower()
         assert "APOA" in out  # cited in footer, not headline
         # Token ID should NOT be shown — user-first framing
@@ -431,6 +433,19 @@ class TestFormatInvitation:
         assert any(ch in out for ch in ("Signal", "SMS", "email"))
         # Should tell the user what they can do while waiting.
         assert "cancel" in out.lower()
+
+    def test_includes_known_investor_identity_in_join_template(self):
+        out = fe.format_invitation({
+            "type": "invitation",
+            "session_code": "INV-7K3X9",
+            "founder_bot_handle": "@alice_negotiator_bot",
+            "investor_name": "Nora Vassileva",
+            "investor_firm": "SD Fund",
+        })
+        assert (
+            "Joining INV-7K3X9 via @alice_negotiator_bot, "
+            "I am Nora Vassileva at SD Fund, cap up to $X"
+        ) in out
 
     def test_generic_counterparty_label_when_missing(self):
         out = fe.format_invitation({
@@ -699,7 +714,7 @@ class TestProposeNewTerms:
 
     def test_dispatch_confirm(self, sample_constraints):
         out = fe.format_event({"type": "confirm", "constraints": sample_constraints})
-        assert "Please review the terms below" in out
+        assert "Review your founder-side authorization" in out
 
     def test_dispatch_authorized(self):
         out = fe.format_event({

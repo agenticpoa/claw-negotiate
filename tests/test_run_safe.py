@@ -22,7 +22,8 @@ class TestPrepare:
 
         assert rc == 0
         config = json.loads((tmp_path / "config.json").read_text())
-        assert config["constraints"] == sample_constraints
+        expected = {**sample_constraints, "founder_name": "Test User"}
+        assert config["constraints"] == expected
         assert config["founder_name"] == "Juan"
         assert config["founder_title"] == "CEO"
 
@@ -71,12 +72,24 @@ class TestPrepare:
         assert sender.call_count == 2
         # First call: quick interstitial
         first_msg = sender.call_args_list[0].kwargs.get("message") or ""
-        assert "Analyzing" in first_msg
+        assert "Reading your negotiation terms" in first_msg
         # Second call: the confirm card
         second_msg = sender.call_args_list[1].kwargs.get("message") or ""
-        assert "Please review the terms below" in second_msg
-        assert "**Valuation cap:**" in second_msg
+        assert "Review your founder-side authorization" in second_msg
+        assert "• Valuation cap:" in second_msg
         assert "**GO**" in second_msg
+
+    def test_chat_prepare_does_not_print_constraints_to_stdout(
+        self, tmp_path, sample_constraints, capsys,
+    ):
+        sender = MagicMock()
+        with patch.object(rs, "extract_constraints", return_value=sample_constraints), \
+             patch.object(rs, "resolve_chat_id", return_value="12345"):
+            rc = rs.run_prepare("test", str(tmp_path), "F", "CEO",
+                               chat_id_flag="12345", sender=sender)
+
+        assert rc == 0
+        assert capsys.readouterr().out == ""
 
     def test_interstitial_sent_before_slow_parse(self, tmp_path, sample_constraints):
         """Interstitial MUST be sent before extract_constraints is called."""
@@ -94,7 +107,7 @@ class TestPrepare:
                           chat_id_flag="12345", sender=sender)
 
         assert call_log[0][0] == "send"
-        assert "Analyzing" in call_log[0][1]
+        assert "Reading your negotiation terms" in call_log[0][1]
         assert call_log[1][0] == "parse"
         assert call_log[2][0] == "send"
 
@@ -152,6 +165,105 @@ class TestPrepare:
         # confirm card got pushed
         assert sender.call_count == 2  # interstitial + confirm
 
+    def test_founder_profile_requires_company_when_role_configured(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("NEGOTIATE_SAFE_BOT_ROLE", "founder")
+        monkeypatch.setenv("FOUNDER_NAME", "Juan Figuera")
+        monkeypatch.delenv("COMPANY_NAME", raising=False)
+        monkeypatch.setattr(rs, "IDENTITY_SENTINEL_PATH", tmp_path / "pending.txt")
+        sender = MagicMock()
+        parse = MagicMock()
+
+        with patch.object(rs, "extract_constraints", parse), \
+             patch.object(rs, "resolve_chat_id", return_value="12345"):
+            rc = rs.run_prepare(
+                "Live negotiation with Nora at SD Fund. Cap $30M-$40M.",
+                str(tmp_path / "out"),
+                chat_id_flag="12345",
+                sender=sender,
+            )
+
+        assert rc == 2
+        parse.assert_not_called()
+        assert "founder profile" in sender.call_args.kwargs["message"].lower()
+
+    def test_enriches_founder_profile_and_requires_counterparty_identity(
+        self, tmp_path, monkeypatch,
+    ):
+        monkeypatch.setenv("FOUNDER_NAME", "Juan Figuera")
+        monkeypatch.setenv("FOUNDER_TITLE", "CEO")
+        monkeypatch.setenv("COMPANY_NAME", "APOA Inc")
+        constraints = {
+            "role": "founder",
+            "mode": "two_party",
+            "session_code": None,
+            "valuation_cap_min": 30_000_000,
+            "valuation_cap_max": 40_000_000,
+            "discount_min": 0.10,
+            "pro_rata": "required",
+            "mfn": "indifferent",
+            "company_name": None,
+            "founder_name": None,
+            "founder_title": None,
+            "investor_name": None,
+            "investor_firm": None,
+            "investment_amount": None,
+        }
+        sender = MagicMock()
+
+        with patch.object(rs, "extract_constraints", return_value=constraints), \
+             patch.object(rs, "resolve_chat_id", return_value="12345"):
+            rc = rs.run_prepare(
+                "Live negotiation. Cap $30M-$40M.",
+                str(tmp_path / "out"),
+                chat_id_flag="12345",
+                sender=sender,
+            )
+
+        assert rc == 1
+        assert "investor's name and firm" in sender.call_args.kwargs["message"]
+
+    def test_enriches_saved_founder_profile_into_constraints(
+        self, tmp_path, monkeypatch,
+    ):
+        monkeypatch.setenv("FOUNDER_NAME", "Juan Figuera")
+        monkeypatch.setenv("FOUNDER_TITLE", "CEO")
+        monkeypatch.setenv("COMPANY_NAME", "APOA Inc")
+        constraints = {
+            "role": "founder",
+            "mode": "two_party",
+            "session_code": None,
+            "valuation_cap_min": 30_000_000,
+            "valuation_cap_max": 40_000_000,
+            "discount_min": 0.10,
+            "pro_rata": "required",
+            "mfn": "indifferent",
+            "company_name": None,
+            "founder_name": None,
+            "founder_title": None,
+            "investor_name": "Nora Vassileva",
+            "investor_firm": "SD Fund",
+            "investment_amount": None,
+        }
+        sender = MagicMock()
+
+        with patch.object(rs, "extract_constraints", return_value=constraints), \
+             patch.object(rs, "resolve_chat_id", return_value="12345"):
+            rc = rs.run_prepare(
+                "Live negotiation with Nora Vassileva at SD Fund. Cap $30M-$40M.",
+                str(tmp_path / "out"),
+                chat_id_flag="12345",
+                sender=sender,
+            )
+
+        assert rc == 0
+        config = json.loads((tmp_path / "out" / "config.json").read_text())
+        saved = config["constraints"]
+        assert saved["founder_name"] == "Juan Figuera"
+        assert saved["founder_title"] == "CEO"
+        assert saved["company_name"] == "APOA Inc"
+        assert saved["investor_name"] == "Nora Vassileva"
+        assert saved["investor_firm"] == "SD Fund"
+
 
 class TestRunSetup:
     def _identity(self, **overrides):
@@ -208,6 +320,27 @@ class TestRunSetup:
         msg = sender.call_args.kwargs.get("message") or ""
         assert "name" in msg.lower()
 
+    def test_missing_founder_company_rejects_with_message(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(rs, "IDENTITY_SENTINEL_PATH", tmp_path / "pending.txt")
+        sender = MagicMock()
+        with patch.object(rs, "extract_identity", return_value=self._identity(company=None)), \
+             patch.object(rs, "resolve_chat_id", return_value="12345"):
+            rc = rs.run_setup("I'm Juan", chat_id_flag="12345", sender=sender,
+                             persister=MagicMock(return_value=[]))
+        assert rc == 1
+        assert "company" in sender.call_args.kwargs["message"].lower()
+
+    def test_missing_investor_firm_rejects_with_message(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(rs, "IDENTITY_SENTINEL_PATH", tmp_path / "pending.txt")
+        sender = MagicMock()
+        identity = self._identity(role="investor", name="Nora", company=None, firm=None)
+        with patch.object(rs, "extract_identity", return_value=identity), \
+             patch.object(rs, "resolve_chat_id", return_value="12345"):
+            rc = rs.run_setup("I'm Nora", chat_id_flag="12345", sender=sender,
+                             persister=MagicMock(return_value=[]))
+        assert rc == 1
+        assert "firm" in sender.call_args.kwargs["message"].lower()
+
     def test_auto_continues_with_stashed_negotiation(self, tmp_path, sample_constraints, monkeypatch):
         """If the user tried to negotiate before identity setup, run_setup
         resumes that negotiation automatically after persisting identity."""
@@ -229,6 +362,21 @@ class TestRunSetup:
         assert mock_prepare.call_args.kwargs["message"] == "Negotiate my SAFE with X"
         # Sentinel file cleaned up
         assert not sentinel.exists()
+
+    def test_go_misrouted_to_setup_launches_negotiate(self, tmp_path, monkeypatch):
+        out = tmp_path / "safe_negotiate"
+        out.mkdir()
+        (out / "config.json").write_text("{}")
+        monkeypatch.chdir(tmp_path)
+        # run_setup hardcodes /tmp/safe_negotiate because this guard exists
+        # for live OpenClaw dispatch mistakes, so patch Path at the callsite.
+        mock_negotiate = MagicMock(return_value=0)
+        with patch.object(rs, "Path", side_effect=lambda p=".": out if p == "/tmp/safe_negotiate" else Path(p)), \
+             patch.object(rs, "run_negotiate", mock_negotiate):
+            rc = rs.run_setup("GO", chat_id_flag="12345", sender=MagicMock())
+
+        assert rc == 0
+        mock_negotiate.assert_called_once_with("/tmp/safe_negotiate", chat_id_flag="12345")
 
     def test_no_stash_means_no_auto_continue(self, tmp_path, monkeypatch):
         monkeypatch.setattr(rs, "IDENTITY_SENTINEL_PATH", tmp_path / "pending.txt")
@@ -350,6 +498,23 @@ class TestNegotiate:
         assert kwargs["chat_id"] == "12345"
         assert kwargs["constraints"] == sample_constraints
 
+    def test_chat_negotiate_suppresses_mint_stdout(
+        self, tmp_path, sample_constraints, capsys,
+    ):
+        self._write_config(tmp_path, sample_constraints)
+
+        def noisy_mint(output_dir, config, **kwargs):
+            print(json.dumps({"type": "authorized"}))
+            return 0
+
+        with patch.object(rs, "run_mint", side_effect=noisy_mint), \
+             patch.object(rs, "_stream_to_telegram", return_value=(0, None)), \
+             patch.object(rs, "resolve_chat_id", return_value="12345"):
+            rc = rs.run_negotiate(str(tmp_path), chat_id_flag="12345")
+
+        assert rc == 0
+        assert capsys.readouterr().out == ""
+
     def test_writes_session_pid_file_before_mint(self, tmp_path, sample_constraints):
         """Each negotiate run claims the output dir by writing its PID. This
         lets any prior stale process detect it's been superseded when its
@@ -421,11 +586,13 @@ class TestNegotiate:
             return 0
 
         mock_invite = MagicMock(return_value=0)
+        mock_inline = MagicMock(return_value=0)
         mock_stream = MagicMock(return_value=(0, None))
         mock_gate = MagicMock(return_value=0)
 
         with patch.object(rs, "run_mint", side_effect=fake_mint), \
              patch.object(rs, "_founder_post_invitation_card", mock_invite), \
+             patch.object(rs, "_founder_wait_for_join_and_prompt_group", mock_inline), \
              patch.object(rs, "_founder_two_party_gate", mock_gate), \
              patch.object(rs, "_stream_to_telegram", mock_stream), \
              patch.object(rs, "resolve_chat_id", return_value="12345"):
@@ -433,8 +600,51 @@ class TestNegotiate:
 
         assert rc == 0
         mock_invite.assert_called_once()
+        mock_inline.assert_called_once()
         mock_stream.assert_not_called()
         mock_gate.assert_not_called()
+
+    def test_founder_inline_wait_prompts_group_when_investor_joins(
+        self, tmp_path, sample_constraints, monkeypatch,
+    ):
+        monkeypatch.setenv("CLAW_NEGOTIATE_STATE_DIR", str(tmp_path / "state"))
+        monkeypatch.setenv("CLAW_NEGOTIATE_FOUNDER_JOIN_WAIT", "30")
+        self._write_config(tmp_path, sample_constraints)
+
+        def fake_mint(output_dir, config, **kwargs):
+            (Path(output_dir) / "mint.json").write_text(json.dumps({
+                "negotiation_id": "neg_1",
+                "mode": "two_party",
+                "user_role": "founder",
+                "session_code": "INV-X",
+            }))
+            rs.state_store.write_state({
+                "negotiation_id": "neg_1",
+                "output_dir": str(output_dir),
+                "session_code": "INV-X",
+                "role": "founder",
+                "founder_dm_chat_id": "12345",
+            })
+            return 0
+
+        client = MagicMock()
+        client.get_session.return_value = {
+            "session_id": "session_neg_1",
+            "session_code": "INV-X",
+            "status": "joined",
+            "members": [{"role": "founder"}, {"role": "investor"}],
+        }
+        mock_resume = MagicMock(return_value=0)
+
+        with patch.object(rs, "run_mint", side_effect=fake_mint), \
+             patch.object(rs, "_founder_post_invitation_card", return_value=0), \
+             patch.object(rs, "SshsignSession", return_value=client), \
+             patch.object(rs, "_run_founder_resume", mock_resume), \
+             patch.object(rs, "resolve_chat_id", return_value="12345"):
+            rc = rs.run_negotiate(str(tmp_path), chat_id_flag="12345")
+
+        assert rc == 0
+        mock_resume.assert_called_once()
 
     def test_two_party_founder_propagates_invite_failure(self, tmp_path, sample_constraints):
         """If invitation card posting fails (rc != 0) we still skip the
@@ -536,6 +746,41 @@ class TestCli:
 
         assert rc == 0
         assert mock_stream.call_args.kwargs["chat_id"] == "99999"
+
+    def test_doctor_subcommand(self, capsys):
+        checks = [MagicMock(ok=True)]
+        with patch.object(rs, "doctor_checks", return_value=checks), \
+             patch.object(rs, "format_doctor", return_value="ok    all\n"), \
+             patch.object(sys, "argv", ["run_safe.py", "doctor"]):
+            rc = rs.main()
+        assert rc == 0
+        assert "ok    all" in capsys.readouterr().out
+
+    def test_manifest_subcommand(self, capsys):
+        with patch.object(rs, "load_skill_manifest", return_value={
+            "name": "negotiate_safe",
+            "files": ["SKILL.md", "run_safe.py"],
+        }), patch.object(sys, "argv", ["run_safe.py", "manifest"]):
+            rc = rs.main()
+        assert rc == 0
+        out = json.loads(capsys.readouterr().out)
+        assert out["name"] == "negotiate_safe"
+
+    def test_operator_setup_subcommand(self, capsys):
+        with patch.object(rs, "persist_operator_updates", return_value=[]), \
+             patch.object(sys, "argv", [
+                 "run_safe.py", "operator-setup",
+                 "--role", "founder",
+                 "--bot-username", "@FounderBot",
+                 "--sshsign-host", "sshsign.dev",
+                 "--negotiate-repo-path", "/opt/negotiate",
+                 "--scan-interval", "5s",
+             ]):
+            rc = rs.main()
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "NEGOTIATE_SAFE_BOT_ROLE=founder" in out
+        assert "TELEGRAM_BOT_USERNAME=FounderBot" in out
 
 
 class TestRunMintRoleFlipping:
@@ -846,6 +1091,8 @@ class TestRegisterSigningSession:
         # can see "you're joining Acme's negotiation" pre-join.
         assert call.kwargs["metadata_public"] == {
             "use_case": "safe", "version": 1, "company_name": "Acme",
+            "founder_name": "Jane", "founder_title": "CEO",
+            "investor_name": "Mark", "investor_firm": "Bay",
         }
         # P8-2: the SSH argv quote-stripping workaround is gone — with the
         # new --metadata-member-b64 path, display fields with spaces/quotes
@@ -856,8 +1103,8 @@ class TestRegisterSigningSession:
         assert md["founder_title"] == "CEO"
         assert md["investor_name"] == "Mark"
         assert md["investor_firm"] == "Bay"
-        # company_name stays in metadata_public (pre-join visibility) and
-        # is NOT duplicated into member-scope.
+        # public metadata mirrors display identity so joiners can mint and
+        # sign against the same names before they become session members.
         assert "company_name" not in md
 
     def test_investor_role_reads_investor_pubkey(self, tmp_path):
@@ -1170,9 +1417,16 @@ class TestSshHistoryHelpers:
             "round": 1, "from": "moderator", "type": "offer", "metadata": "{}",
         }) is None
 
+    def test_synthesize_keeps_round_zero(self):
+        out = rs._synthesize_offer_event({
+            "round": 0, "from": "founder", "type": "offer", "metadata": "{}",
+        })
+        assert out is not None
+        assert out["round"] == 0
+
     def test_synthesize_skips_invalid_round(self):
         assert rs._synthesize_offer_event({
-            "round": 0, "from": "founder", "type": "offer", "metadata": "{}",
+            "round": -1, "from": "founder", "type": "offer", "metadata": "{}",
         }) is None
         assert rs._synthesize_offer_event({
             "round": "nope", "from": "founder", "type": "offer", "metadata": "{}",
@@ -1215,6 +1469,7 @@ class TestStreamToTelegram:
     def _fake_proc(self, stdout_lines: list[str], returncode: int = 0):
         proc = MagicMock()
         proc.stdout = iter(stdout_lines)
+        proc.stderr = iter([])
         proc.wait = MagicMock()
         proc.returncode = returncode
         return proc
@@ -1251,6 +1506,25 @@ class TestStreamToTelegram:
         assert sender.call_count == 3
         for call in sender.call_args_list:
             assert call.args[0] == "12345"
+
+    def test_stream_helper_gets_repo_path_from_mint_json(self, tmp_path):
+        (tmp_path / "mint.json").write_text(json.dumps({
+            "negotiate_repo_path": "/opt/agenticpoa-negotiate",
+        }))
+        popen_mock = MagicMock(return_value=self._fake_proc([]))
+
+        rs._stream_to_telegram(
+            output_dir=tmp_path,
+            chat_id="12345",
+            constraints=None,
+            bot_username="TestBot",
+            popen=popen_mock,
+            sender=MagicMock(),
+        )
+
+        cmd = popen_mock.call_args.args[0]
+        assert "--negotiate-repo" in cmd
+        assert "/opt/agenticpoa-negotiate" in cmd
 
     def test_returns_signing_event_when_present(self, tmp_path):
         signing = {
@@ -1344,6 +1618,24 @@ class TestStreamToTelegram:
         assert len(archive) == 2
         assert json.loads(archive[0])["type"] == "offer"
         assert json.loads(archive[1])["type"] == "outcome"
+
+    def test_clears_stale_events_archive_before_streaming(self, tmp_path):
+        (tmp_path / "events.ndjson").write_text(
+            json.dumps({"type": "signing", "pending_id": "stale"}) + "\n"
+        )
+        lines = [
+            json.dumps({"type": "offer", "round": 1, "party": "founder", "terms": {}}) + "\n"
+        ]
+        popen_mock = MagicMock(return_value=self._fake_proc(lines))
+
+        rs._stream_to_telegram(
+            output_dir=tmp_path, chat_id="1", constraints=None,
+            bot_username="B", popen=popen_mock, sender=MagicMock(),
+        )
+
+        archive = (tmp_path / "events.ndjson").read_text()
+        assert "stale" not in archive
+        assert "founder" in archive
 
     def test_returns_subprocess_returncode_on_failure(self, tmp_path):
         popen_mock = MagicMock(return_value=self._fake_proc([], returncode=1))
@@ -1450,6 +1742,50 @@ class TestStreamToTelegram:
         # The duplicate round-1/founder/offer must NOT double-render.
         assert sender.call_count == 2
 
+    def test_two_party_group_only_posts_local_party_rounds(self, tmp_path):
+        """Each Telegram bot should speak only for its own side. The
+        investor bot may observe founder rows in sshsign history, but it
+        must not publish them under the investor bot account."""
+        lines = []
+        popen_mock = MagicMock(return_value=self._fake_proc(lines))
+        sender = MagicMock()
+
+        history_rows = [
+            {"round": 0, "from": "founder", "type": "offer",
+             "metadata": json.dumps({
+                 "valuation_cap": 40_000_000,
+                 "discount_rate": 0.10,
+                 "_message": "Founder opening.",
+             })},
+            {"round": 1, "from": "investor", "type": "counter",
+             "metadata": json.dumps({
+                 "valuation_cap": 20_000_000,
+                 "discount_rate": 0.15,
+                 "_message": "Investor counter.",
+             })},
+        ]
+
+        rs._stream_to_telegram(
+            output_dir=tmp_path,
+            chat_id="222",
+            constraints={"role": "investor", "mode": "two_party"},
+            bot_username="InvestorBot",
+            popen=popen_mock,
+            sender=sender,
+            group_chat_id="-100",
+            history_fn=lambda: history_rows,
+            history_interval=10.0,
+        )
+
+        group_msgs = [
+            c.kwargs.get("message", "")
+            for c in sender.call_args_list
+            if c.args and c.args[0] == "-100"
+        ]
+        assert len(group_msgs) == 1
+        assert "Investor" in group_msgs[0]
+        assert "Founder opening" not in group_msgs[0]
+
     def test_history_poll_skipped_without_negotiation_id(self, tmp_path):
         """Demo mode (no negotiation_id, no injected history_fn) must NOT
         spawn the poll thread — upstream's run_local emits rounds directly
@@ -1528,11 +1864,11 @@ class TestStreamToTelegram:
 class TestCounterpartyLabelFromConstraints:
     def test_founder_sees_investor_label(self):
         c = {"role": "founder", "investor_name": "Alex", "investor_firm": "Blue"}
-        assert rs._counterparty_label_from_constraints(c) == "Alex, Blue"
+        assert rs._counterparty_label_from_constraints(c) == "Alex at Blue"
 
     def test_investor_sees_founder_and_company(self):
         c = {"role": "investor", "founder_name": "Jane", "company_name": "Acme"}
-        assert rs._counterparty_label_from_constraints(c) == "Jane, Acme"
+        assert rs._counterparty_label_from_constraints(c) == "Jane at Acme"
 
     def test_default_role_is_founder(self):
         """Missing role defaults to founder's perspective (investor label)."""
@@ -2765,6 +3101,38 @@ class TestNegotiateInvestorBranch:
                        if c.kwargs.get("message")]
         assert any("joined" in m.lower() for m in joined_msgs)
 
+    def test_investor_join_attempts_inline_reconcile(self, tmp_path):
+        """Investor join should kick the reconciler immediately; cron is
+        still the fallback if the founder is not ready yet."""
+        self._write_config(tmp_path)
+
+        def fake_mint(output_dir, config, **kwargs):
+            (Path(output_dir) / "mint.json").write_text(json.dumps({
+                "negotiation_id": "neg_inline",
+                "mode": "two_party",
+                "user_role": "investor",
+                "session_code": "INV-INLINE",
+            }))
+            return 0
+
+        mock_reconcile = MagicMock()
+        with patch.object(rs, "run_mint", side_effect=fake_mint), \
+             patch.object(rs.state_store, "read_state", return_value={
+                 "negotiation_id": "neg_inline",
+                 "output_dir": str(tmp_path),
+                 "session_code": "INV-INLINE",
+                 "role": "investor",
+                 "investor_dm_chat_id": "12345",
+             }), \
+             patch.object(rs.orchestrator, "reconcile_state", mock_reconcile), \
+             patch.object(rs, "resolve_chat_id", return_value="12345"), \
+             patch.object(rs, "send_telegram", MagicMock()):
+            rc = rs.run_negotiate(str(tmp_path), chat_id_flag="12345")
+
+        assert rc == 0
+        mock_reconcile.assert_called_once()
+        assert mock_reconcile.call_args.args[0]["negotiation_id"] == "neg_inline"
+
 
 class TestK3InvestorGroupRouting:
     """Phase 8 K3: the investor's bot resolves group_chat_id from the
@@ -3172,6 +3540,67 @@ class TestCreatorAwaitSignAndFinalize:
         gate.assert_not_called()
 
 
+class TestCreatorReconcileFinalization:
+    def _write_mint_and_events(self, tmp_path):
+        (tmp_path / "mint.json").write_text(json.dumps({
+            "negotiation_id": "neg_1",
+            "user_role": "founder",
+        }))
+        (tmp_path / "events.ndjson").write_text(
+            json.dumps({"type": "signing", "pending_id": "pnd_founder"}) + "\n"
+        )
+
+    def test_not_ready_without_complete_status(self, tmp_path):
+        self._write_mint_and_events(tmp_path)
+        rc = rs._creator_reconcile_finalization(
+            output_dir=tmp_path,
+            chat_id="1",
+            sshsign_host="h",
+            session_id="session_neg_1",
+            sender=MagicMock(),
+            session_status_fn=lambda *_a, **_kw: "pending",
+            finalize_fn=MagicMock(),
+            session_client=MagicMock(),
+        )
+        assert rc == 1
+
+    def test_complete_status_finalizes_posts_pdf_and_completes_session(self, tmp_path):
+        self._write_mint_and_events(tmp_path)
+        pdf = tmp_path / "executed.pdf"
+        pdf.write_bytes(b"PDF")
+        sender = MagicMock()
+        client = MagicMock()
+
+        rc = rs._creator_reconcile_finalization(
+            output_dir=tmp_path,
+            chat_id="1",
+            sshsign_host="h",
+            session_id="session_neg_1",
+            group_chat_id="-100",
+            sender=sender,
+            session_status_fn=lambda *_a, **_kw: "complete",
+            finalize_fn=lambda *_a, **_kw: pdf,
+            session_client=client,
+        )
+
+        assert rc == 0
+        assert (tmp_path / ".executed_delivered").exists()
+        assert any(
+            c.kwargs.get("media_path") == str(pdf)
+            and str(c.args[0]) == "-100"
+            for c in sender.call_args_list
+        )
+        assert any(
+            c.kwargs.get("media_path") == str(pdf)
+            and str(c.args[0]) == "1"
+            for c in sender.call_args_list
+        )
+        client.complete_session.assert_called_once()
+        assert "creator_pending=pnd_founder" in (
+            client.complete_session.call_args.kwargs["executed_artifact"]
+        )
+
+
 class TestJoinerAwaitSignAndFinalize:
     def _fake_loop(self):
         return MagicMock(start=MagicMock(), stop=MagicMock())
@@ -3471,6 +3900,12 @@ class TestRunCancel:
         """If a previous cancel already transitioned the session, don't
         re-call cancel-session — just tell the user it's already canceled."""
         self._write_mint(tmp_path)
+        rs.state_store.write_state({
+            "negotiation_id": "neg_1",
+            "output_dir": str(tmp_path),
+            "session_code": "INV-TEST1",
+            "role": "investor",
+        })
         client = MagicMock()
         client.get_session.return_value = {"status": "canceled"}
 
@@ -3483,6 +3918,38 @@ class TestRunCancel:
         msgs = [c.kwargs.get("message", "") for c in sender.call_args_list]
         assert any("already" in m.lower() and "canceled" in m.lower()
                    for m in msgs)
+        assert rs.state_store.read_state("neg_1") is None
+
+    def test_cancel_race_terminal_after_cancel_failure_is_noop(self, tmp_path):
+        """If the counterparty cancels between our preflight and
+        cancel-session call, treat the terminal state as success."""
+        from sshsign_session import SshsignSessionError
+
+        self._write_mint(tmp_path)
+        rs.state_store.write_state({
+            "negotiation_id": "neg_1",
+            "output_dir": str(tmp_path),
+            "session_code": "INV-TEST1",
+            "role": "investor",
+        })
+        client = MagicMock()
+        client.get_session.side_effect = [
+            {"status": "joined", "session_code": "INV-TEST1"},
+            {"status": "canceled", "session_code": "INV-TEST1"},
+        ]
+        client.cancel_session.side_effect = SshsignSessionError("already canceled")
+
+        sender = MagicMock()
+        with patch.object(rs, "resolve_chat_id", return_value="1"):
+            rc = rs.run_cancel(str(tmp_path), sender=sender, session_client=client)
+
+        assert rc == 0
+        msgs = [c.kwargs.get("message", "") for c in sender.call_args_list]
+        assert any("Canceling" in m for m in msgs)
+        assert any("already" in m.lower() and "canceled" in m.lower()
+                   for m in msgs)
+        assert not any("Couldn't cancel" in m for m in msgs)
+        assert rs.state_store.read_state("neg_1") is None
 
     def test_get_session_transport_error(self, tmp_path):
         from sshsign_session import SshsignSessionError
@@ -3819,7 +4286,7 @@ class TestGoLiveCardOnTwoPartyMint:
             f"msgs={messages}"
         )
         # Invitation card with the inverted-invitation copy MUST still be present.
-        assert any("Live negotiation ready" in m for m in messages), (
+        assert any("Ready to start live negotiation" in m for m in messages), (
             f"missing invitation card; msgs={messages}"
         )
 

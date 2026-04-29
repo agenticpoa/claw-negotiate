@@ -78,11 +78,11 @@ class TestRunFounderResumeInputValidation:
         rc = rs._run_founder_resume(state)
         assert rc == 2
 
-    def test_missing_output_dir_cleans_pointer(self, state_record, _state_dir):
+    def test_missing_output_dir_cleans_pointer(self, state_record, _state_dir, tmp_path):
         """If output_dir was wiped (/tmp cleaned), stop scanning this id."""
         state_store.write_state(state_record)
         state = dict(state_record)
-        state["output_dir"] = "/tmp/does_not_exist_ever_" + "x" * 8
+        state["output_dir"] = str(tmp_path / "missing-output-dir")
         rc = rs._run_founder_resume(state)
         assert rc == 2
         # pointer deleted
@@ -223,6 +223,91 @@ class TestRunFounderResumePath1StateMachine:
             ("update", "founder_streaming_at"),
             ("stream", "-100456"),
         ], f"phase B sequencing wrong: {events}"
+        assert (Path(state_record["output_dir"]) / ".session.pid").read_text().strip()
+
+    def test_clears_stale_founder_streaming_marker_before_classify(
+        self, state_record, fake_client, monkeypatch,
+    ):
+        """If the host killed the previous founder stream, sshsign's
+        founder_streaming_at marker should not permanently block retries."""
+        fake_client.get_session.return_value["members"][0]["founder_resumed_at"] = 1700000000
+        fake_client.get_session.return_value["members"][0]["founder_streaming_at"] = 1700000010
+        fake_client.get_session.return_value["group_chat_id"] = -100456
+        (Path(state_record["output_dir"]) / ".session.pid").write_text("999999")
+        monkeypatch.setattr(rs, "_resolve_group_chat_id", lambda *a, **kw: "-100456")
+        monkeypatch.setattr(rs, "_pid_file_has_live_negotiation", lambda _out: False)
+        events = []
+        fake_client.update_session_member.side_effect = (
+            lambda *a, **kw: events.append(("update", kw.get("field") or a[1], kw.get("value") if kw else a[2]))
+        )
+
+        def _fake_stream(**kw):
+            events.append(("stream", kw.get("group_chat_id"), None))
+            return (0, None)
+
+        with patch.object(rs, "_stream_to_telegram", side_effect=_fake_stream), \
+             patch.object(rs, "_ssh_history", return_value=[]):
+            rc = rs._run_founder_resume(
+                state_record, session_client=fake_client,
+                now_fn=lambda: 1714000005,
+            )
+
+        assert rc == 0
+        assert ("update", "founder_streaming_at", 0) in events
+        assert ("stream", "-100456", None) in events
+
+    def test_stale_founder_stream_with_history_fails_closed(
+        self, state_record, fake_client, monkeypatch,
+    ):
+        """Restarting the founder after offers exist would replay Round 0.
+        Fail closed until upstream can resume first-mover history."""
+        fake_client.get_session.return_value["members"][0]["founder_resumed_at"] = 1700000000
+        fake_client.get_session.return_value["members"][0]["founder_streaming_at"] = 1700000010
+        fake_client.get_session.return_value["group_chat_id"] = -100456
+        (Path(state_record["output_dir"]) / ".session.pid").write_text("999999")
+        monkeypatch.setattr(rs, "_resolve_group_chat_id", lambda *a, **kw: "-100456")
+        monkeypatch.setattr(rs, "_pid_file_has_live_negotiation", lambda _out: False)
+
+        with patch.object(rs, "_stream_to_telegram") as stream, \
+             patch.object(rs, "_ssh_history", return_value=[
+                 {"round": 0, "from": "founder", "type": "offer"},
+             ]):
+            rc = rs._run_founder_resume(
+                state_record, session_client=fake_client,
+                now_fn=lambda: 1714000005,
+            )
+
+        assert rc == 3
+        stream.assert_not_called()
+        fields = [
+            kw.get("field") or a[1]
+            for a, kw in (
+                (c.args, c.kwargs)
+                for c in fake_client.update_session_member.call_args_list
+            )
+        ]
+        assert "founder_streaming_at" not in fields
+
+    def test_phase_b_lease_conflict_skips_stream(
+        self, state_record, fake_client, monkeypatch,
+    ):
+        """If another worker owns the sshsign negotiate lease, this tick
+        exits quietly before setting streaming_at or spawning upstream."""
+        from sshsign_session import LeaseHeldError
+        fake_client.get_session.return_value["members"][0]["founder_resumed_at"] = 1700000000
+        fake_client.get_session.return_value["group_chat_id"] = -100456
+        fake_client.acquire_lease.side_effect = LeaseHeldError("lease_held", holder="other")
+        monkeypatch.setattr(rs, "_resolve_group_chat_id", lambda *a, **kw: "-100456")
+
+        with patch.object(rs, "_stream_to_telegram") as stream:
+            rc = rs._run_founder_resume(
+                state_record, session_client=fake_client,
+                now_fn=lambda: 1714000005,
+            )
+
+        assert rc == 0
+        stream.assert_not_called()
+        fake_client.update_session_member.assert_not_called()
 
     def test_combined_pass_when_no_prior_phase_a(
         self, state_record, fake_client, monkeypatch,
@@ -246,6 +331,7 @@ class TestRunFounderResumePath1StateMachine:
         # Both timestamps written, in correct order.
         fields = [e[1] for e in events if e[0] == "update"]
         assert fields == ["founder_resumed_at", "founder_streaming_at"], fields
+        assert (Path(state_record["output_dir"]) / ".session.pid").read_text().strip()
 
     def test_done_state_is_noop(self, state_record, fake_client, monkeypatch):
         """streaming_at already set → entire function is a no-op,
@@ -261,6 +347,29 @@ class TestRunFounderResumePath1StateMachine:
         assert rc == 0
         stream.assert_not_called()
         fake_client.update_session_member.assert_not_called()
+
+    def test_done_state_reconciles_late_signatures(
+        self, state_record, fake_client, monkeypatch, founder_output_dir,
+    ):
+        """If the founder stream already ran but exited while waiting for
+        the investor signature, cron should finalize once sshsign reports
+        both pendings approved."""
+        fake_client.get_session.return_value["members"][0]["founder_resumed_at"] = 1700000000
+        fake_client.get_session.return_value["members"][0]["founder_streaming_at"] = 1700000005
+        fake_client.get_session.return_value["group_chat_id"] = -100123
+        monkeypatch.setattr(rs, "_resolve_group_chat_id", lambda *a, **kw: "-100123")
+        state_store.write_state(state_record)
+
+        with patch.object(rs, "_stream_to_telegram") as stream, \
+             patch.object(rs, "_creator_reconcile_finalization",
+                          return_value=0) as reconcile:
+            rc = rs._run_founder_resume(state_record, session_client=fake_client)
+
+        assert rc == 0
+        stream.assert_not_called()
+        reconcile.assert_called_once()
+        assert reconcile.call_args.kwargs["group_chat_id"] == "-100123"
+        assert state_store.read_state("neg_abc") is None
 
 
 class TestRunFounderResumeStreamFailure:
@@ -313,7 +422,6 @@ class TestRunScan:
         self, founder_output_dir, fake_client, monkeypatch,
     ):
         monkeypatch.setattr(rs, "_resolve_group_chat_id", lambda *a, **kw: None)
-        # Two founder pointers (no role field defaults to founder).
         for nid in ("neg_a", "neg_b"):
             state_store.write_state({
                 "negotiation_id": nid,
@@ -321,10 +429,11 @@ class TestRunScan:
                 "session_code": f"INV-{nid.upper()}",
                 "role": "founder",
             })
-        with patch.object(rs, "_run_founder_resume", return_value=0) as resume:
+        with patch.object(rs.orchestrator, "reconcile_active", return_value=[]) as resume:
             rc = rs.run_scan(session_client=fake_client)
         assert rc == 0
-        assert resume.call_count == 2
+        assert resume.call_count == 1
+        assert len(resume.call_args.kwargs["states"]) == 2
 
     def test_per_pointer_failure_does_not_halt_tick(
         self, founder_output_dir, fake_client, monkeypatch,
@@ -334,20 +443,14 @@ class TestRunScan:
                 "negotiation_id": nid,
                 "output_dir": str(founder_output_dir),
                 "session_code": f"INV-{nid.upper()}",
+                "role": "founder",
             })
-        call_order = []
-
-        def _fake_resume(state, *, session_client=None, sender=None, now_fn=None):
-            call_order.append(state["negotiation_id"])
-            if state["negotiation_id"] == "neg_bad":
-                raise RuntimeError("transient")
-            return 0
-
-        with patch.object(rs, "_run_founder_resume", side_effect=_fake_resume):
+        with patch.object(rs.orchestrator, "reconcile_active", return_value=[]) as reconcile:
             rc = rs.run_scan(session_client=fake_client)
         assert rc == 0
-        # Both pointers processed despite one raising.
-        assert set(call_order) == {"neg_bad", "neg_good"}
+        assert {
+            s["negotiation_id"] for s in reconcile.call_args.kwargs["states"]
+        } == {"neg_bad", "neg_good"}
 
     def test_dispatches_by_role(self, founder_output_dir, fake_client):
         """Symmetric Path 1: state pointers carry a `role` field;
@@ -366,38 +469,29 @@ class TestRunScan:
             "role": "investor",
         })
 
-        founder_calls = []
-        investor_calls = []
-
-        def _fake_founder(state, **kwargs):
-            founder_calls.append(state["negotiation_id"])
-            return 0
-
-        def _fake_investor(state, **kwargs):
-            investor_calls.append(state["negotiation_id"])
-            return 0
-
-        with patch.object(rs, "_run_founder_resume", side_effect=_fake_founder), \
-             patch.object(rs, "_run_investor_resume", side_effect=_fake_investor):
+        with patch.object(rs.orchestrator, "reconcile_active", return_value=[]) as reconcile:
             rs.run_scan(session_client=fake_client)
 
-        assert founder_calls == ["neg_f"]
-        assert investor_calls == ["neg_i"]
+        roles = {
+            s["negotiation_id"]: s["role"]
+            for s in reconcile.call_args.kwargs["states"]
+        }
+        assert roles == {"neg_f": "founder", "neg_i": "investor"}
 
-    def test_missing_role_defaults_to_founder(self, founder_output_dir, fake_client):
-        """Back-compat: state pointers written before the `role` field
-        existed default to founder."""
+    def test_missing_role_is_passed_to_orchestrator_as_invalid_state(
+        self, founder_output_dir, fake_client,
+    ):
+        """No backwards compatibility: malformed pointers are handled by
+        the orchestrator, not silently treated as founder."""
         state_store.write_state({
             "negotiation_id": "neg_legacy",
             "output_dir": str(founder_output_dir),
             "session_code": "INV-LEGACY",
             # NO role field
         })
-        with patch.object(rs, "_run_founder_resume", return_value=0) as f, \
-             patch.object(rs, "_run_investor_resume", return_value=0) as i:
+        with patch.object(rs.orchestrator, "reconcile_active", return_value=[]) as reconcile:
             rs.run_scan(session_client=fake_client)
-        assert f.call_count == 1
-        assert i.call_count == 0
+        assert reconcile.call_args.kwargs["states"][0]["negotiation_id"] == "neg_legacy"
 
 
 class TestRunInvestorResume:
@@ -408,6 +502,11 @@ class TestRunInvestorResume:
     """
 
     def _state(self, founder_output_dir):
+        (founder_output_dir / "mint.json").write_text(json.dumps({
+            "negotiation_id": "neg_inv",
+            "mode": "two_party",
+            "user_role": "investor",
+        }))
         return {
             "negotiation_id": "neg_inv",
             "output_dir": str(founder_output_dir),
@@ -468,6 +567,57 @@ class TestRunInvestorResume:
         stream.assert_not_called()
         assert state_store.read_state("neg_inv") is None
 
+    def test_mismatched_output_dir_cleans_stale_pointer(self, founder_output_dir):
+        """When /tmp/safe_negotiate has been reused by a newer attempt,
+        an older pointer must not stream against the newer mint.json."""
+        state = self._state(founder_output_dir)
+        (founder_output_dir / "mint.json").write_text(json.dumps({
+            "negotiation_id": "neg_new",
+            "mode": "two_party",
+            "user_role": "investor",
+        }))
+        state_store.write_state(state)
+
+        client = MagicMock()
+        sender = MagicMock()
+
+        with patch.object(rs, "_stream_to_telegram") as stream:
+            rc = rs._run_investor_resume(state, session_client=client, sender=sender)
+
+        assert rc == 2
+        client.get_session.assert_not_called()
+        stream.assert_not_called()
+        sender.assert_not_called()
+        assert state_store.read_state("neg_inv") is None
+
+    def test_old_terminal_session_is_silent_when_newer_active_pointer_exists(
+        self, founder_output_dir,
+    ):
+        """A canceled prior attempt should not leak into the user's DM
+        once the same investor has a newer active negotiation."""
+        state = self._state(founder_output_dir)
+        state_store.write_state(state)
+        state_store.write_state({
+            "negotiation_id": "neg_new",
+            "output_dir": str(founder_output_dir),
+            "session_code": "INV-NEW",
+            "role": "investor",
+            "investor_dm_chat_id": state["investor_dm_chat_id"],
+        })
+
+        client = MagicMock()
+        client.get_session.return_value = self._session(status="canceled")
+        sender = MagicMock()
+
+        with patch.object(rs, "_stream_to_telegram") as stream:
+            rc = rs._run_investor_resume(state, session_client=client, sender=sender)
+
+        assert rc == 2
+        stream.assert_not_called()
+        sender.assert_not_called()
+        assert state_store.read_state("neg_inv") is None
+        assert state_store.read_state("neg_new") is not None
+
     def test_happy_path_streams_and_finalizes(self, founder_output_dir, monkeypatch):
         """founder_streaming_at set + group bound → write started flag,
         post 'both online' card to group, spawn stream, run joiner-
@@ -499,6 +649,7 @@ class TestRunInvestorResume:
         # investor DM threaded as primary chat_id (signing URL routing)
         assert stream.call_args.kwargs["chat_id"] == "8888888"
         joiner.assert_called_once()
+        assert (founder_output_dir / ".session.pid").read_text().strip()
         # State pointer cleaned up after joiner finalize.
         assert state_store.read_state("neg_inv") is None
         # Both-online card posted to the group.
@@ -515,6 +666,10 @@ class TestRunInvestorResume:
         state_store.write_state(state)
 
         client = MagicMock()
+        client.get_session.return_value = self._session(
+            founder_streaming_at=1700000000,
+            group_chat_id=-1001234567890,
+        )
         sender = MagicMock()
 
         with patch.object(rs, "_stream_to_telegram") as stream:
@@ -522,8 +677,25 @@ class TestRunInvestorResume:
 
         assert rc == 0
         stream.assert_not_called()
-        # We didn't even need to query sshsign.
-        client.get_session.assert_not_called()
+        # We still query sshsign first so terminal status can clean up
+        # already-started pointers after a later cancel/rescind.
+        assert client.get_session.call_count >= 1
+
+    def test_started_terminal_session_still_cleans_pointer(self, founder_output_dir):
+        state = self._state(founder_output_dir)
+        state["investor_streaming_started"] = True
+        state_store.write_state(state)
+
+        client = MagicMock()
+        client.get_session.return_value = self._session(status="canceled")
+        sender = MagicMock()
+
+        with patch.object(rs, "_stream_to_telegram") as stream:
+            rc = rs._run_investor_resume(state, session_client=client, sender=sender)
+
+        assert rc == 2
+        stream.assert_not_called()
+        assert state_store.read_state("neg_inv") is None
 
     def test_pointer_marked_started_before_stream_spawn(self, founder_output_dir, monkeypatch):
         """The dedup flag must be persisted BEFORE _stream_to_telegram
@@ -557,6 +729,73 @@ class TestRunInvestorResume:
             "started flag must be persisted BEFORE _stream_to_telegram"
         )
 
+    def test_failed_stream_clears_started_flag_for_retry(
+        self, founder_output_dir, monkeypatch,
+    ):
+        """If upstream dies before signing, the next cron tick must be
+        allowed to retry. A stale started flag caused INV-WWXB8 to wedge
+        after an env-related startup failure."""
+        state = self._state(founder_output_dir)
+        state_store.write_state(state)
+
+        client = MagicMock()
+        client.get_session.return_value = self._session(
+            founder_streaming_at=1700000000,
+            group_chat_id=-1001234567890,
+        )
+        sender = MagicMock()
+
+        monkeypatch.setattr(rs, "_resolve_group_chat_id",
+                            lambda *a, **kw: "-1001234567890")
+
+        with patch.object(rs, "_stream_to_telegram", return_value=(1, None)):
+            rc = rs._run_investor_resume(
+                state, session_client=client, sender=sender,
+            )
+
+        assert rc == 1
+        persisted = state_store.read_state("neg_inv") or {}
+        assert "investor_streaming_started" not in persisted
+
+    def test_failed_stream_does_not_resend_both_online_on_retry(
+        self, founder_output_dir, monkeypatch,
+    ):
+        """The visible group status card is idempotent independently of
+        the stream retry flag."""
+        state = self._state(founder_output_dir)
+        state_store.write_state(state)
+
+        client = MagicMock()
+        client.get_session.return_value = self._session(
+            founder_streaming_at=1700000000,
+            group_chat_id=-1001234567890,
+        )
+        sender = MagicMock()
+
+        monkeypatch.setattr(rs, "_resolve_group_chat_id",
+                            lambda *a, **kw: "-1001234567890")
+
+        with patch.object(rs, "_stream_to_telegram", return_value=(1, None)):
+            assert rs._run_investor_resume(
+                state, session_client=client, sender=sender,
+            ) == 1
+
+        retry_state = state_store.read_state("neg_inv") or {}
+        assert retry_state.get("investor_both_online_sent") is True
+        assert "investor_streaming_started" not in retry_state
+
+        sender.reset_mock()
+        with patch.object(rs, "_stream_to_telegram", return_value=(1, None)):
+            assert rs._run_investor_resume(
+                retry_state, session_client=client, sender=sender,
+            ) == 1
+
+        group_sends = [
+            c for c in sender.call_args_list
+            if c.args and str(c.args[0]) == "-1001234567890"
+        ]
+        assert group_sends == []
+
 
 class TestBindInProcessResumeFastPath:
     @staticmethod
@@ -583,7 +822,7 @@ class TestBindInProcessResumeFastPath:
         client.get_session.return_value = self._founder_session(status="joined")
         client.bind_group.return_value = {"status": "joined"}
 
-        with patch.object(rs, "_run_founder_resume", return_value=0) as resume:
+        with patch.object(rs.orchestrator, "reconcile_state") as resume:
             rc = rs.run_bind(
                 session_code="INV-INPROC",
                 group_chat_id=-1001234,
@@ -713,6 +952,27 @@ class TestEnsureCron:
         ok, err = rs.ensure_cron(runner=runner)
         assert ok is False
         assert "pairing required" in err
+
+    def test_list_failure_can_install_system_cron_fallback(self):
+        calls: list[tuple[list[str], dict]] = []
+
+        def openclaw_runner(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return self._cp(1, stderr="pairing required")
+
+        def system_runner(argv, **kwargs):
+            calls.append((argv, kwargs))
+            if argv == ["crontab", "-l"]:
+                return self._cp(1, stderr="no crontab for root")
+            if argv == ["crontab", "-"]:
+                assert "run_safe.py scan" in kwargs["input"]
+                assert rs.SYSTEM_CRON_MARKER in kwargs["input"]
+                return self._cp(0)
+            raise AssertionError(f"unexpected argv {argv}")
+
+        ok, err = rs.ensure_cron(runner=openclaw_runner, system_runner=system_runner)
+        assert ok and err is None
+        assert any(argv == ["crontab", "-"] for argv, _ in calls)
 
     def test_add_failure_returns_false_with_reason(self):
         def runner(argv, **kwargs):

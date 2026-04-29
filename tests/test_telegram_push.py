@@ -99,10 +99,41 @@ def _ok_result(stdout: str) -> subprocess.CompletedProcess:
     return subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
 
 
+class _FakeHttpResponse:
+    status = 200
+
+    def __init__(self, body: dict):
+        self._body = json.dumps(body).encode()
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return None
+
+
 class TestSendTelegram:
     def test_requires_message_or_media(self):
         with pytest.raises(ValueError):
             tp.send_telegram("123")
+
+    def test_bot_token_prefers_direct_bot_api(self, monkeypatch):
+        runner = MagicMock()
+        monkeypatch.setattr(tp, "get_bot_token", lambda: "TOKEN")
+
+        def opener(req, timeout):
+            assert req.full_url == "https://api.telegram.org/botTOKEN/sendMessage"
+            assert json.loads(req.data.decode()) == {"chat_id": "12345", "text": "hello"}
+            return _FakeHttpResponse({"ok": True, "result": {"message_id": 77}})
+
+        result = tp.send_telegram("12345", message="hello", runner=runner, opener=opener)
+
+        assert result.ok is True
+        assert result.message_id == "77"
+        runner.assert_not_called()
 
     def test_text_only_builds_correct_cmd(self):
         runner = MagicMock(return_value=_ok_result(_ok_stdout(195)))
@@ -120,6 +151,20 @@ class TestSendTelegram:
         assert "--json" in cmd
         assert "--media" not in cmd
         assert "--force-document" not in cmd
+
+    def test_group_target_prefix_is_normalized(self):
+        runner = MagicMock(return_value=_ok_result(_ok_stdout(195)))
+        tp.send_telegram("group:-5261090007", message="hello", runner=runner)
+
+        cmd = runner.call_args[0][0]
+        assert cmd[cmd.index("--target") + 1] == "-5261090007"
+
+    def test_telegram_target_prefix_is_normalized(self):
+        runner = MagicMock(return_value=_ok_result(_ok_stdout(195)))
+        tp.send_telegram("telegram:6413315062", message="hello", runner=runner)
+
+        cmd = runner.call_args[0][0]
+        assert cmd[cmd.index("--target") + 1] == "6413315062"
 
     def test_media_only_builds_correct_cmd(self, tmp_path):
         pdf = tmp_path / "doc.pdf"
@@ -166,6 +211,41 @@ class TestSendTelegram:
         assert result.message_id is None
         assert "boom" in result.error
 
+    def test_non_zero_exit_falls_back_to_bot_api(self, monkeypatch):
+        runner = MagicMock(return_value=subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="pairing required",
+        ))
+        monkeypatch.setattr(tp, "get_bot_token", lambda: "TOKEN")
+
+        def opener(req, timeout):
+            assert req.full_url == "https://api.telegram.org/botTOKEN/sendMessage"
+            assert json.loads(req.data.decode()) == {"chat_id": "-5261090007", "text": "x"}
+            return _FakeHttpResponse({"ok": True, "result": {"message_id": 77}})
+
+        result = tp.send_telegram("group:-5261090007", message="x", runner=runner, opener=opener)
+        assert result.ok is True
+        assert result.message_id == "77"
+
+    def test_non_zero_exit_falls_back_to_send_document(self, tmp_path, monkeypatch):
+        runner = MagicMock(return_value=subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="pairing required",
+        ))
+        monkeypatch.setattr(tp, "get_bot_token", lambda: "TOKEN")
+        pdf = tmp_path / "safe.pdf"
+        pdf.write_bytes(b"%PDF")
+
+        def opener(req, timeout):
+            assert req.full_url == "https://api.telegram.org/botTOKEN/sendDocument"
+            assert b'name="chat_id"\r\n\r\n12345' in req.data
+            assert b'name="caption"\r\n\r\nexecuted' in req.data
+            assert b'name="document"; filename="safe.pdf"' in req.data
+            assert b"%PDF" in req.data
+            return _FakeHttpResponse({"ok": True, "result": {"message_id": 78}})
+
+        result = tp.send_telegram("12345", message="executed", media_path=pdf, runner=runner, opener=opener)
+        assert result.ok is True
+        assert result.message_id == "78"
+
     def test_non_json_stdout_returns_error(self):
         runner = MagicMock(return_value=_ok_result("not json"))
         result = tp.send_telegram("12345", message="x", runner=runner)
@@ -184,7 +264,7 @@ class TestSendTelegram:
             raise subprocess.TimeoutExpired(cmd="openclaw", timeout=30)
         result = tp.send_telegram("12345", message="x", runner=raiser)
         assert result.ok is False
-        assert result.error == "timeout"
+        assert "timeout" in result.error
 
     def test_openclaw_binary_missing_returns_error(self):
         def raiser(*args, **kwargs):
@@ -230,6 +310,12 @@ class TestSendSigningUrlToDm:
         runner = MagicMock()
         with pytest.raises(tp.SigningUrlTargetError, match="positive"):
             tp.send_signing_url_to_dm(-1001234567890, message="x", runner=runner)
+        runner.assert_not_called()
+
+    def test_group_prefixed_target_raises_before_send(self):
+        runner = MagicMock()
+        with pytest.raises(tp.SigningUrlTargetError, match="integer"):
+            tp.send_signing_url_to_dm("group:-5261090007", message="x", runner=runner)
         runner.assert_not_called()
 
     def test_zero_target_raises(self):

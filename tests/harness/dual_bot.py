@@ -42,6 +42,8 @@ class FakeSession:
     members: list[FakeMember] = field(default_factory=list)
     group_chat_id: int = 0
     created_by: str = "u_founder"
+    executed_artifact: str = ""
+    leases: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -50,6 +52,7 @@ class FakeSession:
             "status": self.status,
             "members": [m.to_dict() for m in self.members],
             "group_chat_id": self.group_chat_id,
+            "executed_artifact": self.executed_artifact,
         }
 
 
@@ -125,6 +128,63 @@ class FakeSshsign:
         from sshsign_session import SshsignSessionError
         raise SshsignSessionError("no founder member row")
 
+    def complete_session(self, session_id: str, executed_artifact: str) -> dict:
+        sess = self._sessions[session_id]
+        sess.status = "completed"
+        sess.executed_artifact = executed_artifact
+        return sess.to_dict()
+
+    def acquire_lease(
+        self,
+        session_id: str,
+        role: str,
+        action: str,
+        holder: str,
+        ttl_seconds: int | None = None,
+    ) -> dict:
+        sess = self._sessions[session_id]
+        key = (role, action)
+        existing = sess.leases.get(key)
+        generation = int(existing["generation"]) + 1 if existing else 1
+        lease = {
+            "session_id": session_id,
+            "role": role,
+            "action": action,
+            "holder": holder,
+            "generation": generation,
+        }
+        sess.leases[key] = lease
+        return lease
+
+    def check_lease(
+        self,
+        session_id: str,
+        role: str,
+        action: str,
+        holder: str,
+        generation: int,
+    ) -> dict:
+        lease = self._sessions[session_id].leases[(role, action)]
+        if lease["holder"] != holder or int(lease["generation"]) != int(generation):
+            from sshsign_session import LeaseHolderMismatchError
+            raise LeaseHolderMismatchError("lease_holder_mismatch")
+        return lease
+
+    def release_lease(
+        self,
+        session_id: str,
+        role: str,
+        action: str,
+        holder: str,
+        generation: int,
+    ) -> dict:
+        sess = self._sessions[session_id]
+        key = (role, action)
+        lease = sess.leases.get(key)
+        if lease and lease["holder"] == holder and int(lease["generation"]) == int(generation):
+            sess.leases.pop(key, None)
+        return {"ok": True}
+
 
 class GroupBus:
     """A shared message log for the 'Telegram group'. Either bot
@@ -139,7 +199,12 @@ class GroupBus:
 
     def make_sender(self, label: str):
         def sender(target, message=None, **kwargs):
-            body = message if message is not None else ""
+            if message is not None:
+                body = message
+            elif kwargs.get("media_path"):
+                body = f"[media] {kwargs['media_path']}"
+            else:
+                body = ""
             self.messages.append((label, str(target), body))
         return sender
 

@@ -58,7 +58,10 @@ def send_typing_once(
     """POST sendChatAction(typing) once. Return True on success, False on any failure."""
     try:
         url = f"https://api.telegram.org/bot{bot_token}/sendChatAction"
-        payload = json.dumps({"chat_id": str(chat_id), "action": "typing"}).encode()
+        target = str(chat_id).strip()
+        if ":" in target:
+            target = target.rsplit(":", 1)[-1].strip()
+        payload = json.dumps({"chat_id": target, "action": "typing"}).encode()
         req = urllib.request.Request(
             url, data=payload,
             headers={"Content-Type": "application/json"},
@@ -93,7 +96,9 @@ class TypingLoop:
         interval: float = _DEFAULT_INTERVAL_SECONDS,
         send_fn: Callable[[str, str], bool] = send_typing_once,
     ):
-        self.chat_id = str(chat_id) if chat_id is not None else ""
+        self.chat_id = str(chat_id).strip() if chat_id is not None else ""
+        if ":" in self.chat_id:
+            self.chat_id = self.chat_id.rsplit(":", 1)[-1].strip()
         self.bot_token = bot_token
         self.interval = interval
         self._send = send_fn

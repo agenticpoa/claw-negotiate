@@ -206,3 +206,12 @@ class TestTypingLoop:
         time.sleep(0.1)
         loop.stop()
         assert calls and all(isinstance(c, str) for c in calls)
+
+    def test_chat_id_prefix_normalized(self):
+        calls = []
+        loop = tl.TypingLoop(chat_id="group:-5261090007", bot_token="t", interval=0.05,
+                             send_fn=lambda cid, tk: calls.append(cid) or True)
+        loop.start()
+        time.sleep(0.1)
+        loop.stop()
+        assert calls and all(c == "-5261090007" for c in calls)

@@ -39,6 +39,10 @@ def _load_upstream(repo: Path):
 
 def _build_config(module, output_dir: Path, sshsign_host: str):
     mint = json.loads((output_dir / "mint.json").read_text())
+    try:
+        constraints = json.loads((output_dir / "config.json").read_text()).get("constraints") or {}
+    except (OSError, json.JSONDecodeError):
+        constraints = {}
 
     # Demo mode mints both sides; join (two-party investor) mints only the
     # joiner's side and the counterparty's config file may not exist yet.
@@ -79,6 +83,14 @@ def _build_config(module, output_dir: Path, sshsign_host: str):
         counterparty_pubkey if user_role == "founder" else ""
     )
 
+    def _pick(cfg_keys, constraint_key: str, env_key: str, default: str = ""):
+        for cfg, key in cfg_keys:
+            if cfg.get(key):
+                return cfg[key]
+        if constraints.get(constraint_key):
+            return constraints[constraint_key]
+        return os.environ.get(env_key) or default
+
     kwargs = dict(
         negotiate_repo=Path(module.__file__).parent,
         negotiation_id=mint["negotiation_id"],
@@ -86,12 +98,32 @@ def _build_config(module, output_dir: Path, sshsign_host: str):
         investor_token_path=mint.get("investor_token_path", ""),
         founder_pubkey_path=founder_pubkey,
         investor_pubkey_path=investor_pubkey,
-        company_name=f_cfg.get("company_name") or i_cfg.get("company_name", ""),
-        founder_name=f_cfg.get("name") or f_cfg.get("founder_name", ""),
-        founder_title=f_cfg.get("title", ""),
-        investor_name=i_cfg.get("name") or i_cfg.get("investor_name", ""),
-        investor_firm=i_cfg.get("firm", ""),
-        investment_amount=f_cfg.get("investment_amount") or i_cfg.get("investment_amount", 500000.0),
+        company_name=_pick(
+            [(f_cfg, "company_name"), (i_cfg, "company_name")],
+            "company_name", "COMPANY_NAME", "Company",
+        ),
+        founder_name=_pick(
+            [(f_cfg, "name"), (f_cfg, "founder_name"), (i_cfg, "founder_name")],
+            "founder_name", "FOUNDER_NAME", "Founder",
+        ),
+        founder_title=_pick(
+            [(f_cfg, "title"), (i_cfg, "founder_title")],
+            "founder_title", "FOUNDER_TITLE", "CEO",
+        ),
+        investor_name=_pick(
+            [(i_cfg, "name"), (i_cfg, "investor_name"), (f_cfg, "investor_name")],
+            "investor_name", "INVESTOR_NAME", "Investor",
+        ),
+        investor_firm=_pick(
+            [(i_cfg, "firm"), (f_cfg, "investor_firm")],
+            "investor_firm", "INVESTOR_FIRM", "",
+        ),
+        investment_amount=(
+            f_cfg.get("investment_amount")
+            or i_cfg.get("investment_amount")
+            or constraints.get("investment_amount")
+            or 500000.0
+        ),
         sshsign_host=f_cfg.get("sshsign_host") or i_cfg.get("sshsign_host") or sshsign_host,
         no_sshsign=False,
         output_dir=str(neg_dir / "output"),
