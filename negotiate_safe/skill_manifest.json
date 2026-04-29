@@ -60,6 +60,8 @@
     "demo_checklist": "python3 scripts/demo_checklist.py",
     "smoke_install": "python3 scripts/smoke_install.py --skill-dir /root/.agents/skills/negotiate_safe",
     "doctor": "python3 run_safe.py doctor",
+    "status": "python3 run_safe.py status --session-code INV-XXXXX",
+    "smoke": "python3 run_safe.py smoke --output-dir /tmp/safe_negotiate",
     "operator_setup": "python3 run_safe.py operator-setup --role founder --bot-username @YourBot --sshsign-host sshsign.dev --negotiate-repo-path /path/to/negotiate",
     "prepare": "python3 run_safe.py prepare --message-file /tmp/safe_request.txt --output-dir /tmp/safe_negotiate",
     "negotiate": "python3 run_safe.py negotiate --output-dir /tmp/safe_negotiate",

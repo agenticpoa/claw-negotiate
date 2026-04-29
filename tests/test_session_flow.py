@@ -1,7 +1,7 @@
 from pathlib import Path
 import json
 import subprocess
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 
 from sshsign_session import LeaseHeldError, SshsignSession, SshsignSessionError
 
@@ -142,6 +142,10 @@ def test_register_signing_session_publishes_metadata(tmp_path, monkeypatch):
         "founder_bot_handle": "@FounderBot",
     }
     assert call.kwargs["metadata_member"]["telegram"] == {"founder_user_id": 123}
+    assert client.update_session_member_text.call_args_list == [
+        call("session_neg_1", field="bot_handle", text_value="@FounderBot"),
+        call("session_neg_1", field="telegram_user_id", text_value="123"),
+    ]
 
 
 def test_register_signing_session_missing_pubkey_returns_none(tmp_path):
@@ -196,6 +200,7 @@ def test_join_signing_session_fetches_and_writes_counterparty_pubkey(tmp_path, m
         "investor",
         neg_dir,
         session_client=client,
+        telegram_user_id=456,
     )
 
     assert result is not None
@@ -205,9 +210,10 @@ def test_join_signing_session_fetches_and_writes_counterparty_pubkey(tmp_path, m
     join_call = client.join_session.call_args
     assert join_call.kwargs["party_did"] == "did:apoa:investor"
     assert "INVESTOR_FAKE_KEY" in join_call.kwargs["apoa_pubkey_pem"]
-    client.update_session_member_text.assert_called_once_with(
-        "session_neg_1", field="bot_handle", text_value="@InvestorBot",
-    )
+    assert client.update_session_member_text.call_args_list == [
+        call("session_neg_1", field="bot_handle", text_value="@InvestorBot"),
+        call("session_neg_1", field="telegram_user_id", text_value="456"),
+    ]
 
 
 def test_join_signing_session_missing_session_code_returns_none(tmp_path):

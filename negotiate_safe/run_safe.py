@@ -1027,6 +1027,7 @@ def run_mint(output_dir: str, config: dict, telegram_user_id: int | None = None)
                 user_role=user_role,
                 neg_dir=neg_dir,
                 repo=repo,
+                telegram_user_id=telegram_user_id,
             )
             if joined is None:
                 write_trace(output_dir, "mint.failed", phase="mint", reason="join_signing_session", negotiation_id=negotiation_id)
@@ -3349,6 +3350,103 @@ def _state_matches_output_dir(negotiation_id: str, out: Path) -> bool:
     return not minted_id or minted_id == negotiation_id
 
 
+def _is_shared_reused_output_dir(out: Path) -> bool:
+    """True for the singleton demo output dir that gets reused per attempt."""
+    configured = Path(os.environ.get("CLAW_NEGOTIATE_OUTPUT_DIR", "/tmp/safe_negotiate"))
+    try:
+        return out.resolve() == configured.resolve()
+    except OSError:
+        return str(out) == str(configured)
+
+
+def _configured_role_from_output_dir(out: Path) -> str:
+    try:
+        config = json.loads((out / "config.json").read_text())
+    except (OSError, json.JSONDecodeError):
+        return ""
+    constraints = config.get("constraints") if isinstance(config, dict) else {}
+    return str((constraints or {}).get("role") or "").lower()
+
+
+def _member_for_role(sess: dict, role: str) -> dict:
+    for member in sess.get("members") or []:
+        if isinstance(member, dict) and str(member.get("role") or "").lower() == role:
+            return member
+    return {}
+
+
+def _state_from_session_role(
+    *,
+    sess: dict,
+    role: str,
+    output_dir: Path,
+) -> dict | None:
+    session_id = str(sess.get("session_id") or "")
+    negotiation_id = _negotiation_id_from_sshsign_session_id(session_id)
+    session_code = str(sess.get("session_code") or "")
+    if role not in ("founder", "investor") or not negotiation_id or not session_code:
+        return None
+    if not _state_matches_output_dir(negotiation_id, output_dir):
+        return None
+    if not (output_dir / "config.json").exists() or not (output_dir / "mint.json").exists():
+        return None
+
+    member = _member_for_role(sess, role)
+    telegram_user_id = str(member.get("telegram_user_id") or "")
+    if not telegram_user_id and role == "founder":
+        try:
+            meta = json.loads(sess.get("metadata_member") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            meta = {}
+        telegram_user_id = str((meta.get("telegram") or {}).get("founder_user_id") or "")
+
+    state = {
+        "negotiation_id": negotiation_id,
+        "output_dir": str(output_dir),
+        "session_code": session_code,
+        "role": role,
+    }
+    if role == "founder" and telegram_user_id:
+        state["founder_dm_chat_id"] = telegram_user_id
+    if role == "investor" and telegram_user_id:
+        state["investor_dm_chat_id"] = telegram_user_id
+    return state
+
+
+def _write_reconstructed_state(state: dict) -> dict:
+    try:
+        state_store.write_state(state)
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write(f"state reconstruct write failed: {e}\n")
+    return state
+
+
+def _reconstruct_state_from_current_output(
+    *,
+    client,
+    output_dir: Path | None = None,
+    role: str | None = None,
+) -> dict | None:
+    out = output_dir or Path(os.environ.get("CLAW_NEGOTIATE_OUTPUT_DIR", "/tmp/safe_negotiate"))
+    mint_path = out / "mint.json"
+    try:
+        mint = json.loads(mint_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    negotiation_id = mint.get("negotiation_id") or ""
+    if not negotiation_id:
+        return None
+    local_role = (role or mint.get("user_role") or _configured_role_from_output_dir(out)).lower()
+    if local_role not in ("founder", "investor"):
+        return None
+    try:
+        sess = client.get_session(session_id=_sshsign_session_id(negotiation_id))
+    except SshsignSessionError:
+        return None
+    state = _state_from_session_role(sess=sess, role=local_role, output_dir=out)
+    return _write_reconstructed_state(state) if state else None
+
+
 def _run_investor_resume(
     state: dict,
     session_client=None,
@@ -3606,11 +3704,18 @@ def run_scan(
         sys.stderr.write(f"scan throttle: {e}\n")
 
     _hydrate_scan_env_from_openclaw_config()
+    client = session_client or SshsignSession(host=os.environ.get("SSHSIGN_HOST", "sshsign.dev"))
+    _reconstruct_state_from_current_output(client=client)
     states = []
     for state in state_store.list_active():
         negotiation_id = state.get("negotiation_id") or ""
         output_dir = Path(state.get("output_dir") or "")
-        if negotiation_id and output_dir and not _state_matches_output_dir(negotiation_id, output_dir):
+        if (
+            negotiation_id
+            and output_dir
+            and _is_shared_reused_output_dir(output_dir)
+            and not _state_matches_output_dir(negotiation_id, output_dir)
+        ):
             try:
                 state_store.delete_state(negotiation_id)
             except Exception as e:  # noqa: BLE001
@@ -3619,7 +3724,7 @@ def run_scan(
         states.append(state)
     results = orchestrator.reconcile_active(
         states=states,
-        session_client=session_client,
+        session_client=client,
         sender=sender,
     )
     for state, result in zip(states, results):
@@ -3647,10 +3752,6 @@ def _reconstruct_founder_state_for_bind(
     if not negotiation_id:
         return None
     out = Path(output_dir or os.environ.get("CLAW_NEGOTIATE_OUTPUT_DIR", "/tmp/safe_negotiate"))
-    if not _state_matches_output_dir(negotiation_id, out):
-        return None
-    if not (out / "config.json").exists() or not (out / "mint.json").exists():
-        return None
     state = {
         "negotiation_id": negotiation_id,
         "output_dir": str(out),
@@ -3658,11 +3759,11 @@ def _reconstruct_founder_state_for_bind(
         "role": "founder",
         "founder_dm_chat_id": str(founder_dm_chat_id or ""),
     }
-    try:
-        state_store.write_state(state)
-    except Exception as e:  # noqa: BLE001
-        sys.stderr.write(f"bind: reconstruct state failed: {e}\n")
-    return state
+    if not _state_matches_output_dir(negotiation_id, out):
+        return None
+    if not (out / "config.json").exists() or not (out / "mint.json").exists():
+        return None
+    return _write_reconstructed_state(state)
 
 
 def run_bind(
@@ -4094,6 +4195,162 @@ def run_doctor() -> int:
     return 0 if all(c.ok for c in checks) else 1
 
 
+def _session_status_report(
+    *,
+    session_code: str = "",
+    output_dir: str = "/tmp/safe_negotiate",
+    session_client=None,
+) -> dict:
+    _hydrate_scan_env_from_openclaw_config()
+    client = session_client or SshsignSession(
+        host=os.environ.get("SSHSIGN_HOST", "sshsign.dev"),
+    )
+    out = Path(output_dir)
+    sess: dict = {}
+    if session_code:
+        sess = client.get_session(session_code=session_code)
+    else:
+        try:
+            mint = json.loads((out / "mint.json").read_text())
+        except (OSError, json.JSONDecodeError):
+            mint = {}
+        negotiation_id = mint.get("negotiation_id") or ""
+        if not negotiation_id:
+            raise SessionNotFoundError("no session-code and no local mint.json")
+        sess = client.get_session(session_id=_sshsign_session_id(negotiation_id))
+
+    session_id = str(sess.get("session_id") or "")
+    negotiation_id = _negotiation_id_from_sshsign_session_id(session_id)
+    role = _configured_role_from_output_dir(out)
+    state = state_store.read_state(negotiation_id) if negotiation_id else None
+    reconstructable = False
+    reconstructed_state = None
+    if not state and role:
+        reconstructed_state = _state_from_session_role(sess=sess, role=role, output_dir=out)
+        reconstructable = bool(reconstructed_state)
+
+    sshsign_host = os.environ.get("SSHSIGN_HOST", "sshsign.dev")
+    history_rows = _ssh_history(negotiation_id, sshsign_host=sshsign_host) if negotiation_id else []
+    due_role = "founder" if len(history_rows) % 2 == 0 else "investor"
+    if history_rows and history_rows[-1].get("type") == "accept":
+        due_role = "signing"
+
+    deliveries: list[dict] = []
+    delivery_error = ""
+    if session_id:
+        try:
+            deliveries = client.list_deliveries(session_id)
+        except SshsignSessionError as e:
+            delivery_error = str(e)
+
+    return {
+        "session_code": sess.get("session_code") or session_code,
+        "session_id": session_id,
+        "negotiation_id": negotiation_id,
+        "status": sess.get("status") or "",
+        "group_chat_id": sess.get("group_chat_id") or 0,
+        "members": [
+            {
+                "role": m.get("role"),
+                "bot_handle": m.get("bot_handle") or "",
+                "telegram_user_id": m.get("telegram_user_id") or "",
+            }
+            for m in (sess.get("members") or [])
+            if isinstance(m, dict)
+        ],
+        "round_count": len(history_rows),
+        "last_round": history_rows[-1] if history_rows else None,
+        "due_role": due_role,
+        "local_role": role,
+        "local_state_present": bool(state),
+        "local_state_reconstructable": bool(state or reconstructable),
+        "delivery_count": len(deliveries),
+        "delivery_error": delivery_error,
+    }
+
+
+def _format_session_status(report: dict) -> str:
+    group = report.get("group_chat_id") or "not bound"
+    lines = [
+        f"Session: {report.get('session_code') or '-'}",
+        f"Status: {report.get('status') or '-'}",
+        f"Group: {group}",
+        f"Rounds: {report.get('round_count', 0)}",
+        f"Next: {report.get('due_role') or '-'}",
+        f"Local role: {report.get('local_role') or '-'}",
+        "Local state: " + (
+            "present" if report.get("local_state_present")
+            else "reconstructable" if report.get("local_state_reconstructable")
+            else "missing"
+        ),
+    ]
+    members = report.get("members") or []
+    if members:
+        lines.append("Members:")
+        for member in members:
+            ident = member.get("telegram_user_id") or "no telegram id"
+            handle = member.get("bot_handle") or "no bot handle"
+            lines.append(f"- {member.get('role')}: {ident}, {handle}")
+    if report.get("delivery_error"):
+        lines.append(f"Deliveries: unavailable ({report['delivery_error']})")
+    else:
+        lines.append(f"Deliveries: {report.get('delivery_count', 0)}")
+    return "\n".join(lines) + "\n"
+
+
+def run_status(
+    session_code: str = "",
+    output_dir: str = "/tmp/safe_negotiate",
+    json_output: bool = False,
+    session_client=None,
+) -> int:
+    try:
+        report = _session_status_report(
+            session_code=session_code,
+            output_dir=output_dir,
+            session_client=session_client,
+        )
+    except SshsignSessionError as e:
+        sys.stderr.write(f"status: {e}\n")
+        return 3
+    if json_output:
+        sys.stdout.write(json.dumps(report, indent=2) + "\n")
+    else:
+        sys.stdout.write(_format_session_status(report))
+    return 0
+
+
+def run_smoke(output_dir: str = "/tmp/safe_negotiate", session_client=None) -> int:
+    """Fast local smoke for the self-healing path.
+
+    This intentionally avoids Telegram sends and real AI turns. It proves the
+    installed skill can read current session state, reconstruct local state
+    when possible, and produce a usable diagnostic report.
+    """
+    try:
+        report = _session_status_report(
+            output_dir=output_dir,
+            session_client=session_client,
+        )
+    except SshsignSessionError as e:
+        sys.stderr.write(f"smoke: {e}\n")
+        return 3
+    failures = []
+    if not report.get("session_id"):
+        failures.append("missing session")
+    if not report.get("local_state_reconstructable"):
+        failures.append("local state not reconstructable")
+    if report.get("status") in ("open", "joined") and not report.get("members"):
+        failures.append("missing members")
+    if failures:
+        sys.stderr.write("smoke failed: " + ", ".join(failures) + "\n")
+        sys.stdout.write(_format_session_status(report))
+        return 1
+    sys.stdout.write("ok    self-healing smoke\n")
+    sys.stdout.write(_format_session_status(report))
+    return 0
+
+
 def run_operator_setup(
     role: str,
     bot_username: str = "",
@@ -4175,6 +4432,20 @@ def main() -> int:
         "doctor",
         help="Validate operator install/configuration before running a negotiation.",
     )
+    status = sub.add_parser(
+        "status",
+        help="Show self-healing status for an INV code or the current output dir.",
+    )
+    status.add_argument("--session-code", default="")
+    status.add_argument("--output-dir", default="/tmp/safe_negotiate")
+    status.add_argument("--json", action="store_true")
+
+    smoke = sub.add_parser(
+        "smoke",
+        help="Run a fast self-healing smoke check without Telegram sends.",
+    )
+    smoke.add_argument("--output-dir", default="/tmp/safe_negotiate")
+
     sub.add_parser(
         "manifest",
         help="Print the skill install/deploy manifest as JSON.",
@@ -4270,6 +4541,14 @@ def main() -> int:
         return run_profile(chat_id_flag=args.chat_id or None)
     elif args.command == "doctor":
         return run_doctor()
+    elif args.command == "status":
+        return run_status(
+            session_code=args.session_code,
+            output_dir=args.output_dir,
+            json_output=args.json,
+        )
+    elif args.command == "smoke":
+        return run_smoke(output_dir=args.output_dir)
     elif args.command == "manifest":
         return run_manifest()
     elif args.command == "operator-setup":

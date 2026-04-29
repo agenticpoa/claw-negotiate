@@ -393,7 +393,7 @@ class SshsignSession:
     # Inverted-invitation: each member's own bot_handle, written by
     # the member's own bot. ACL is member-self-write (any session
     # member can write their own row's whitelisted text fields).
-    _UPDATABLE_MEMBER_TEXT_FIELDS = frozenset({"bot_handle"})
+    _UPDATABLE_MEMBER_TEXT_FIELDS = frozenset({"bot_handle", "telegram_user_id"})
 
     def update_session_member_text(
         self, session_id: str, field: str, text_value: str,

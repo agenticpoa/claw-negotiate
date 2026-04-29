@@ -425,6 +425,17 @@ class TestUpdateSessionMemberText:
         # No --value (int) flag
         assert "--value" not in argv
 
+    def test_builds_correct_argv_for_telegram_user_id(self):
+        runner = MagicMock(return_value=_cp(0, json.dumps({"ok": True})))
+        client = ss.SshsignSession(runner=runner)
+        client.update_session_member_text(
+            "neg_1", field="telegram_user_id", text_value="6413315062",
+        )
+        argv = runner.call_args[0][0]
+        assert argv[:3] == ["ssh", "sshsign.dev", "update-session-member"]
+        assert argv[argv.index("--field") + 1] == "telegram_user_id"
+        assert argv[argv.index("--text-value") + 1] == "6413315062"
+
     def test_client_side_whitelist_rejects_unknown_text_field(self):
         runner = MagicMock()
         client = ss.SshsignSession(runner=runner)

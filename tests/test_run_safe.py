@@ -841,6 +841,32 @@ class TestCli:
         out = json.loads(capsys.readouterr().out)
         assert out["name"] == "negotiate_safe"
 
+    def test_status_subcommand(self, capsys):
+        with patch.object(rs, "run_status", return_value=0) as mock_status, \
+             patch.object(sys, "argv", [
+                 "run_safe.py", "status",
+                 "--session-code", "INV-1",
+                 "--output-dir", "/tmp/demo",
+                 "--json",
+             ]):
+            rc = rs.main()
+        assert rc == 0
+        mock_status.assert_called_once_with(
+            session_code="INV-1",
+            output_dir="/tmp/demo",
+            json_output=True,
+        )
+
+    def test_smoke_subcommand(self):
+        with patch.object(rs, "run_smoke", return_value=0) as mock_smoke, \
+             patch.object(sys, "argv", [
+                 "run_safe.py", "smoke",
+                 "--output-dir", "/tmp/demo",
+             ]):
+            rc = rs.main()
+        assert rc == 0
+        mock_smoke.assert_called_once_with(output_dir="/tmp/demo")
+
     def test_operator_setup_subcommand(self, capsys):
         with patch.object(rs, "persist_operator_updates", return_value=[]), \
              patch.object(sys, "argv", [
@@ -4339,6 +4365,7 @@ class TestRunScan:
         monkeypatch.setenv("CLAW_NEGOTIATE_STATE_DIR", str(tmp_path / "state"))
         monkeypatch.setenv("CLAW_NEGOTIATE_SCAN_MIN_INTERVAL", "0")
         out = tmp_path / "out"
+        monkeypatch.setenv("CLAW_NEGOTIATE_OUTPUT_DIR", str(out))
         out.mkdir()
         (out / "mint.json").write_text(json.dumps({"negotiation_id": "neg_new"}))
         rs.state_store.write_state({
@@ -4347,17 +4374,76 @@ class TestRunScan:
             "session_code": "INV-OLD",
         })
         reconcile = MagicMock(return_value=[])
+        client = MagicMock()
         monkeypatch.setattr(rs.orchestrator, "reconcile_active", reconcile)
 
-        rc = rs.run_scan(now_fn=lambda: 100.0)
+        rc = rs.run_scan(session_client=client, now_fn=lambda: 100.0)
 
         assert rc == 0
         assert rs.state_store.read_state("neg_old") is None
         reconcile.assert_called_once_with(
             states=[],
-            session_client=None,
+            session_client=client,
             sender=rs.send_telegram,
         )
+
+
+class TestRunStatusAndSmoke:
+    def _session(self):
+        return {
+            "session_id": "session_neg_abc",
+            "session_code": "INV-ABC",
+            "status": "joined",
+            "group_chat_id": -1001,
+            "members": [
+                {
+                    "role": "founder",
+                    "bot_handle": "@FounderBot",
+                    "telegram_user_id": "111",
+                },
+                {
+                    "role": "investor",
+                    "bot_handle": "@InvestorBot",
+                    "telegram_user_id": "222",
+                },
+            ],
+        }
+
+    def test_status_reports_session_and_reconstructability(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setenv("CLAW_NEGOTIATE_STATE_DIR", str(tmp_path / "state"))
+        (tmp_path / "config.json").write_text(json.dumps({"constraints": {"role": "founder"}}))
+        (tmp_path / "mint.json").write_text(json.dumps({"negotiation_id": "neg_abc"}))
+        client = MagicMock()
+        client.get_session.return_value = self._session()
+        client.list_deliveries.return_value = [{"key": "offer:founder:0:offer"}]
+        monkeypatch.setattr(rs, "_ssh_history", lambda *a, **kw: [
+            {"round": 0, "from": "founder", "type": "offer"},
+        ])
+
+        rc = rs.run_status(
+            session_code="INV-ABC",
+            output_dir=str(tmp_path),
+            session_client=client,
+        )
+
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Session: INV-ABC" in out
+        assert "Local state: reconstructable" in out
+        assert "Deliveries: 1" in out
+
+    def test_smoke_fails_when_state_not_reconstructable(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.setenv("CLAW_NEGOTIATE_STATE_DIR", str(tmp_path / "state"))
+        (tmp_path / "mint.json").write_text(json.dumps({"negotiation_id": "neg_abc"}))
+        client = MagicMock()
+        client.get_session.return_value = self._session()
+        client.list_deliveries.return_value = []
+        monkeypatch.setattr(rs, "_ssh_history", lambda *a, **kw: [])
+
+        rc = rs.run_smoke(output_dir=str(tmp_path), session_client=client)
+
+        assert rc == 1
+        assert "smoke failed" in capsys.readouterr().err
 
     def test_cli_dispatches_bind_extracting_code_from_message(self, tmp_path, monkeypatch):
         monkeypatch.setattr(sys, "argv", [

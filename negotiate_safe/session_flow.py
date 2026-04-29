@@ -78,6 +78,26 @@ def register_signing_session(
         sys.stderr.write(f"create-session failed: {e}\n")
         return None
 
+    session_id = sess.get("session_id") or sshsign_session_id(mint_output["negotiation_id"])
+    if session_id:
+        bot_handle = (os.environ.get("TELEGRAM_BOT_USERNAME") or "").strip()
+        if bot_handle:
+            try:
+                client.update_session_member_text(
+                    session_id, field="bot_handle", text_value=bot_handle,
+                )
+            except SshsignSessionError as e:
+                sys.stderr.write(f"create: bot_handle write: {e}\n")
+        if telegram_user_id:
+            try:
+                client.update_session_member_text(
+                    session_id,
+                    field="telegram_user_id",
+                    text_value=str(int(telegram_user_id)),
+                )
+            except (ValueError, SshsignSessionError) as e:
+                sys.stderr.write(f"create: telegram_user_id write: {e}\n")
+
     return {
         "session_code": sess.get("session_code"),
         "session_created_at": sess.get("created_at"),
@@ -93,6 +113,7 @@ def join_signing_session(
     neg_dir: Path,
     repo: Path | None = None,
     session_client=None,
+    telegram_user_id: int | None = None,
 ) -> dict | None:
     """Join an sshsign session and cache the counterparty APOA pubkey."""
     del mint_output, repo
@@ -130,15 +151,24 @@ def join_signing_session(
         return None
 
     bot_handle = (os.environ.get("TELEGRAM_BOT_USERNAME") or "").strip()
-    if bot_handle:
-        joined_session_id = (join_result or {}).get("session_id")
-        if joined_session_id:
+    joined_session_id = (join_result or {}).get("session_id")
+    if joined_session_id:
+        if bot_handle:
             try:
                 client.update_session_member_text(
                     joined_session_id, field="bot_handle", text_value=bot_handle,
                 )
             except SshsignSessionError as e:
                 sys.stderr.write(f"join: bot_handle write: {e}\n")
+        if telegram_user_id:
+            try:
+                client.update_session_member_text(
+                    joined_session_id,
+                    field="telegram_user_id",
+                    text_value=str(int(telegram_user_id)),
+                )
+            except (ValueError, SshsignSessionError) as e:
+                sys.stderr.write(f"join: telegram_user_id write: {e}\n")
 
     try:
         member_view = client.get_session(session_code=session_code)
