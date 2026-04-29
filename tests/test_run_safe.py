@@ -3421,6 +3421,8 @@ class TestCreatorAwaitSignAndFinalize:
         client.complete_session.assert_called_once()
         kwargs = client.complete_session.call_args.kwargs
         assert kwargs["session_id"] == "neg_1"
+        assert kwargs["lease_holder"]
+        assert kwargs["lease_generation"] == 1
         uri = kwargs["executed_artifact"]
         assert uri.startswith("sshsign://session/neg_1/")
         # Creator's pending_id embedded so the joiner's finalize can find
@@ -3596,6 +3598,8 @@ class TestCreatorReconcileFinalization:
             for c in sender.call_args_list
         )
         client.complete_session.assert_called_once()
+        assert client.complete_session.call_args.kwargs["lease_holder"]
+        assert client.complete_session.call_args.kwargs["lease_generation"] == 1
         assert "creator_pending=pnd_founder" in (
             client.complete_session.call_args.kwargs["executed_artifact"]
         )

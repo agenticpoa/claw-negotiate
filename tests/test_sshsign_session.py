@@ -135,10 +135,17 @@ class TestCancelAndComplete:
             "status": "completed", "view_token": "v_x",
         })))
         client = ss.SshsignSession(runner=runner)
-        result = client.complete_session("neg_1", "sshsign://artifact/final.pdf")
+        result = client.complete_session(
+            "neg_1",
+            "sshsign://artifact/final.pdf",
+            lease_holder="worker-a",
+            lease_generation=3,
+        )
         assert result["view_token"] == "v_x"
         argv = runner.call_args[0][0]
         assert argv[argv.index("--executed-artifact") + 1] == "sshsign://artifact/final.pdf"
+        assert argv[argv.index("--lease-holder") + 1] == "worker-a"
+        assert argv[argv.index("--lease-generation") + 1] == "3"
 
 
 class TestErrorMapping:

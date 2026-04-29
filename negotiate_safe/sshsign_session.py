@@ -270,13 +270,27 @@ class SshsignSession:
         return self._run("cancel-session", *flags)
 
     def complete_session(
-        self, session_id: str, executed_artifact: str,
+        self,
+        session_id: str,
+        executed_artifact: str,
+        lease_holder: str | None = None,
+        lease_generation: int | None = None,
     ) -> dict[str, Any]:
         """Creator-only. Idempotent for the same args."""
-        return self._run(
-            "complete-session",
+        flags = [
             "--session-id", session_id,
             "--executed-artifact", executed_artifact,
+        ]
+        if lease_holder is not None or lease_generation is not None:
+            if not lease_holder or lease_generation is None:
+                raise ValueError("lease_holder and lease_generation must be provided together")
+            flags += [
+                "--lease-holder", lease_holder,
+                "--lease-generation", str(int(lease_generation)),
+            ]
+        return self._run(
+            "complete-session",
+            *flags,
         )
 
     def bind_group(self, session_id: str, group_chat_id: int) -> dict[str, Any]:

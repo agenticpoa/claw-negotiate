@@ -1763,6 +1763,8 @@ def _creator_await_sign_and_finalize(
                 creator_pending_id=pending_id,
                 creator_role=creator_role,
             ),
+            lease_holder=finalize_lease["holder"] if finalize_lease else None,
+            lease_generation=int(finalize_lease["generation"]) if finalize_lease else None,
         )
     except SshsignSessionError as e:
         sys.stderr.write(f"complete-session failed (non-fatal): {e}\n")
@@ -1857,6 +1859,8 @@ def _creator_reconcile_finalization(
                 creator_pending_id=pending_id,
                 creator_role=creator_role,
             ),
+            lease_holder=lease["holder"],
+            lease_generation=int(lease["generation"]),
         )
     except SshsignSessionError as e:
         sys.stderr.write(f"reconcile complete-session failed: {e}\n")

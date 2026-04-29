@@ -128,7 +128,13 @@ class FakeSshsign:
         from sshsign_session import SshsignSessionError
         raise SshsignSessionError("no founder member row")
 
-    def complete_session(self, session_id: str, executed_artifact: str) -> dict:
+    def complete_session(
+        self,
+        session_id: str,
+        executed_artifact: str,
+        lease_holder: str | None = None,
+        lease_generation: int | None = None,
+    ) -> dict:
         sess = self._sessions[session_id]
         sess.status = "completed"
         sess.executed_artifact = executed_artifact

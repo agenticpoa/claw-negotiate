@@ -385,6 +385,8 @@ def reconcile_state(
                             creator_pending_id=pending_id,
                             creator_role=role,
                         ),
+                        lease_holder=holder,
+                        lease_generation=_lease_generation(lease),
                     )
                 except SshsignSessionError as e:
                     write_trace(output_dir, "orchestrator.complete_session_error", negotiation_id=negotiation_id, error=str(e))

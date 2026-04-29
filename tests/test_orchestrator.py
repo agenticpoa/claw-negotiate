@@ -174,6 +174,8 @@ def test_reconcile_founder_finalizes_after_both_signatures(tmp_path, monkeypatch
     assert (pending_dir / "neg_1_investor_pending.txt").read_text() == "pnd_investor"
     assert any(c.kwargs.get("media_path") == str(pdf) for c in sender.call_args_list)
     client.complete_session.assert_called_once()
+    assert client.complete_session.call_args.kwargs["lease_holder"]
+    assert client.complete_session.call_args.kwargs["lease_generation"] == 1
     assert client.check_lease.call_count == 2
 
 
