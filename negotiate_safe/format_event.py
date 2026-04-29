@@ -690,8 +690,7 @@ def format_cancel_completed_deal_refused(event: dict[str, Any]) -> str:
     """User tried to cancel an already-executed SAFE — not allowed."""
     return (
         "\U0001f512 This SAFE is already executed.\n\n"  # 🔒
-        "To unwind, you'll need a separate rescission agreement signed by both parties. "
-        "I can help draft one — just say so."
+        "`/cancel` can only stop a negotiation before execution. No changes were made."
     )
 
 

@@ -186,6 +186,68 @@ class TestPrepare:
         parse.assert_not_called()
         assert "founder profile" in sender.call_args.kwargs["message"].lower()
 
+    def test_investor_join_identity_in_message_skips_profile_prompt(
+        self, tmp_path, monkeypatch,
+    ):
+        monkeypatch.setenv("NEGOTIATE_SAFE_BOT_ROLE", "investor")
+        monkeypatch.delenv("INVESTOR_NAME", raising=False)
+        monkeypatch.delenv("INVESTOR_FIRM", raising=False)
+        monkeypatch.setattr(rs, "IDENTITY_SENTINEL_PATH", tmp_path / "pending.txt")
+        sender = MagicMock()
+        constraints = {
+            "role": "investor",
+            "mode": "two_party",
+            "session_code": "INV-3BAJY",
+            "valuation_cap_min": 0,
+            "valuation_cap_max": 35_000_000,
+            "discount_min": 0.10,
+            "pro_rata": "required",
+            "mfn": "indifferent",
+            "company_name": None,
+            "founder_name": None,
+            "founder_title": None,
+            "investor_name": None,
+            "investor_firm": None,
+            "investment_amount": None,
+        }
+        sess_payload = {
+            "session_id": "session_neg_abc",
+            "session_code": "INV-3BAJY",
+            "status": "open",
+            "metadata_public": {
+                "company_name": "Avocado",
+                "founder_name": "Juan Figuera",
+                "founder_title": "CEO",
+            },
+            "members": [{"role": "founder", "apoa_pubkey_pem": "FOUNDER_PEM"}],
+        }
+        persist = MagicMock(return_value=["INVESTOR_NAME", "INVESTOR_FIRM"])
+
+        with patch.object(rs, "_persist_env_updates", persist), \
+             patch.object(rs, "extract_constraints", return_value=constraints), \
+             patch.object(rs, "_fetch_session_for_join", return_value=(sess_payload, None)), \
+             patch.object(rs, "resolve_chat_id", return_value="12345"):
+            rc = rs.run_prepare(
+                "Joining INV-3BAJY via @AgenticPOA_bot, I am Nora Vassileva at SD Fund, "
+                "cap up to $35M, 10% discount, pro-rata required",
+                str(tmp_path / "out"),
+                chat_id_flag="12345",
+                sender=sender,
+            )
+
+        assert rc == 0
+        assert not (tmp_path / "pending.txt").exists()
+        persist.assert_called_once_with({
+            "INVESTOR_NAME": "Nora Vassileva",
+            "INVESTOR_FIRM": "SD Fund",
+        })
+        messages = "\n".join(c.kwargs.get("message") or "" for c in sender.call_args_list)
+        assert "Before we negotiate" not in messages
+        assert "Saved partial profile" not in messages
+        config = json.loads((tmp_path / "out" / "config.json").read_text())
+        assert config["constraints"]["investor_name"] == "Nora Vassileva"
+        assert config["constraints"]["investor_firm"] == "SD Fund"
+
     def test_enriches_founder_profile_and_requires_counterparty_identity(
         self, tmp_path, monkeypatch,
     ):
@@ -3898,7 +3960,8 @@ class TestRunCancel:
         client.cancel_session.assert_not_called()
         msgs = [c.kwargs.get("message", "") for c in sender.call_args_list]
         assert any("already executed" in m.lower() for m in msgs)
-        assert any("rescission" in m.lower() for m in msgs)
+        assert any("no changes were made" in m.lower() for m in msgs)
+        assert not any("rescission" in m.lower() for m in msgs)
 
     def test_cancel_terminal_state_is_noop(self, tmp_path):
         """If a previous cancel already transitioned the session, don't

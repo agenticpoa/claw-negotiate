@@ -637,7 +637,9 @@ class TestCancellationCards:
     def test_cancel_completed_refused(self):
         out = fe.format_cancel_completed_deal_refused({})
         assert "already executed" in out
-        assert "rescission" in out
+        assert "/cancel" in out
+        assert "No changes were made" in out
+        assert "rescission" not in out
 
 
 class TestDispatcher:

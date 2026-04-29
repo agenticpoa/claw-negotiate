@@ -418,6 +418,23 @@ class TestRunScan:
     def test_empty_state_dir_returns_zero(self):
         assert rs.run_scan() == 0
 
+    def test_scan_throttle_skips_near_duplicate_tick(
+        self, founder_output_dir, fake_client, monkeypatch,
+    ):
+        state_store.write_state({
+            "negotiation_id": "neg_a",
+            "output_dir": str(founder_output_dir),
+            "session_code": "INV-A",
+            "role": "founder",
+        })
+        reconcile = MagicMock(return_value=[])
+        monkeypatch.setattr(rs.orchestrator, "reconcile_active", reconcile)
+
+        assert rs.run_scan(session_client=fake_client, now_fn=lambda: 100.0) == 0
+        assert rs.run_scan(session_client=fake_client, now_fn=lambda: 105.0) == 0
+
+        reconcile.assert_called_once()
+
     def test_iterates_and_resumes_each_pointer(
         self, founder_output_dir, fake_client, monkeypatch,
     ):
@@ -492,6 +509,25 @@ class TestRunScan:
         with patch.object(rs.orchestrator, "reconcile_active", return_value=[]) as reconcile:
             rs.run_scan(session_client=fake_client)
         assert reconcile.call_args.kwargs["states"][0]["negotiation_id"] == "neg_legacy"
+
+    def test_terminal_orchestrator_result_cleans_pointer(
+        self, founder_output_dir, fake_client,
+    ):
+        state_store.write_state({
+            "negotiation_id": "neg_done",
+            "output_dir": str(founder_output_dir),
+            "session_code": "INV-DONE",
+            "role": "founder",
+        })
+
+        with patch.object(
+            rs.orchestrator,
+            "reconcile_active",
+            return_value=[rs.orchestrator.ReconcileResult("terminal:completed")],
+        ):
+            rs.run_scan(session_client=fake_client)
+
+        assert state_store.read_state("neg_done") is None
 
 
 class TestRunInvestorResume:

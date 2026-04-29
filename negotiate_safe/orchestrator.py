@@ -165,6 +165,20 @@ def _write_session_pending_files(
         _pending_path(output_dir, negotiation_id, missing_role).write_text(unknown[0])
 
 
+def _both_party_pending_ids(output_dir: Path, negotiation_id: str) -> dict[str, str] | None:
+    ids: dict[str, str] = {}
+    for role in ("founder", "investor"):
+        path = _pending_path(output_dir, negotiation_id, role)
+        try:
+            pending_id = path.read_text().strip()
+        except OSError:
+            return None
+        if not pending_id:
+            return None
+        ids[role] = pending_id
+    return ids
+
+
 def _run_turn_helper(
     *,
     output_dir: Path,
@@ -336,6 +350,15 @@ def reconcile_state(
             and signature_status.get("status") == "complete"
             and not has_executed_delivered(output_dir, negotiation_id)
         ):
+            party_pending_ids = _both_party_pending_ids(pending_dir, negotiation_id)
+            if not party_pending_ids:
+                write_trace(
+                    output_dir,
+                    "orchestrator.finalize_waiting_for_both_pendings",
+                    negotiation_id=negotiation_id,
+                    role=role,
+                )
+                return ReconcileResult("awaiting_both_signatures", projected=projected)
             holder = _holder(output_dir, "creator")
             try:
                 lease = client.acquire_lease(
@@ -351,7 +374,7 @@ def reconcile_state(
                 write_trace(output_dir, "orchestrator.finalize_lease_error", negotiation_id=negotiation_id, role=role, error=str(e))
                 return ReconcileResult("finalize_lease_error", projected=projected)
             try:
-                pending_id = local_pending.read_text().strip()
+                pending_id = party_pending_ids[role]
                 sender(group_chat_id, message="\U0001f4c4 Generating executed file\u2026")
                 pdf_path = finalize_executed_pdf(output_dir, pending_id, sshsign_host)
                 if not pdf_path:

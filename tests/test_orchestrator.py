@@ -179,6 +179,42 @@ def test_reconcile_founder_finalizes_after_both_signatures(tmp_path, monkeypatch
     assert client.check_lease.call_count == 2
 
 
+def test_reconcile_does_not_finalize_with_only_founder_signature(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAW_NEGOTIATE_DELIVERY_DIR", str(tmp_path / "deliveries"))
+    client = _client()
+    sender = MagicMock()
+    state = _state(tmp_path, "founder")
+    mint = json.loads((Path(state["output_dir"]) / "mint.json").read_text())
+    pending_dir = Path(mint["founder_config_path"]).parent / "output"
+    (pending_dir / "neg_1_founder_pending.txt").write_text("pnd_founder")
+    history = [
+        {"round": 0, "from": "founder", "type": "offer", "metadata": "{}"},
+        {"round": 1, "from": "investor", "type": "accept", "metadata": "{}"},
+    ]
+
+    monkeypatch.setattr(orchestrator, "_session_signature_status", lambda *a, **k: {
+        "status": "complete",
+        "signers": [
+            {"pending_id": "pnd_founder", "key_id": "key_founder"},
+        ],
+    })
+    finalize = MagicMock()
+    monkeypatch.setattr(orchestrator, "finalize_executed_pdf", finalize)
+
+    result = orchestrator.reconcile_state(
+        state,
+        session_client=client,
+        sender=sender,
+        history_fn=lambda *a, **k: history,
+        turn_runner=MagicMock(),
+    )
+
+    assert result.status == "awaiting_both_signatures"
+    finalize.assert_not_called()
+    client.complete_session.assert_not_called()
+    assert not any(c.kwargs.get("media_path") for c in sender.call_args_list)
+
+
 def test_reconcile_stops_finalization_when_finalize_lease_is_stale(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAW_NEGOTIATE_DELIVERY_DIR", str(tmp_path / "deliveries"))
     client = _client()

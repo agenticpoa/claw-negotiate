@@ -22,6 +22,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -200,6 +201,46 @@ def _identity_setup_prompt() -> str:
         "• \"I'm Juan Figuera, CEO of APOA Inc\"\n\n"
         "I'll remember it for future negotiations."
     )
+
+
+def _embedded_investor_identity(message: str) -> dict | None:
+    """Extract investor identity from a two-party join request.
+
+    The founder's invite template now says:
+
+        Joining INV-XXXXX ..., I am Nora Vassileva at SD Fund, cap up to ...
+
+    That sentence is already the investor profile. Do a small deterministic
+    parse before the first-run identity gate so the investor does not have to
+    introduce themselves twice.
+    """
+    if not re.search(r"\bJoining\s+INV-[A-Z0-9]{5,}\b", message, re.IGNORECASE):
+        return None
+    m = re.search(
+        r"\bI\s*(?:am|'m)\s+(.+?)\s+(?:at|from)\s+(.+?)"
+        r"(?=,\s*(?:cap|valuation|discount|pro[- ]?rata|mfn|invest)|[.!?]?$)",
+        message,
+        re.IGNORECASE,
+    )
+    if not m:
+        return None
+    name_part = m.group(1).strip(" ,")
+    firm = m.group(2).strip(" ,.")
+    title = None
+    if "," in name_part:
+        name, maybe_title = [part.strip() for part in name_part.split(",", 1)]
+        title = maybe_title or None
+    else:
+        name = name_part
+    if not name or not firm:
+        return None
+    return {
+        "role": "investor",
+        "name": name,
+        "title": title,
+        "company": None,
+        "firm": firm,
+    }
 
 
 SKILL_DIR = Path(__file__).resolve().parent
@@ -710,15 +751,32 @@ def run_prepare(
     # They'll reply with "I'm Name, Title at Company" → run_setup picks up
     # the stashed message and continues the flow automatically.
     if not _identity_configured():
-        try:
-            IDENTITY_SENTINEL_PATH.parent.mkdir(parents=True, exist_ok=True)
-            IDENTITY_SENTINEL_PATH.write_text(message)
-        except OSError as e:
-            sys.stderr.write(f"Could not stash pending message: {e}\n")
-        if chat_id:
-            sender(chat_id, message=_identity_setup_prompt())
-        write_trace(out, "prepare.identity_required", phase="prepare", chat_id=chat_id)
-        return 2
+        embedded_identity = _embedded_investor_identity(message)
+        if embedded_identity:
+            updates = _build_env_updates(embedded_identity)
+            failures = _persist_env_updates(updates)
+            # Even if OpenClaw config persistence is unavailable in this
+            # process, the current negotiation can continue using the
+            # identity parsed from the join request.
+            for key, value in updates.items():
+                os.environ[key] = value
+            write_trace(
+                out,
+                "prepare.identity_from_join",
+                phase="prepare",
+                failures=failures,
+                chat_id=chat_id,
+            )
+        else:
+            try:
+                IDENTITY_SENTINEL_PATH.parent.mkdir(parents=True, exist_ok=True)
+                IDENTITY_SENTINEL_PATH.write_text(message)
+            except OSError as e:
+                sys.stderr.write(f"Could not stash pending message: {e}\n")
+            if chat_id:
+                sender(chat_id, message=_identity_setup_prompt())
+            write_trace(out, "prepare.identity_required", phase="prepare", chat_id=chat_id)
+            return 2
 
     if chat_id:
         sender(chat_id, message="\u23f3 Reading your negotiation terms\u2026")  # ⏳
@@ -3526,13 +3584,37 @@ def run_scan(
     under a sshsign lease. Cron is a wakeup/recovery mechanism, not workflow
     truth.
     """
-    del now_fn
+    now = now_fn() if now_fn else time.time()
+    try:
+        min_interval = float(os.environ.get("CLAW_NEGOTIATE_SCAN_MIN_INTERVAL", "15"))
+    except ValueError:
+        min_interval = 15.0
+    throttle_path = state_store.state_dir() / ".scan_last"
+    try:
+        previous = float(throttle_path.read_text().strip())
+    except (OSError, ValueError):
+        previous = 0.0
+    if min_interval > 0 and previous > 0 and now - previous < min_interval:
+        return 0
+    try:
+        throttle_path.parent.mkdir(parents=True, exist_ok=True)
+        throttle_path.write_text(str(now))
+    except OSError as e:
+        sys.stderr.write(f"scan throttle: {e}\n")
+
     _hydrate_scan_env_from_openclaw_config()
-    orchestrator.reconcile_active(
-        states=state_store.list_active(),
+    states = state_store.list_active()
+    results = orchestrator.reconcile_active(
+        states=states,
         session_client=session_client,
         sender=sender,
     )
+    for state, result in zip(states, results):
+        if result.status.startswith("terminal:"):
+            try:
+                state_store.delete_state(state.get("negotiation_id") or "")
+            except Exception as e:  # noqa: BLE001
+                sys.stderr.write(f"scan: terminal cleanup: {e}\n")
     return 0
 
 
