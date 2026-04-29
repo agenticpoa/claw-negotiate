@@ -135,6 +135,36 @@ class TestSendTelegram:
         assert result.message_id == "77"
         runner.assert_not_called()
 
+    def test_bot_api_sends_reply_markup(self, monkeypatch):
+        runner = MagicMock()
+        monkeypatch.setattr(tp, "get_bot_token", lambda: "TOKEN")
+        markup = {
+            "inline_keyboard": [[
+                {"text": "Copy bind command", "copy_text": {"text": "/bind INV-1"}},
+            ]],
+        }
+
+        def opener(req, timeout):
+            assert req.full_url == "https://api.telegram.org/botTOKEN/sendMessage"
+            assert json.loads(req.data.decode()) == {
+                "chat_id": "12345",
+                "text": "hello",
+                "reply_markup": markup,
+            }
+            return _FakeHttpResponse({"ok": True, "result": {"message_id": 77}})
+
+        result = tp.send_telegram(
+            "12345",
+            message="hello",
+            reply_markup=markup,
+            runner=runner,
+            opener=opener,
+        )
+
+        assert result.ok is True
+        assert result.message_id == "77"
+        runner.assert_not_called()
+
     def test_text_only_builds_correct_cmd(self):
         runner = MagicMock(return_value=_ok_result(_ok_stdout(195)))
         result = tp.send_telegram("12345", message="hello", runner=runner)

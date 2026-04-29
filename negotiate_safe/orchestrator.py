@@ -16,7 +16,7 @@ from pathlib import Path
 
 import projector
 from artifacts import build_artifact_uri
-from format_event import format_event
+from format_event import format_event, group_setup_reply_markup
 from reconcile import has_executed_delivered, mark_executed_delivered
 from session_flow import sshsign_session_id
 from sshsign_session import LeaseHeldError, SshsignSession, SshsignSessionError
@@ -119,9 +119,14 @@ def _send_group_setup_if_needed(
         "investor_bot_handle": investor_handle,
         "investor_label": investor_label,
     })
+    markup = group_setup_reply_markup({
+        "session_code": session_code,
+        "founder_bot_handle": founder_handle,
+        "investor_bot_handle": investor_handle,
+    })
     if not body:
         return False
-    sender(dm_chat_id, message=body)
+    sender(dm_chat_id, message=body, reply_markup=markup)
     try:
         marker.write_text("1")
     except OSError:

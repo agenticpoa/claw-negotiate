@@ -140,6 +140,44 @@ class TestFormatters:
         assert "**You:** Acme Corp" in out  # just the company when no name
         assert "**Counterparty:** Bay Capital" in out  # just the firm when no name
 
+    def test_create_group_for_founder_is_button_first_copy(self):
+        out = fe.format_create_group_for_founder({
+            "type": "create_group_for_founder",
+            "session_code": "INV-1",
+            "founder_bot_handle": "@AgenticPOA_bot",
+            "investor_bot_handle": "@AgenticPOAInvestor_bot",
+            "investor_label": "Nora Vassileva at SD Fund",
+        })
+        assert "Nora Vassileva at SD Fund joined" in out
+        assert "Create or choose the live Telegram group" in out
+        assert "Founder bot: `@AgenticPOA_bot`" in out
+        assert "Investor bot: `@AgenticPOAInvestor_bot`" in out
+        assert "Bind command: `/bind INV-1`" in out
+        assert "Tap **+**" not in out
+
+    def test_group_setup_reply_markup_adds_startgroup_and_copy_buttons(self):
+        markup = fe.group_setup_reply_markup({
+            "session_code": "INV-1",
+            "founder_bot_handle": "@AgenticPOA_bot",
+            "investor_bot_handle": "@AgenticPOAInvestor_bot",
+        })
+        assert markup == {
+            "inline_keyboard": [
+                [{
+                    "text": "Add founder bot to group",
+                    "url": "https://t.me/AgenticPOA_bot?startgroup=INV-1",
+                }],
+                [{
+                    "text": "Add investor bot to group",
+                    "url": "https://t.me/AgenticPOAInvestor_bot?startgroup=INV-1",
+                }],
+                [{
+                    "text": "Copy bind command",
+                    "copy_text": {"text": "/bind INV-1"},
+                }],
+            ],
+        }
+
     def test_confirm_drops_identity_lines_when_nothing_known(self, sample_constraints):
         c = {
             **sample_constraints,

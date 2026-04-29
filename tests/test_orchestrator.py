@@ -134,6 +134,10 @@ def test_reconcile_prompts_founder_to_bind_group_after_investor_joins(tmp_path, 
     message = sender.call_args.kwargs["message"]
     assert "/bind INV-1" in message
     assert "Nora Vassileva at SD Fund" in message
+    assert sender.call_args.kwargs["reply_markup"]["inline_keyboard"][0][0] == {
+        "text": "Add founder bot to group",
+        "url": "https://t.me/AgenticPOA_bot?startgroup=INV-1",
+    }
 
 
 def test_reconcile_does_not_repeat_group_bind_prompt(tmp_path, monkeypatch):

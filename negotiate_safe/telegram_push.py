@@ -99,6 +99,7 @@ def _send_telegram_bot_api(
     message: str | None = None,
     media_path: str | Path | None = None,
     bot_token: str | None = None,
+    reply_markup: dict | None = None,
     opener=urllib.request.urlopen,
 ) -> SendResult:
     token = bot_token or get_bot_token()
@@ -113,6 +114,8 @@ def _send_telegram_bot_api(
             fields = {"chat_id": target}
             if message:
                 fields["caption"] = message
+            if reply_markup:
+                fields["reply_markup"] = json.dumps(reply_markup)
             body = _multipart_body(fields, "document", path, boundary)
             req = urllib.request.Request(
                 f"https://api.telegram.org/bot{token}/sendDocument",
@@ -121,7 +124,10 @@ def _send_telegram_bot_api(
                 method="POST",
             )
         else:
-            body = json.dumps({"chat_id": target, "text": message or ""}).encode()
+            payload = {"chat_id": target, "text": message or ""}
+            if reply_markup:
+                payload["reply_markup"] = reply_markup
+            body = json.dumps(payload).encode()
             req = urllib.request.Request(
                 f"https://api.telegram.org/bot{token}/sendMessage",
                 data=body,
@@ -180,6 +186,7 @@ def send_telegram(
     message: str | None = None,
     media_path: str | Path | None = None,
     force_document: bool = False,
+    reply_markup: dict | None = None,
     openclaw_bin: str = "openclaw",
     runner=subprocess.run,
     opener=urllib.request.urlopen,
@@ -203,6 +210,7 @@ def send_telegram(
             message=message,
             media_path=media_path,
             bot_token=token,
+            reply_markup=reply_markup,
             opener=opener,
         )
 
@@ -226,6 +234,7 @@ def send_telegram(
             chat_id=chat_id,
             message=message,
             media_path=media_path,
+            reply_markup=reply_markup,
             opener=opener,
         )
         if fallback.ok:
@@ -236,6 +245,7 @@ def send_telegram(
             chat_id=chat_id,
             message=message,
             media_path=media_path,
+            reply_markup=reply_markup,
             opener=opener,
         )
         if fallback.ok:
@@ -248,6 +258,7 @@ def send_telegram(
             chat_id=chat_id,
             message=message,
             media_path=media_path,
+            reply_markup=reply_markup,
             opener=opener,
         )
         if fallback.ok:

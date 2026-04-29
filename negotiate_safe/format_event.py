@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import sys
 from typing import Any
+from urllib.parse import quote
 
 
 # ──────────────────────────────────────────────────────────────
@@ -875,32 +876,61 @@ def format_create_group_for_founder(event: dict[str, Any]) -> str:
     if investor_bot and not investor_bot.startswith("@"):
         investor_bot = "@" + investor_bot
 
-    # When the investor's bot handle hasn't propagated yet (timing
-    # window between join and our cron read), fall back to a
-    # placeholder. The card is regenerated on the next scan tick
-    # with the real handle. Better than blocking the founder.
     if not investor_bot:
         investor_bot = "(your investor's agent — handle not yet known)"
 
+    bind_payload = f"/bind {code}" if code else "/bind INV-XXXXX"
+
     lines = [
-        f"✅ **{investor_label} joined.** Time to set up the live group.",  # ✅
+        f"✅ **{investor_label} joined.**",  # ✅
         "",
-        "**Create a Telegram group:**",
-        "1. Tap **+** → **New Group**",
-        "2. Search and add these members:",
-        f"   • `{founder_bot}` (your agent)" if founder_bot else "   • your founder agent",
-        f"   • `{investor_bot}`",
-        f"   • {investor_label} (their personal Telegram account)",
-        "   • You",
-        "3. Name the group (e.g. \"SAFE round – Acme + Babes Fund\").",
-        "4. In the group, paste:",
+        "**Create or choose the live Telegram group:**",
         "",
-        f"`/bind {code}`",
+        "1. Add the founder bot to a new or existing group with your investor.",
+        "2. Add the investor bot to that same group.",
+        "3. Paste the bind command in the group.",
         "",
-        "Both agents will then post offers there round by round so "
-        "everyone watches live. Signing stays in your DM (private).",
+        f"Founder bot: `{founder_bot}`" if founder_bot else "Founder bot: your founder agent",
+        f"Investor bot: `{investor_bot}`",
+        f"Bind command: `{bind_payload}`",
+        "",
+        "Signing links stay private in each person's DM.",
     ]
     return "\n".join(lines)
+
+
+def group_setup_reply_markup(event: dict[str, Any]) -> dict[str, Any] | None:
+    """Inline buttons for the founder's group-setup card.
+
+    Telegram supports startgroup deep links for adding a bot to a group and
+    CopyTextButton for copying short commands. The text card remains complete
+    on clients/transports that ignore reply_markup.
+    """
+    code = (event.get("session_code") or "").strip()
+    bind_payload = f"/bind {code}" if code else "/bind INV-XXXXX"
+
+    def bot_url(handle: str) -> str | None:
+        handle = (handle or "").strip()
+        if not handle or handle.startswith("("):
+            return None
+        handle = handle[1:] if handle.startswith("@") else handle
+        if not handle:
+            return None
+        payload = quote(code or "bind", safe="")
+        return f"https://t.me/{handle}?startgroup={payload}"
+
+    founder_url = bot_url(event.get("founder_bot_handle") or "")
+    investor_url = bot_url(event.get("investor_bot_handle") or "")
+
+    keyboard: list[list[dict[str, Any]]] = []
+    if founder_url:
+        keyboard.append([{"text": "Add founder bot to group", "url": founder_url}])
+    if investor_url:
+        keyboard.append([{"text": "Add investor bot to group", "url": investor_url}])
+    keyboard.append([
+        {"text": "Copy bind command", "copy_text": {"text": bind_payload}},
+    ])
+    return {"inline_keyboard": keyboard} if keyboard else None
 
 
 def format_investor_waiting_heartbeat(event: dict[str, Any]) -> str:

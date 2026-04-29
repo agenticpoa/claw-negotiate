@@ -46,7 +46,7 @@ from links import (
     extract_bind_code as _extract_bind_code,
 )
 from minting import build_create_tokens_cmd, build_service_name, identity_value
-from format_event import format_event
+from format_event import format_event, group_setup_reply_markup
 from session_flow import (
     register_signing_session as _register_signing_session,
     join_signing_session as _join_signing_session,
@@ -3164,12 +3164,17 @@ def _run_founder_resume(
             "investor_bot_handle": investor_handle,
             "investor_label": investor_label,
         })
+        cg_markup = group_setup_reply_markup({
+            "session_code": state.get("session_code"),
+            "founder_bot_handle": founder_handle,
+            "investor_bot_handle": investor_handle,
+        })
         # Founder DM chat_id was persisted to the state pointer at
         # mint time. config.json is the constraints/identity blob;
         # it does NOT carry chat_id, so we MUST read from state here.
         founder_dm_for_card = str(state.get("founder_dm_chat_id") or "")
         if cg_body and founder_dm_for_card:
-            sender(founder_dm_for_card, message=cg_body)
+            sender(founder_dm_for_card, message=cg_body, reply_markup=cg_markup)
 
         try:
             client.update_session_member(
