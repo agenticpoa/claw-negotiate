@@ -166,11 +166,11 @@ class TestFormatters:
             "inline_keyboard": [
                 [{
                     "text": "Add founder AI agent",
-                    "url": "https://t.me/AgenticPOA_bot?startgroup=INV-1",
+                    "url": "https://t.me/AgenticPOA_bot?startgroup",
                 }],
                 [{
                     "text": "Add investor AI agent",
-                    "url": "https://t.me/AgenticPOAInvestor_bot?startgroup=INV-1",
+                    "url": "https://t.me/AgenticPOAInvestor_bot?startgroup",
                 }],
                 [{
                     "text": "Copy bind command",

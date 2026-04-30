@@ -438,8 +438,7 @@ def _telegram_startgroup_payload(message: str) -> str | None:
 
     Tapping an "add bot to group" button can produce a `/start@bot INV-...`
     message in the target group. That is transport plumbing, not a new SAFE
-    request, so prepare should acknowledge it and stop before role/active
-    negotiation gates.
+    request, so prepare/bind should stop before role/active negotiation gates.
     """
     m = _STARTGROUP_PAYLOAD_RE.match(message or "")
     return m.group(1).upper() if m else None
@@ -738,12 +737,6 @@ def run_prepare(
 
     startgroup_code = _telegram_startgroup_payload(message)
     if startgroup_code:
-        if chat_id:
-            sender(chat_id, message=(
-                "✅ Bot added.\n\n"
-                "When both bots are in this group, paste:\n"
-                f"`/bind {startgroup_code}`"
-            ))
         write_trace(out, "prepare.noop", phase="prepare", reason="startgroup_payload", chat_id=chat_id, session_code=startgroup_code)
         return 0
 
@@ -4605,6 +4598,8 @@ def main() -> int:
     elif args.command == "cancel":
         return run_cancel(args.output_dir, chat_id_flag=args.chat_id or None)
     elif args.command == "bind":
+        if _telegram_startgroup_payload(args.message):
+            return 0
         code = (args.session_code or "").strip().upper()
         if not code:
             code = _extract_bind_code(args.message) or ""

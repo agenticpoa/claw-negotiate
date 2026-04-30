@@ -4121,6 +4121,18 @@ class TestExtractBindCode:
         assert rs._extract_bind_code("") is None
         assert rs._extract_bind_code("random text") is None
 
+    def test_cli_ignores_startgroup_payload_before_bind(self, tmp_path, monkeypatch):
+        argv = [
+            "run_safe.py", "bind",
+            "--message", "/start@AgenticPOA_bot INV-7K3X9",
+            "--chat-id", "telegram:-1001234",
+            "--from-id", "telegram:111",
+        ]
+        monkeypatch.setattr(sys, "argv", argv)
+        with patch.object(rs, "run_bind") as mock_bind:
+            assert rs.main() == 0
+        mock_bind.assert_not_called()
+
 
 class TestRunBind:
     @staticmethod

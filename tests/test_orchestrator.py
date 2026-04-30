@@ -136,7 +136,7 @@ def test_reconcile_prompts_founder_to_bind_group_after_investor_joins(tmp_path, 
     assert "Nora Vassileva at SD Fund" in message
     assert sender.call_args.kwargs["reply_markup"]["inline_keyboard"][0][0] == {
         "text": "Add founder AI agent",
-        "url": "https://t.me/AgenticPOA_bot?startgroup=INV-1",
+        "url": "https://t.me/AgenticPOA_bot?startgroup",
     }
 
 

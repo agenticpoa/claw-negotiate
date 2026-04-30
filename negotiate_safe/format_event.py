@@ -919,8 +919,11 @@ def group_setup_reply_markup(event: dict[str, Any]) -> dict[str, Any] | None:
     """Inline buttons for the founder's group-setup card.
 
     Telegram supports startgroup deep links for adding a bot to a group and
-    CopyTextButton for copying short commands. The text card remains complete
-    on clients/transports that ignore reply_markup.
+    CopyTextButton for copying short commands. Do not include the INV code in
+    the startgroup link: Telegram will echo that parameter back as
+    `/start@bot INV-...` in the group, which can race the explicit /bind step.
+    The text card remains complete on clients/transports that ignore
+    reply_markup.
     """
     code = (event.get("session_code") or "").strip()
     bind_payload = f"/bind {code}" if code else "/bind INV-XXXXX"
@@ -932,8 +935,7 @@ def group_setup_reply_markup(event: dict[str, Any]) -> dict[str, Any] | None:
         handle = handle[1:] if handle.startswith("@") else handle
         if not handle:
             return None
-        payload = quote(code or "bind", safe="")
-        return f"https://t.me/{handle}?startgroup={payload}"
+        return f"https://t.me/{handle}?startgroup"
 
     founder_url = bot_url(event.get("founder_bot_handle") or "")
     investor_url = bot_url(event.get("investor_bot_handle") or "")

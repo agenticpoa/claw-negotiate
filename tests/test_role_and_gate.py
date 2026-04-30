@@ -332,8 +332,7 @@ class TestRunPrepareWithGates:
         identity.assert_not_called()
         parse.assert_not_called()
         active.assert_not_called()
-        msgs = [c.kwargs.get("message") or c.args[1] for c in sender.call_args_list]
-        assert any("/bind INV-7K3X9" in m for m in msgs)
+        sender.assert_not_called()
 
     def test_wrong_bot_role_blocks_before_parse(self, tmp_path, monkeypatch):
         monkeypatch.setenv("NEGOTIATE_SAFE_BOT_ROLE", "founder")
