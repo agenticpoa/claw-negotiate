@@ -295,7 +295,57 @@ def _run_turn_helper(
         err = (result.stderr or "").strip()
         if err:
             sys.stderr.write(err + "\n")
+        if _is_token_expired_error(err):
+            events.append({"type": "session_expired", "id": "apoa_token_expired"})
     return result.returncode, events
+
+
+def _is_token_expired_error(stderr: str) -> bool:
+    text = (stderr or "").lower()
+    return "invalid apoa token" in text and "expired" in text
+
+
+def _project_and_close_expired_session(
+    *,
+    client,
+    session_id: str,
+    negotiation_id: str,
+    role: str,
+    output_dir: Path,
+    events: list[dict],
+    projected: int,
+    constraints: dict,
+    dm_chat_id: str,
+    group_chat_id: str | None,
+    sender,
+    dm_sender,
+) -> ReconcileResult:
+    for event in events:
+        if event.get("type") != "session_expired":
+            continue
+        if projector.project_event(
+            session_id=session_id,
+            event=event,
+            constraints=constraints,
+            dm_chat_id=dm_chat_id,
+            group_chat_id=group_chat_id,
+            sender=sender,
+            dm_sender=dm_sender,
+            delivery_client=client,
+        ):
+            projected += 1
+        try:
+            client.cancel_session(session_id=session_id)
+        except (AttributeError, SshsignSessionError):
+            pass
+        write_trace(
+            output_dir,
+            "orchestrator.session_expired",
+            negotiation_id=negotiation_id,
+            role=role,
+        )
+        return ReconcileResult("session_expired", projected=projected)
+    return ReconcileResult("turn_failed", projected=projected)
 
 
 def _run_turn_helper_with_heartbeats(
@@ -468,6 +518,22 @@ def reconcile_state(
                     heartbeat_role=role,
                 )
                 if rc != 0:
+                    expired = _project_and_close_expired_session(
+                        client=client,
+                        session_id=session_id,
+                        negotiation_id=negotiation_id,
+                        role=role,
+                        output_dir=output_dir,
+                        events=events,
+                        projected=projected,
+                        constraints=constraints,
+                        dm_chat_id=dm_chat_id,
+                        group_chat_id=group_chat_id,
+                        sender=sender,
+                        dm_sender=dm_sender,
+                    )
+                    if expired.status == "session_expired":
+                        return expired
                     return ReconcileResult("sign_failed", projected=projected)
                 for event in events:
                     if event.get("type") == "signing":
@@ -627,7 +693,20 @@ def reconcile_state(
         )
         if rc != 0:
             write_trace(output_dir, "orchestrator.turn_failed", negotiation_id=negotiation_id, role=role, returncode=rc)
-            return ReconcileResult("turn_failed", projected=projected)
+            return _project_and_close_expired_session(
+                client=client,
+                session_id=session_id,
+                negotiation_id=negotiation_id,
+                role=role,
+                output_dir=output_dir,
+                events=events,
+                projected=projected,
+                constraints=constraints,
+                dm_chat_id=dm_chat_id,
+                group_chat_id=group_chat_id,
+                sender=sender,
+                dm_sender=dm_sender,
+            )
         for event in events:
             if event.get("type") == "noop":
                 continue

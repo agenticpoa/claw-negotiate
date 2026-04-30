@@ -126,6 +126,47 @@ def test_turn_helper_posts_heartbeats_while_waiting(monkeypatch):
     assert any("Still working" in msg for msg in msgs)
 
 
+def test_turn_helper_maps_expired_token_error(tmp_path):
+    result = MagicMock(
+        returncode=1,
+        stdout="",
+        stderr="turn-once error: Invalid APOA token: ['Token expired at 2026-04-30T07:59:33+00:00']",
+    )
+
+    rc, events = orchestrator._run_turn_helper(
+        output_dir=tmp_path,
+        negotiate_repo="/repo",
+        sshsign_host="sshsign.dev",
+        runner=MagicMock(return_value=result),
+    )
+
+    assert rc == 1
+    assert {"type": "session_expired", "id": "apoa_token_expired"} in events
+
+
+def test_reconcile_posts_expired_card_and_cancels_session(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAW_NEGOTIATE_DELIVERY_DIR", str(tmp_path / "deliveries"))
+    client = _client()
+    sender = MagicMock()
+    turn_result = MagicMock(
+        returncode=1,
+        stdout="",
+        stderr="turn-once error: Invalid APOA token: ['Token expired']",
+    )
+
+    result = orchestrator.reconcile_state(
+        _state(tmp_path, "founder"),
+        session_client=client,
+        sender=sender,
+        history_fn=lambda *a, **k: [],
+        turn_runner=MagicMock(return_value=turn_result),
+    )
+
+    assert result.status == "session_expired"
+    assert any("expired" in c.kwargs["message"].lower() for c in sender.call_args_list)
+    client.cancel_session.assert_called_once_with(session_id="session_neg_1")
+
+
 def test_reconcile_waits_when_counterparty_due(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAW_NEGOTIATE_DELIVERY_DIR", str(tmp_path / "deliveries"))
     client = _client()

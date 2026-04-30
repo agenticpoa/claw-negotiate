@@ -4338,6 +4338,7 @@ def _session_status_report(
 
     sshsign_host = os.environ.get("SSHSIGN_HOST", "sshsign.dev")
     history_rows = _ssh_history(negotiation_id, sshsign_host=sshsign_host) if negotiation_id else []
+    history_rows = history_rows or []
     due_role = "founder" if len(history_rows) % 2 == 0 else "investor"
     if history_rows and history_rows[-1].get("type") == "accept":
         due_role = "signing"
