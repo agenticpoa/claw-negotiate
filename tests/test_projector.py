@@ -134,6 +134,31 @@ def test_project_signing_records_dm_and_group_targets(tmp_path, monkeypatch):
     assert payload["delivered"]["signing:pnd_123"]["target"] == "dm:123;group:-100"
 
 
+def test_project_signing_can_suppress_group_placeholder(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAW_NEGOTIATE_DELIVERY_DIR", str(tmp_path))
+    sender = MagicMock()
+    dm_sender = MagicMock()
+
+    projected = projector.project_event(
+        session_id="session_neg_sign",
+        event={
+            "type": "signing",
+            "pending_id": "pnd_123",
+            "approval_url": "https://sshsign.dev/approve/pnd_123",
+            "_suppress_group_placeholder": True,
+        },
+        constraints={"mode": "two_party", "role": "founder"},
+        dm_chat_id="123",
+        group_chat_id="-100",
+        sender=sender,
+        dm_sender=dm_sender,
+    )
+
+    assert projected is True
+    dm_sender.assert_called_once()
+    sender.assert_not_called()
+
+
 def test_project_event_uses_server_delivery_claim_before_send(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAW_NEGOTIATE_DELIVERY_DIR", str(tmp_path))
     sender = MagicMock()

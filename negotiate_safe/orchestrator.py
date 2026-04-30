@@ -348,6 +348,29 @@ def _project_and_close_expired_session(
     return ReconcileResult("turn_failed", projected=projected)
 
 
+def _send_signing_started_once(
+    *,
+    client,
+    session_id: str,
+    group_chat_id: str | None,
+    sender,
+) -> bool:
+    if not group_chat_id:
+        return False
+    event = {"type": "signing_group_started"}
+    if not projector._claim_delivery(
+        delivery_client=client,
+        session_id=session_id,
+        key=projector.delivery_key(event),
+        target=str(group_chat_id),
+    ):
+        return False
+    from telegram import SIGNING_GROUP_PLACEHOLDER
+
+    sender(group_chat_id, message=SIGNING_GROUP_PLACEHOLDER)
+    return True
+
+
 def _run_turn_helper_with_heartbeats(
     cmd: list[str],
     *,
@@ -537,6 +560,13 @@ def reconcile_state(
                     return ReconcileResult("sign_failed", projected=projected)
                 for event in events:
                     if event.get("type") == "signing":
+                        _send_signing_started_once(
+                            client=client,
+                            session_id=session_id,
+                            group_chat_id=group_chat_id,
+                            sender=sender,
+                        )
+                        event = {**event, "_suppress_group_placeholder": True}
                         if projector.project_event(
                             session_id=session_id,
                             event=event,
@@ -618,7 +648,6 @@ def reconcile_state(
                 ):
                     return ReconcileResult("finalize_lease_lost", projected=projected)
                 sender(group_chat_id, media_path=str(pdf_path))
-                sender(dm_chat_id, media_path=str(pdf_path))
                 if not _check_lease(
                     client,
                     session_id=session_id,
@@ -711,6 +740,13 @@ def reconcile_state(
             if event.get("type") == "noop":
                 continue
             if event.get("type") == "signing":
+                _send_signing_started_once(
+                    client=client,
+                    session_id=session_id,
+                    group_chat_id=group_chat_id,
+                    sender=sender,
+                )
+                event = {**event, "_suppress_group_placeholder": True}
                 signing_event = event
             if projector.project_event(
                 session_id=session_id,

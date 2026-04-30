@@ -122,7 +122,7 @@ def test_turn_helper_posts_heartbeats_while_waiting(monkeypatch):
 
     assert result.returncode == 0
     msgs = [c.kwargs["message"] for c in sender.call_args_list]
-    assert any("Investor AI agent is reviewing" in msg for msg in msgs)
+    assert any("Investor AI agent is preparing" in msg for msg in msgs)
     assert any("Still working" in msg for msg in msgs)
 
 
@@ -282,6 +282,10 @@ def test_reconcile_requests_local_signature_after_accept(tmp_path, monkeypatch):
     assert result.status == "signing_requested"
     assert result.signing_event["pending_id"] == "pnd_founder"
     dm_sender.assert_called_once()
+    assert sum(
+        1 for c in sender.call_args_list
+        if "Signing started" in (c.kwargs.get("message") or "")
+    ) == 1
 
 
 def test_reconcile_founder_finalizes_after_both_signatures(tmp_path, monkeypatch):
@@ -318,7 +322,12 @@ def test_reconcile_founder_finalizes_after_both_signatures(tmp_path, monkeypatch
 
     assert result.status == "finalized"
     assert (pending_dir / "neg_1_investor_pending.txt").read_text() == "pnd_investor"
-    assert any(c.kwargs.get("media_path") == str(pdf) for c in sender.call_args_list)
+    media_calls = [
+        c for c in sender.call_args_list
+        if c.kwargs.get("media_path") == str(pdf)
+    ]
+    assert len(media_calls) == 1
+    assert media_calls[0].args[0] == -100
     client.complete_session.assert_called_once()
     assert client.complete_session.call_args.kwargs["lease_holder"]
     assert client.complete_session.call_args.kwargs["lease_generation"] == 1

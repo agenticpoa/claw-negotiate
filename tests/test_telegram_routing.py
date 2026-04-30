@@ -114,6 +114,21 @@ class TestRouteStreamMessage:
         assert "refusing to send signing URL" in stderr.getvalue()
         sender.assert_called_once_with("-100", message=tg.SIGNING_GROUP_PLACEHOLDER)
 
+    def test_signing_placeholder_can_be_suppressed(self):
+        sender = MagicMock()
+        dm_sender = MagicMock()
+        tg.route_stream_message(
+            event={"type": "signing", "_suppress_group_placeholder": True},
+            message="https://sshsign.dev/approve/pnd_1",
+            chat_id="123",
+            group_chat_id="-100",
+            constraints=None,
+            sender=sender,
+            dm_sender=dm_sender,
+        )
+        dm_sender.assert_called_once()
+        sender.assert_not_called()
+
     def test_empty_message_noops(self):
         sender = MagicMock()
         tg.route_stream_message(

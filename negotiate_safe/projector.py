@@ -21,12 +21,16 @@ def delivery_key(event: dict) -> str:
         )
     if etype == "signing":
         return f"signing:{event.get('pending_id') or ''}"
+    if etype == "signing_group_started":
+        return "signing_group_started"
     return f"{etype}:{event.get('id') or event.get('round') or ''}"
 
 
 def _delivery_target(*, event: dict, dm_chat_id: str, group_chat_id: str | None) -> str:
     if event.get("type") == "signing" and group_chat_id:
         return f"dm:{dm_chat_id};group:{group_chat_id}"
+    if event.get("type") == "signing_group_started" and group_chat_id:
+        return str(group_chat_id)
     return str(group_chat_id or dm_chat_id)
 
 

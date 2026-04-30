@@ -79,7 +79,7 @@ def route_stream_message(
                 f"stream: refusing to send signing URL to "
                 f"non-DM target chat_id={chat_id!r}\n"
             )
-        if group_chat_id:
+        if group_chat_id and not event.get("_suppress_group_placeholder"):
             sender(target, message=SIGNING_GROUP_PLACEHOLDER)
         return
 
