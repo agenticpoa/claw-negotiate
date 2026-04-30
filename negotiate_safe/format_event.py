@@ -260,6 +260,7 @@ def format_offer(
     cap = terms.get("valuation_cap")
     discount = terms.get("discount_rate")
 
+    mode = (constraints or {}).get("mode") if constraints else None
     agent_suffix = " OpenClaw"
 
     header_prefix = f"{icon} " if icon else ""
