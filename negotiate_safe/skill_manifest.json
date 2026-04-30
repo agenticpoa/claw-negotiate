@@ -18,6 +18,7 @@
     "minting.py",
     "negotiate.py",
     "operator_ready.py",
+    "openclaw_turn_agent.py",
     "orchestrator.py",
     "parse_constraints.py",
     "parse_identity.py",
@@ -54,6 +55,8 @@
     "INVESTOR_NAME",
     "INVESTOR_FIRM",
     "NEGOTIATION_TTL",
+    "NEGOTIATE_SAFE_TURN_BACKEND",
+    "NEGOTIATE_SAFE_TURN_MODEL",
     "PROVISION_BASE_URL"
   ],
   "commands": {

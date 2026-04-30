@@ -17,10 +17,8 @@ import sys
 import time
 from pathlib import Path
 
+from openclaw_turn_agent import OpenClawTurnAgent, make_validated_offer
 from _stream_negotiate import _build_config, _load_upstream
-
-
-MAX_VALIDATION_RETRIES = 3
 
 
 def _emit(event: dict) -> None:
@@ -113,42 +111,26 @@ async def _run(args: argparse.Namespace) -> int:
             mfn_required=ns.investor_mfn_required,
         )
 
-    prompt_path = str(module.PROMPTS_DIR / f"{role}.txt")
-    agent = module.ClaudeAgent(role=role, constraints=constraints, prompt_path=prompt_path)
+    agent = OpenClawTurnAgent(role=role, constraints=constraints)
 
-    offer = None
-    for attempt in range(MAX_VALIDATION_RETRIES):
-        raw_offer = await agent.make_offer(agent_history)
-        raw_offer["from"] = role
-        raw_offer["negotiation_id"] = schema.negotiation_id
-        raw_offer["round"] = state.current_round
+    def _validate_structure(candidate: dict) -> tuple[bool, str]:
+        candidate["from"] = role
+        candidate["negotiation_id"] = schema.negotiation_id
+        candidate["round"] = state.current_round
+        return module.validate_offer_structure(candidate, schema)
 
-        valid, reason = module.validate_offer_structure(raw_offer, schema)
-        if not valid:
-            agent_history.append({
-                "role": "user",
-                "content": f"Your offer was invalid: {reason}. Please try again.",
-            })
-            continue
+    def _validate_constraints(terms: dict) -> tuple[bool, list[str]]:
+        return module.validate_apoa_constraints(terms, constraints)
 
-        if raw_offer["type"] in ("offer", "counter"):
-            constraint_valid, violations = module.validate_apoa_constraints(
-                raw_offer["terms"], constraints,
-            )
-            if not constraint_valid:
-                agent_history.append({
-                    "role": "user",
-                    "content": (
-                        f"Your offer violates APOA constraints: {', '.join(violations)}. "
-                        "Adjust your terms and try again."
-                    ),
-                })
-                continue
-        offer = raw_offer
-        break
-
-    if offer is None:
-        raise RuntimeError("agent failed to produce a valid offer")
+    offer = await make_validated_offer(
+        agent=agent,
+        history=agent_history,
+        validate=_validate_structure,
+        constraint_validate=_validate_constraints,
+    )
+    offer["from"] = role
+    offer["negotiation_id"] = schema.negotiation_id
+    offer["round"] = state.current_round
 
     offer["timestamp"] = module.datetime.now(module.timezone.utc).isoformat()
     offer["apoa_validated"] = True
