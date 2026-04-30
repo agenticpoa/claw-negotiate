@@ -82,6 +82,50 @@ def test_reconcile_runs_due_local_turn(tmp_path, monkeypatch):
     client.release_lease.assert_called_once()
 
 
+def test_turn_helper_posts_heartbeats_while_waiting(monkeypatch):
+    class FakeProc:
+        def __init__(self, *args, **kwargs):
+            self.returncode = 0
+            self._polls = 0
+
+        def poll(self):
+            self._polls += 1
+            return None if self._polls == 1 else 0
+
+        def communicate(self):
+            return (
+                json.dumps({
+                    "type": "counter",
+                    "party": "investor",
+                    "round": 1,
+                    "terms": {},
+                    "message": "Counter.",
+                }) + "\n",
+                "",
+            )
+
+        def kill(self):
+            self.returncode = -9
+
+    monkeypatch.setattr(orchestrator.subprocess, "Popen", FakeProc)
+    monkeypatch.setattr(orchestrator.time, "sleep", lambda _seconds: None)
+    sender = MagicMock()
+
+    result = orchestrator._run_turn_helper_with_heartbeats(
+        ["python3", "_turn_once.py"],
+        heartbeat_sender=sender,
+        heartbeat_chat_id="-100",
+        heartbeat_role="investor",
+        heartbeat_after=-1,
+        still_working_after=-1,
+    )
+
+    assert result.returncode == 0
+    msgs = [c.kwargs["message"] for c in sender.call_args_list]
+    assert any("Investor AI agent is reviewing" in msg for msg in msgs)
+    assert any("Still working" in msg for msg in msgs)
+
+
 def test_reconcile_waits_when_counterparty_due(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAW_NEGOTIATE_DELIVERY_DIR", str(tmp_path / "deliveries"))
     client = _client()

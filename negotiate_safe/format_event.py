@@ -959,6 +959,25 @@ def format_investor_waiting_heartbeat(event: dict[str, Any]) -> str:
     return "⏳ Still waking the founder AI agent…"  # ⏳
 
 
+def format_turn_heartbeat(event: dict[str, Any]) -> str:
+    role = (event.get("role") or "agent").strip().lower()
+    label = "Founder AI agent" if role == "founder" else (
+        "Investor AI agent" if role == "investor" else "AI agent"
+    )
+    return f"⏳ {_b(label + ' is reviewing the latest offer…')}"
+
+
+def format_turn_still_working(event: dict[str, Any]) -> str:
+    role = (event.get("role") or "agent").strip().lower()
+    label = "Founder AI agent" if role == "founder" else (
+        "Investor AI agent" if role == "investor" else "AI agent"
+    )
+    return (
+        f"⏳ {_b('Still working')}\n\n"
+        f"{_escape_html(label)} is checking the offer against your authorization before replying."
+    )
+
+
 def format_investor_both_online(event: dict[str, Any]) -> str:
     """Posted the moment founder_streaming_at flips non-null on the
     session row. Bridges the ~1-2s gap between "founder's agent is
@@ -1037,6 +1056,8 @@ FORMATTERS = {
     "investor_waiting_for_founder": format_investor_waiting_for_founder,
     "create_group_for_founder": format_create_group_for_founder,
     "investor_waiting_heartbeat": format_investor_waiting_heartbeat,
+    "turn_heartbeat": format_turn_heartbeat,
+    "turn_still_working": format_turn_still_working,
     "investor_both_online": format_investor_both_online,
     "investor_wake_timeout": format_investor_wake_timeout,
     "investor_session_ended": format_investor_session_ended,

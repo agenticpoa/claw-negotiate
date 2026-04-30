@@ -43,6 +43,8 @@ class TestFormatters:
             "founder_resumed",
             "investor_waiting_for_founder",
             "investor_waiting_heartbeat",
+            "turn_heartbeat",
+            "turn_still_working",
             "investor_both_online",
             "investor_wake_timeout",
             "investor_session_ended",
@@ -178,6 +180,16 @@ class TestFormatters:
                 }],
             ],
         }
+
+    def test_turn_heartbeat_copy(self):
+        out = fe.format_event({"type": "turn_heartbeat", "role": "investor"})
+        assert "Investor AI agent is reviewing the latest offer" in out
+
+    def test_turn_still_working_copy(self):
+        out = fe.format_event({"type": "turn_still_working", "role": "founder"})
+        assert "Still working" in out
+        assert "Founder AI agent" in out
+        assert "checking the offer against your authorization" in out
 
     def test_confirm_drops_identity_lines_when_nothing_known(self, sample_constraints):
         c = {

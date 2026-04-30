@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -251,6 +252,11 @@ def _run_turn_helper(
     negotiate_repo: str,
     sshsign_host: str,
     runner=subprocess.run,
+    heartbeat_sender=None,
+    heartbeat_chat_id: str | int | None = None,
+    heartbeat_role: str = "",
+    heartbeat_after: float = 45.0,
+    still_working_after: float = 120.0,
 ) -> tuple[int, list[dict]]:
     cmd = [
         sys.executable,
@@ -263,7 +269,17 @@ def _run_turn_helper(
         "--sshsign-host",
         sshsign_host,
     ]
-    result = runner(cmd, capture_output=True, text=True, timeout=180)
+    if runner is subprocess.run:
+        result = _run_turn_helper_with_heartbeats(
+            cmd,
+            heartbeat_sender=heartbeat_sender,
+            heartbeat_chat_id=heartbeat_chat_id,
+            heartbeat_role=heartbeat_role,
+            heartbeat_after=heartbeat_after,
+            still_working_after=still_working_after,
+        )
+    else:
+        result = runner(cmd, capture_output=True, text=True, timeout=180)
     events: list[dict] = []
     for raw in (result.stdout or "").splitlines():
         line = raw.strip()
@@ -280,6 +296,63 @@ def _run_turn_helper(
         if err:
             sys.stderr.write(err + "\n")
     return result.returncode, events
+
+
+def _run_turn_helper_with_heartbeats(
+    cmd: list[str],
+    *,
+    heartbeat_sender=None,
+    heartbeat_chat_id: str | int | None = None,
+    heartbeat_role: str = "",
+    heartbeat_after: float = 45.0,
+    still_working_after: float = 120.0,
+) -> subprocess.CompletedProcess:
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    started = time.monotonic()
+    heartbeat_sent = False
+    still_sent = False
+    timed_out = False
+    while proc.poll() is None:
+        elapsed = time.monotonic() - started
+        if (
+            heartbeat_sender
+            and heartbeat_chat_id
+            and not heartbeat_sent
+            and elapsed >= heartbeat_after
+        ):
+            body = format_event({"type": "turn_heartbeat", "role": heartbeat_role})
+            if body:
+                heartbeat_sender(heartbeat_chat_id, message=body)
+            heartbeat_sent = True
+        if (
+            heartbeat_sender
+            and heartbeat_chat_id
+            and not still_sent
+            and elapsed >= still_working_after
+        ):
+            body = format_event({"type": "turn_still_working", "role": heartbeat_role})
+            if body:
+                heartbeat_sender(heartbeat_chat_id, message=body)
+            still_sent = True
+        if elapsed >= 180:
+            proc.kill()
+            timed_out = True
+            break
+        time.sleep(1)
+    stdout, stderr = proc.communicate()
+    if timed_out:
+        stderr = ((stderr or "") + "\nturn helper timed out after 180s").strip()
+    return subprocess.CompletedProcess(
+        cmd,
+        124 if timed_out else int(proc.returncode or 0),
+        stdout=stdout or "",
+        stderr=stderr or "",
+    )
 
 
 def reconcile_state(
@@ -390,6 +463,9 @@ def reconcile_state(
                     negotiate_repo=negotiate_repo,
                     sshsign_host=sshsign_host,
                     runner=turn_runner,
+                    heartbeat_sender=sender,
+                    heartbeat_chat_id=group_chat_id,
+                    heartbeat_role=role,
                 )
                 if rc != 0:
                     return ReconcileResult("sign_failed", projected=projected)
@@ -545,6 +621,9 @@ def reconcile_state(
             negotiate_repo=negotiate_repo,
             sshsign_host=sshsign_host,
             runner=turn_runner,
+            heartbeat_sender=sender,
+            heartbeat_chat_id=group_chat_id,
+            heartbeat_role=role,
         )
         if rc != 0:
             write_trace(output_dir, "orchestrator.turn_failed", negotiation_id=negotiation_id, role=role, returncode=rc)
