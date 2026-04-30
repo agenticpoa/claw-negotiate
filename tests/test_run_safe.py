@@ -75,9 +75,9 @@ class TestPrepare:
         assert "Reading your negotiation terms" in first_msg
         # Second call: the confirm card
         second_msg = sender.call_args_list[1].kwargs.get("message") or ""
-        assert "Review your founder-side authorization" in second_msg
+        assert "Review your founder authorization" in second_msg
         assert "• Valuation cap:" in second_msg
-        assert "**GO**" in second_msg
+        assert "<code>GO</code>" in second_msg
 
     def test_chat_prepare_does_not_print_constraints_to_stdout(
         self, tmp_path, sample_constraints, capsys,
@@ -3372,7 +3372,7 @@ class TestAuthorizationCardOnRunNegotiate:
 
         # Find the first auth card send, then find the stream call index
         send_indices = [i for i, (k, _) in enumerate(call_log) if k == "send"
-                        and "authorization is set" in call_log[i][1].lower()]
+                        and "authorization set" in call_log[i][1].lower()]
         stream_indices = [i for i, (k, _) in enumerate(call_log) if k == "stream"]
         assert send_indices, f"no auth card pushed: {call_log}"
         assert stream_indices, "stream not called"
@@ -3388,7 +3388,7 @@ class TestAuthorizationCardOnRunNegotiate:
              patch.object(rs, "send_telegram", sender):
             rs.run_negotiate(str(tmp_path), chat_id_flag="12345")
         msgs = [c.kwargs.get("message", "") for c in sender.call_args_list]
-        auth_msgs = [m for m in msgs if "authorization is set" in m.lower()]
+        auth_msgs = [m for m in msgs if "authorization set" in m.lower()]
         assert auth_msgs
         assert "2 hours" in auth_msgs[0]
 
@@ -3964,7 +3964,7 @@ class TestRunCancel:
         assert call.kwargs["rescind"] is False
         # Initiator card pushed (new copy includes session code).
         msgs = [c.kwargs.get("message", "") for c in sender.call_args_list]
-        assert any("canceled" in m.lower() and "apoa" in m.lower() for m in msgs)
+        assert any("canceled" in m.lower() and "authorization" in m.lower() for m in msgs)
         # Optimistic "canceling…" pre-card lands first, before SSH call.
         assert any("Canceling" in m for m in msgs)
 
@@ -3999,8 +3999,7 @@ class TestRunCancel:
         client.cancel_session.assert_not_called()
         msgs = [c.kwargs.get("message", "") for c in sender.call_args_list]
         assert any("already executed" in m.lower() for m in msgs)
-        assert any("no changes were made" in m.lower() for m in msgs)
-        assert not any("rescission" in m.lower() for m in msgs)
+        assert any("rescission agreement" in m.lower() for m in msgs)
 
     def test_cancel_terminal_state_is_noop(self, tmp_path):
         """If a previous cancel already transitioned the session, don't
@@ -4158,7 +4157,7 @@ class TestRunBind:
         assert sender.call_args_list[0].args[0] == "-1001234"
         msg = sender.call_args_list[0].kwargs["message"]
         assert "INV-7K3X9" in msg
-        assert "bound to this group" in msg
+        assert "Negotiation room ready" in msg
 
     def test_wrong_user_refuses(self):
         client = MagicMock()
@@ -4539,7 +4538,7 @@ class TestGoLiveCardOnTwoPartyMint:
             f"msgs={messages}"
         )
         # Invitation card with the inverted-invitation copy MUST still be present.
-        assert any("Ready to start live negotiation" in m for m in messages), (
+        assert any("Ready to invite" in m for m in messages), (
             f"missing invitation card; msgs={messages}"
         )
 

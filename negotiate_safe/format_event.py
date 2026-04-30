@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
-"""Format negotiation events as short chat messages.
+"""Format negotiation events as short Telegram messages.
 
-OpenClaw's Telegram plugin uses GitHub-flavored Markdown rendering:
-  **bold**     — emphasis
-  `code`       — inline code (also safe escape for strings with `_` or `*`)
-  [text](url)  — explicit links
-Single `*` and `_` both render as italic; avoid them in copy per product
-direction. Any user-supplied text that might contain `_`, `*`, `` ` ``, or `[`
-is escaped via `_escape_md` to prevent accidental formatting.
+User-facing cards use Telegram HTML formatting (`<b>`, `<code>`, `<pre>`) so
+bold text renders cleanly without visible Markdown asterisks. Any user- or
+model-supplied text that might contain `<`, `>`, or `&` is escaped via
+`_escape_html` before being inserted into an HTML-formatted card.
 
 Event schema reflects what upstream agenticpoa/negotiate emits via
 `--json-events` plus two events our wrappers emit themselves:
@@ -23,6 +20,7 @@ from __future__ import annotations
 
 import json
 import sys
+import html
 from typing import Any
 from urllib.parse import quote
 
@@ -60,15 +58,21 @@ def _yn(flag: Any) -> str:
     return "yes" if flag else "no"
 
 
-def _escape_md(s: str) -> str:
-    """Escape Markdown formatting chars for use in plain text spans."""
-    return (
-        s.replace("\\", "\\\\")
-         .replace("_", "\\_")
-         .replace("*", "\\*")
-         .replace("`", "\\`")
-         .replace("[", "\\[")
-    )
+def _escape_html(s: str) -> str:
+    """Escape text for Telegram HTML parse mode."""
+    return html.escape(str(s), quote=False)
+
+
+def _b(s: str) -> str:
+    return f"<b>{_escape_html(s)}</b>"
+
+
+def _code(s: str) -> str:
+    return f"<code>{_escape_html(s)}</code>"
+
+
+def _pre(s: str) -> str:
+    return f"<pre>{_escape_html(s)}</pre>"
 
 
 def _format_founder_identity(
@@ -97,9 +101,6 @@ def _format_investor_identity(
 
 
 _PARTY_ICON = {"founder": "\U0001f464", "investor": "\U0001f4bc"}  # 👤, 💼
-
-_OFFER_LABELS = {"offer": "Offer", "counter": "Counter", "accept": "Accepted"}
-
 
 # ──────────────────────────────────────────────────────────────
 # Wrapper-side events
@@ -138,33 +139,35 @@ def format_confirm(event: dict[str, Any]) -> str:
     if role == "founder":
         you_line = founder_line
         counterparty_line = investor_line
-        confirm_cta = "Reply **GO** to create the invitation code, or send edits."
+        counterparty_label = "Investor"
     else:
         you_line = investor_line
         counterparty_line = founder_line
-        confirm_cta = "Reply **GO** to join the negotiation, or send edits."
+        counterparty_label = "Founder"
 
     identity_lines = [
-        f"{role_icon} **Review your {role_label}-side authorization**",
+        f"{role_icon} {_b(f'Review your {role_label} authorization')}",
     ]
     if you_line:
-        identity_lines.append(f"**You:** {you_line}")
+        identity_lines.append(f"{_b('You:')} {_escape_html(you_line)}")
     if counterparty_line:
-        identity_lines.append(f"**Counterparty:** {counterparty_line}")
+        identity_lines.append(
+            f"{_b(counterparty_label + ':')} {_escape_html(counterparty_line)}"
+        )
 
     lines = [
         "\n".join(identity_lines),
         "",
-        "Your agent will only agree to terms within these limits:",
+        "Your agent will only agree to:",
         "",
-        f"• Valuation cap: **{fmt_dollars(c['valuation_cap_min'])} – {fmt_dollars(c['valuation_cap_max'])}**",
-        f"• Discount: **at least {fmt_percent(c['discount_min'])}**",
-        f"• Pro-rata rights: {labels[c['pro_rata']]}",
-        f"• MFN: {mfn_labels[c['mfn']]}",
+        f"• Valuation cap: {_b(fmt_dollars(c['valuation_cap_min']) + ' – ' + fmt_dollars(c['valuation_cap_max']))}",
+        f"• Discount: {_b('at least ' + fmt_percent(c['discount_min']))}",
+        f"• Pro-rata rights: {_b(labels[c['pro_rata']])}",
+        f"• MFN: {_b(mfn_labels[c['mfn']])}",
         "",
-        "You will personally review and sign any final SAFE.",
+        "You will review and sign the final SAFE yourself.",
         "",
-        confirm_cta,
+        f"Reply {_code('GO')} to continue, or send edits.",
     ]
     return "\n".join(lines)
 
@@ -193,26 +196,26 @@ def format_authorized(event: dict[str, Any]) -> str:
     ttl_hours = event.get("ttl_hours") or 1
 
     lines = [
-        "\U0001f512 **Your agent's authorization is set**",  # 🔒
+        "\U0001f512 " + _b("Authorization set"),  # 🔒
         "",
-        "Your agent will only agree to terms within these limits:",
+        "Your agent can now negotiate, but only within these limits:",
         "",
     ]
     if cap_min is not None and cap_max is not None:
         lines.append(
-            f"• Cap: **{fmt_dollars(cap_min)} – {fmt_dollars(cap_max)}**"
+            f"• Valuation cap: {_b(fmt_dollars(cap_min) + ' – ' + fmt_dollars(cap_max))}"
         )
     if disc_min is not None:
-        lines.append(f"• Discount: **at least {fmt_percent(disc_min)}**")
-    lines.append(f"• Pro-rata rights: {pr_labels.get(pro_rata, pro_rata)}")
-    lines.append(f"• MFN: {pr_labels.get(mfn, mfn)}")
+        lines.append(f"• Discount: {_b('at least ' + fmt_percent(disc_min))}")
+    lines.append(f"• Pro-rata rights: {_b(pr_labels.get(pro_rata, pro_rata))}")
+    lines.append(f"• MFN: {_b(pr_labels.get(mfn, mfn))}")
     lines.extend([
         "",
-        f"\u23f1\ufe0f  Valid for {ttl_hours} hour"  # ⏱
-        f"{'s' if ttl_hours != 1 else ''}. Reply \"cancel\" anytime to revoke.",
+        f"Valid for {ttl_hours} hour"
+        f"{'s' if ttl_hours != 1 else ''}. Reply {_code('cancel')} anytime to revoke.",
         "",
-        "_Powered by APOA: every offer your agent makes is "
-        "cryptographically bound to this authorization._",
+        f"{_b('APOA constraint:')} every offer your agent makes is "
+        "cryptographically bound to this authorization.",
     ])
     return "\n".join(lines)
 
@@ -237,33 +240,32 @@ def format_offer(
     if etype == "accept":
         return _format_accept(event)
 
-    label = _OFFER_LABELS.get(etype, "Offer")
     party_raw = (event.get("party") or "").lower()
     icon = _PARTY_ICON.get(party_raw, "")
     party = party_raw.capitalize() or "?"
     round_num = event.get("round", "?")
+    try:
+        offer_num = int(round_num) + 1
+    except (TypeError, ValueError):
+        offer_num = round_num
 
     terms = event.get("terms") or {}
     cap = terms.get("valuation_cap")
     discount = terms.get("discount_rate")
 
-    # In solo-demo (user plays one role, AI plays the other), clearly
-    # label the AI side as "(AI)" so no one mistakes the agent's counter
-    # for a real person. In two_party mode both sides are humans; no
-    # suffix. `user_role` comes from the constraints/mint context.
     mode = (constraints or {}).get("mode") if constraints else None
     user_role = ((constraints or {}).get("role") or "").lower() if constraints else ""
-    ai_suffix = ""
+    agent_suffix = " AI agent"
     if mode == "demo" and user_role and party_raw and party_raw != user_role:
-        ai_suffix = " (AI)"
+        agent_suffix = " AI agent"
 
     header_prefix = f"{icon} " if icon else ""
-    header = f"{header_prefix}**Round {round_num} — {party}{ai_suffix}**"
+    header = f"{header_prefix}{_b(f'Offer {offer_num} — {party}{agent_suffix}')}"
     lines = [header]
 
     message = (event.get("message") or "").strip()
     if message:
-        lines.append(f'"{_escape_md(message)}"')
+        lines.extend(["", f'"{_escape_html(message)}"'])
 
     # PRIVACY: in two-party mode round cards land in the SHARED group
     # where the counterparty can read them. Each side's bounds are
@@ -281,10 +283,11 @@ def format_offer(
 
     lines.extend([
         "",
-        f"• Cap: **{fmt_dollars(cap)}**{cap_range}",
-        f"• Discount: **{fmt_percent(discount)}**{disc_range}",
-        f"• Pro-rata: {_yn(terms.get('pro_rata'))}",
-        f"• MFN: {_yn(terms.get('mfn'))}",
+        "Terms:",
+        f"• Valuation cap: {_b(fmt_dollars(cap))}{_escape_html(cap_range)}",
+        f"• Discount: {_b(fmt_percent(discount))}{_escape_html(disc_range)}",
+        f"• Pro-rata rights: {_b(_yn(terms.get('pro_rata')))}",
+        f"• MFN: {_b(_yn(terms.get('mfn')))}",
     ])
 
     return "\n".join(lines)
@@ -299,12 +302,13 @@ def _format_accept(event: dict[str, Any]) -> str:
     """
     terms = event.get("terms") or {}
     return (
-        "\U0001f91d **Deal!**\n\n"  # 🤝
-        "Terms agreed:\n"
-        f"• Cap: **{fmt_dollars(terms.get('valuation_cap'))}**\n"
-        f"• Discount: **{fmt_percent(terms.get('discount_rate'))}**\n"
-        f"• Pro-rata: {_yn(terms.get('pro_rata'))}\n"
-        f"• MFN: {_yn(terms.get('mfn'))}"
+        f"\U0001f91d {_b('Deal reached')}\n\n"  # 🤝
+        "Both AI agents agreed to these terms:\n\n"
+        f"• Valuation cap: {_b(fmt_dollars(terms.get('valuation_cap')))}\n"
+        f"• Discount: {_b(fmt_percent(terms.get('discount_rate')))}\n"
+        f"• Pro-rata rights: {_b(_yn(terms.get('pro_rata')))}\n"
+        f"• MFN: {_b(_yn(terms.get('mfn')))}\n\n"
+        f"{_b('Next:')} each party will review and sign privately."
     )
 
 
@@ -331,7 +335,7 @@ def format_outcome(
     if result == "max_rounds":
         cap_min = (constraints or {}).get("valuation_cap_min") if constraints else None
         cap_max = (constraints or {}).get("valuation_cap_max") if constraints else None
-        lines = ["\U0001f937 **No agreement reached.**"]  # 🤷
+        lines = [f"\U0001f937 {_b('No agreement reached')}"]  # 🤷
         if cap_min is not None and cap_max is not None:
             lines.append("")
             lines.append(
@@ -339,8 +343,7 @@ def format_outcome(
                 "to close on terms."
             )
             lines.append(
-                f"Your cap range was **{fmt_dollars(cap_min)} – "
-                f"{fmt_dollars(cap_max)}**."
+                f"Your cap range was {_b(fmt_dollars(cap_min) + ' – ' + fmt_dollars(cap_max))}."
             )
         else:
             lines.append("")
@@ -367,7 +370,7 @@ def format_propose_new_terms(event: dict[str, Any]) -> str:
     else:
         with_line = ""
     return (
-        "\U0001f504 **Try again?**\n\n"  # 🔄
+        f"\U0001f504 {_b('Try again?')}\n\n"  # 🔄
         f"Reply with updated terms and I'll start a new negotiation{with_line}. "
         "Example: \"Negotiate again, cap $15M-$25M, 15% discount.\""
     )
@@ -382,15 +385,16 @@ def format_signing(event: dict[str, Any]) -> str:
         # backslash escapes breaks the underscore in `pnd_XXX` when Telegram
         # hands the URL back to sshsign (observed: "Invalid pending ID").
         return (
-            "\u270d\ufe0f **Almost done — your signature, please.**\n\n"  # ✍️
-            "Tap the link below and draw your signature. "
-            "I'll share the executed SAFE here within a minute of signing.\n\n"
-            f"{approval_url}"
+            f"\u270d\ufe0f {_b('Review and sign')}\n\n"  # ✍️
+            "Open the secure signing page below to review the final terms "
+            "and draw your signature.\n\n"
+            f"{_escape_html(approval_url)}\n\n"
+            f"{_b('Do not share this link.')}"
         )
     if pending_id:
         return (
             "Awaiting your co-signature.\n\n"
-            f"Approve from any terminal:\n`ssh sshsign.dev approve --id {pending_id}`"
+            f"Approve from any terminal:\n{_code('ssh sshsign.dev approve --id ' + pending_id)}"
         )
     return "Awaiting your co-signature."
 
@@ -405,25 +409,32 @@ def format_signed(event: dict[str, Any]) -> str:
     cap = terms.get("valuation_cap")
     discount = terms.get("discount_rate")
     pro_rata = terms.get("pro_rata")
+    mfn = terms.get("mfn")
 
     if cap is not None or discount is not None:
-        lines = ["\u2705 **Signed & sealed.**", "", "Here's your executed SAFE:"]
+        lines = [
+            f"\u2705 {_b('SAFE executed')}",
+            "",
+            "The signed SAFE is attached below.",
+            "",
+            f"{_b('Final terms:')}",
+        ]
         if cap is not None:
-            lines.append(f"• Cap: {fmt_dollars(cap)}")
+            lines.append(f"• Valuation cap: {_b(fmt_dollars(cap))}")
         if discount is not None:
-            lines.append(f"• Discount: {fmt_percent(discount)}")
+            lines.append(f"• Discount: {_b(fmt_percent(discount))}")
         if pro_rata is not None:
-            lines.append(f"• Pro-rata: {_yn(pro_rata)}")
+            lines.append(f"• Pro-rata rights: {_b(_yn(pro_rata))}")
+        if mfn is not None:
+            lines.append(f"• MFN: {_b(_yn(mfn))}")
         lines.append("")
         lines.append(
-            "Full audit trail is available on sshsign.dev if you ever need to "
-            "prove authenticity."
+            "The cryptographic audit trail is available through sshsign."
         )
         return "\n".join(lines)
     return (
-        "\u2705 **Signed & sealed.**\n\n"
-        "Full audit trail is available on sshsign.dev if you ever need to "
-        "prove authenticity."
+        f"\u2705 {_b('SAFE executed')}\n\n"
+        "The cryptographic audit trail is available through sshsign."
     )
 
 
@@ -454,13 +465,13 @@ def format_profile(event: dict[str, Any]) -> str:
             "Say \"I'm Name, Title at Company\" to set it up."
         )
 
-    lines = ["\U0001f464 **Your saved profile**"]  # 👤
+    lines = ["\U0001f464 " + _b("Your saved profile")]  # 👤
 
     if has_founder:
         lines.append("")
-        lines.append("**Founder side** \U0001f464")  # 👤
+        lines.append(_b("Founder side") + " \U0001f464")  # 👤
         if founder_name:
-            lines.append(f"• Name: **{founder_name}**")
+            lines.append(f"• Name: {_b(founder_name)}")
         if founder_title:
             lines.append(f"• Title: {founder_title}")
         if company_name:
@@ -468,9 +479,9 @@ def format_profile(event: dict[str, Any]) -> str:
 
     if has_investor:
         lines.append("")
-        lines.append("**Investor side** \U0001f4bc")  # 💼
+        lines.append(_b("Investor side") + " \U0001f4bc")  # 💼
         if investor_name:
-            lines.append(f"• Name: **{investor_name}**")
+            lines.append(f"• Name: {_b(investor_name)}")
         if investor_firm:
             lines.append(f"• Firm: {investor_firm}")
 
@@ -525,20 +536,21 @@ def format_invitation(event: dict[str, Any]) -> str:
              "Y% discount, pro-rata required"
     )
 
-    lines = [
-        "🤝 **Ready to start live negotiation.**",  # 🤝
-        "",
-        f"**Send this setup note to {counterparty}** "
-        "(via Signal, SMS, email — whatever you already use):",
-        "",
-        "─────────────────────────",
+    invite_block = "\n\n".join([
         "Please join our SAFE negotiation.",
+        "DM your investor agent on Telegram and paste:",
+        join_template,
+        "Replace $X and Y% with your investor-side limits.",
+    ])
+
+    first_name = counterparty.split()[0] if counterparty and counterparty != "your investor" else "your investor"
+
+    lines = [
+        f"✉️ {_b('Ready to invite ' + first_name)}",
         "",
-        "DM your investor agent on Telegram with this template, replacing "
-        "the cap and discount with your investor-side limits:",
+        f"{_b('Send ' + counterparty + ' this message:')}",
         "",
-        f"`{join_template}`",
-        "─────────────────────────",
+        _pre(invite_block),
         "",
     ]
     # If founder_bot is empty we silently fall back to the generic
@@ -546,19 +558,15 @@ def format_invitation(event: dict[str, Any]) -> str:
     # confusing to end users (it was meant for ops). Misconfig logs
     # to stderr from the call site instead.
 
-    lines.append("**While you wait:**")
     if expires_at:
         lines.append(
-            f"• I'll notify you the moment {counterparty} joins. "
-            f"The code is valid for {ttl_h} hours."
+            f"I'll notify you when {first_name} joins. "
+            f"The invitation is valid for {ttl_h} hours."
         )
     else:
-        lines.append(f"• I'll notify you the moment {counterparty} joins.")
-    lines.append(
-        "• Once they're in, I'll tell you how to set up the live group "
-        "chat for round-by-round visibility."
-    )
-    lines.append("• Reply \"cancel\" anytime to revoke and tear it down.")
+        lines.append(f"I'll notify you when {first_name} joins.")
+    lines.append("")
+    lines.append(f"Reply {_code('cancel')} anytime to revoke.")
     return "\n".join(lines)
 
 
@@ -587,7 +595,7 @@ def format_waiting(event: dict[str, Any]) -> str:
     if remaining_hours is not None:
         rem_seconds = float(remaining_hours) * 3600
         lines.append(
-            f"Invitation expires in **{_fmt_hhmm(rem_seconds)}**. "
+            f"Invitation expires in {_b(_fmt_hhmm(rem_seconds))}. "
             "Share the code soon."
         )
     return "\n".join(lines)
@@ -627,24 +635,31 @@ def _who_label(event: dict[str, Any]) -> str:
     return who or "The other party"
 
 
+def _session_code(event: dict[str, Any]) -> str:
+    return (event.get("session_code") or event.get("code") or "").strip()
+
+
 def format_canceled_before_deal_initiator(event: dict[str, Any]) -> str:
     """You canceled — no agreement had been reached yet. Includes the
     session code so the user can confirm WHICH negotiation got
     canceled (especially when rapidly minting + canceling).
     """
     code = (event.get("session_code") or "").strip()
-    code_line = f" **{code}**" if code else ""
+    code_line = f" {code}" if code else ""
     return (
-        f"\u274c **Negotiation{code_line} canceled.**\n\n"  # ❌
-        "No SAFE was executed. Your APOA authorization has been revoked."
+        f"\u274c {_b('Negotiation' + code_line + ' canceled')}\n\n"  # ❌
+        "No SAFE was executed. Your agent's authorization has been revoked."
     )
 
 
 def format_canceled_before_deal_observer(event: dict[str, Any]) -> str:
     """Your counterparty canceled — no agreement had been reached yet."""
     who = _who_label(event)
+    code = _session_code(event)
+    header = f"Negotiation {code} canceled" if code else "Negotiation canceled"
     return (
-        f"\u274c {who} stopped negotiating before an agreement was reached.\n\n"  # ❌
+        f"\u274c {_b(header)}\n\n"  # ❌
+        f"{_escape_html(who)} stopped the negotiation before a deal was reached.\n\n"
         "No SAFE was executed."
     )
 
@@ -652,7 +667,8 @@ def format_canceled_before_deal_observer(event: dict[str, Any]) -> str:
 def format_canceled_after_deal_initiator(event: dict[str, Any]) -> str:
     """You revoked the agreed deal before either side signed."""
     return (
-        "\u274c You revoked the agreed deal before signing.\n\n"  # ❌
+        f"\u274c {_b('Negotiation canceled')}\n\n"  # ❌
+        "You revoked the agreed deal before signing.\n\n"
         "Your counterparty has been notified. No SAFE will be executed."
     )
 
@@ -660,7 +676,8 @@ def format_canceled_after_deal_initiator(event: dict[str, Any]) -> str:
 def format_canceled_after_deal_observer(event: dict[str, Any]) -> str:
     who = _who_label(event)
     return (
-        f"\u274c {who} revoked the agreed deal before signing.\n\n"  # ❌
+        f"\u274c {_b('Negotiation canceled')}\n\n"  # ❌
+        f"{_escape_html(who)} revoked the agreed deal before signing.\n\n"
         "No SAFE will be executed. The negotiation is closed."
     )
 
@@ -671,9 +688,9 @@ def format_rescinded_after_sign_initiator(event: dict[str, Any]) -> str:
     knows WHICH negotiation was rescinded.
     """
     code = (event.get("session_code") or "").strip()
-    code_line = f" **{code}**" if code else ""
+    code_line = f" {code}" if code else ""
     return (
-        f"\u26a0\ufe0f **Negotiation{code_line} rescinded after signing.**\n\n"  # ⚠
+        f"\u26a0\ufe0f {_b('Negotiation' + code_line + ' rescinded after signing')}\n\n"  # ⚠
         "Your signature stays on record for audit purposes, "
         "but the SAFE will NOT execute. Your counterparty has been notified."
     )
@@ -682,16 +699,19 @@ def format_rescinded_after_sign_initiator(event: dict[str, Any]) -> str:
 def format_rescinded_after_sign_observer(event: dict[str, Any]) -> str:
     who = _who_label(event)
     return (
-        f"\u26a0\ufe0f {who} rescinded after signing.\n\n"  # ⚠
+        f"\u26a0\ufe0f {_escape_html(who)} rescinded after signing.\n\n"  # ⚠
         "The SAFE will NOT execute. Their signature is on record but void for this deal."
     )
 
 
 def format_cancel_completed_deal_refused(event: dict[str, Any]) -> str:
     """User tried to cancel an already-executed SAFE — not allowed."""
+    code = _session_code(event)
+    header = f"SAFE {code} already executed" if code else "SAFE already executed"
     return (
-        "\U0001f512 This SAFE is already executed.\n\n"  # 🔒
-        "`/cancel` can only stop a negotiation before execution. No changes were made."
+        f"\U0001f512 {_b(header)}\n\n"  # 🔒
+        f"This negotiation is complete and can't be canceled with {_code('/cancel')}.\n\n"
+        "To unwind it, both parties would need to sign a separate rescission agreement."
     )
 
 
@@ -725,7 +745,7 @@ def format_go_live(event: dict[str, Any]) -> str:
     bind_payload = f"/bind {code}" if code else "/bind INV-XXXXX"
 
     lines = [
-        "\U0001f3ac **Want to see both agents negotiate in one chat?**",  # 🎬
+        f"\U0001f3ac {_b('Want to see both AI agents negotiate in one chat?')}",  # 🎬
         "",
         "Create a new Telegram group with these three members:",
         "",
@@ -733,10 +753,10 @@ def format_go_live(event: dict[str, Any]) -> str:
         "",
         "Then paste this in the new group:",
         "",
-        f"    `{bind_payload}`",
+        f"    {_code(bind_payload)}",
         "",
-        f"_Or share the code_ `{code}` _with your investor via any other "
-        "channel to stick with DM-only mode._",
+        f"<i>Or share the code</i> {_code(code)} <i>with your investor via any other "
+        "channel to stick with DM-only mode.</i>",
     ]
     return "\n".join(lines)
 
@@ -748,14 +768,16 @@ def format_group_bound(event: dict[str, Any]) -> str:
     code = (event.get("session_code") or "").strip()
     counterparty = (event.get("counterparty_label") or "your investor").strip()
 
+    code_part = f" for {code}" if code else ""
+    name = (counterparty.split()[0] if counterparty else "your counterparty")
+
     lines = [
-        f"✅ **Negotiation {code} bound to this group.**",  # ✅
+        f"✅ {_b('Negotiation room ready' + code_part)}",  # ✅
         "",
-        f"Both agents will post their offers here so you and {counterparty} "
-        "can watch the rounds live.",
+        f"Both AI agents will post their offers here so you and {_escape_html(name)} "
+        "can follow the rounds live.",
         "",
-        "_Signing stays private — when it's time to sign, each of you "
-        "will get a private link in your own DM._",
+        f"{_b('Signing stays private.')} Each person will receive their own signing link in DM.",
     ]
     return "\n".join(lines)
 
@@ -805,10 +827,9 @@ def format_active_negotiation_block(event: dict[str, Any]) -> str:
     """
     descriptor = (event.get("descriptor") or "an active negotiation").strip()
     return (
-        f"⛔ You already have **{descriptor}** in progress.\n\n"  # ⛔
-        f"Reply `/cancel` to abort it, then start a new one. "
-        f"(Each bot handles one negotiation at a time so the agent "
-        f"can't accidentally send your terms to the wrong counterparty.)"
+        f"⛔ {_b('Negotiation already in progress')}\n\n"  # ⛔
+        f"You already have {_b(descriptor)} open.\n\n"
+        f"Reply {_code('/cancel')} to stop it before starting a new negotiation."
     )
 
 
@@ -819,12 +840,9 @@ def format_founder_resumed(event: dict[str, Any]) -> str:
     enforced in tests to prevent any future self-trigger loops).
     """
     code = (event.get("session_code") or "").strip()
-    header = "⚡ Founder's agent is back online."  # ⚡
-    if code:
-        header += f" (Session {code})"
     return (
-        f"{header}\n\n"
-        "Streaming the first offer in a moment…"
+        f"⚡ {_b('Starting the negotiation')}\n\n"  # ⚡
+        "The founder AI agent will post the first offer in a moment."
     )
 
 
@@ -842,14 +860,14 @@ def format_investor_waiting_for_founder(event: dict[str, Any]) -> str:
         founder_bot = "@" + founder_bot
     if founder_bot:
         return (
-            "✅ **Joined.** Waiting for the founder's agent.\n\n"  # ✅
-            f"Founder agent: {founder_bot}\n\n"
+            f"✅ {_b('Joined.')} Waiting for the founder AI agent.\n\n"  # ✅
+            f"Founder AI agent: {_code(founder_bot)}\n\n"
             "They're setting up a Telegram group where the negotiation "
             "rounds will stream live. You'll be invited to it shortly. "
             "No action needed from you — sit tight."
         )
     return (
-        "✅ **Joined.** Waiting for the founder's agent.\n\n"  # ✅
+        f"✅ {_b('Joined.')} Waiting for the founder AI agent.\n\n"  # ✅
         "They're setting up a Telegram group where the negotiation "
         "rounds will stream live. You'll be invited to it shortly. "
         "No action needed from you — sit tight."
@@ -882,17 +900,13 @@ def format_create_group_for_founder(event: dict[str, Any]) -> str:
     bind_payload = f"/bind {code}" if code else "/bind INV-XXXXX"
 
     lines = [
-        f"✅ **{investor_label} joined.**",  # ✅
+        f"✅ {_b(investor_label + ' joined')}",  # ✅
         "",
-        "**Create or choose the live Telegram group:**",
+        f"{_b('Set up the negotiation room:')}",
         "",
-        "1. Add the founder bot to a new or existing group with your investor.",
-        "2. Add the investor bot to that same group.",
-        "3. Paste the bind command in the group.",
-        "",
-        f"Founder bot: `{founder_bot}`" if founder_bot else "Founder bot: your founder agent",
-        f"Investor bot: `{investor_bot}`",
-        f"Bind command: `{bind_payload}`",
+        f"1. In Telegram, create a new group with you and {_escape_html(investor_label.split()[0] if investor_label else 'your investor')}.",
+        "2. Add both AI agents using the buttons below.",
+        "3. Copy and paste the bind command in the group.",
         "",
         "Signing links stay private in each person's DM.",
     ]
@@ -924,9 +938,9 @@ def group_setup_reply_markup(event: dict[str, Any]) -> dict[str, Any] | None:
 
     keyboard: list[list[dict[str, Any]]] = []
     if founder_url:
-        keyboard.append([{"text": "Add founder bot to group", "url": founder_url}])
+        keyboard.append([{"text": "Add founder AI agent", "url": founder_url}])
     if investor_url:
-        keyboard.append([{"text": "Add investor bot to group", "url": investor_url}])
+        keyboard.append([{"text": "Add investor AI agent", "url": investor_url}])
     keyboard.append([
         {"text": "Copy bind command", "copy_text": {"text": bind_payload}},
     ])
@@ -938,7 +952,7 @@ def format_investor_waiting_heartbeat(event: dict[str, Any]) -> str:
     signaled streaming_at. Keeps the chat from feeling dead during
     the cron window. Posted at most once per wait.
     """
-    return "⏳ Still waking the founder's agent…"  # ⏳
+    return "⏳ Still waking the founder AI agent…"  # ⏳
 
 
 def format_investor_both_online(event: dict[str, Any]) -> str:
@@ -947,7 +961,7 @@ def format_investor_both_online(event: dict[str, Any]) -> str:
     up" and the first offer card arriving from upstream.
     """
     return (
-        "✅ Both sides are live — starting the negotiation now."  # ✅
+        f"✅ {_b('Both AI agents are live')}\n\nStarting the negotiation now."  # ✅
     )
 
 
@@ -958,7 +972,7 @@ def format_investor_wake_timeout(event: dict[str, Any]) -> str:
     the user knows what to try first.
     """
     return (
-        "⏳ The founder's agent is taking longer than expected.\n\n"  # ⏳
+        f"⏳ {_b('Still working')}\n\n"  # ⏳
         "If you know the founder, a quick nudge to them (sending any "
         "message to their bot) will force a retry. Otherwise the cron "
         "scan will keep trying — come back in a few minutes."

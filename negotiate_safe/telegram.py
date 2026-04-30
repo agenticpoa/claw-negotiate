@@ -16,8 +16,8 @@ from telegram_push import SigningUrlTargetError
 
 
 SIGNING_GROUP_PLACEHOLDER = (
-    "⏳ Signing… check your own DM for the "
-    "signing link. Never share this link."
+    "✍️ <b>Signing started</b>\n\n"
+    "Each party will receive a private signing link in DM."
 )
 
 
@@ -84,4 +84,3 @@ def route_stream_message(
         return
 
     sender(target, message=message)
-

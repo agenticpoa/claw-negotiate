@@ -94,6 +94,15 @@ def _multipart_body(
     return b"".join(chunks)
 
 
+def _infer_parse_mode(message: str | None) -> str | None:
+    if not message:
+        return None
+    html_markers = ("<b>", "</b>", "<code>", "</code>", "<pre>", "</pre>", "<i>", "</i>")
+    if any(marker in message for marker in html_markers):
+        return "HTML"
+    return None
+
+
 def _send_telegram_bot_api(
     chat_id: str,
     message: str | None = None,
@@ -114,6 +123,9 @@ def _send_telegram_bot_api(
             fields = {"chat_id": target}
             if message:
                 fields["caption"] = message
+                parse_mode = _infer_parse_mode(message)
+                if parse_mode:
+                    fields["parse_mode"] = parse_mode
             if reply_markup:
                 fields["reply_markup"] = json.dumps(reply_markup)
             body = _multipart_body(fields, "document", path, boundary)
@@ -125,6 +137,9 @@ def _send_telegram_bot_api(
             )
         else:
             payload = {"chat_id": target, "text": message or ""}
+            parse_mode = _infer_parse_mode(message)
+            if parse_mode:
+                payload["parse_mode"] = parse_mode
             if reply_markup:
                 payload["reply_markup"] = reply_markup
             body = json.dumps(payload).encode()

@@ -5,7 +5,7 @@ surface. Event shapes mirror what upstream agenticpoa/negotiate emits via
 `--json-events`; wrapper-emitted events (confirm, authorized, signed) use the
 shapes our scripts produce.
 
-Output is Telegram legacy Markdown (see format_event.py module docstring).
+Output uses Telegram HTML formatting (see format_event.py module docstring).
 """
 from __future__ import annotations
 
@@ -57,13 +57,13 @@ class TestFormatters:
     def test_confirm_new_copy(self, sample_constraints):
         event = {"type": "confirm", "constraints": sample_constraints}
         out = fe.format_confirm(event)
-        assert "Review your founder-side authorization" in out
-        assert "Your agent will only agree to terms within these limits:" in out
-        assert "• Valuation cap: **$8M – $12M**" in out
-        assert "• Discount: **at least 20%**" in out
-        assert "• Pro-rata rights: required" in out
-        assert "• MFN: preferred" in out
-        assert "Reply **GO** to create the invitation code" in out
+        assert "<b>Review your founder authorization</b>" in out
+        assert "Your agent will only agree to:" in out
+        assert "• Valuation cap: <b>$8M – $12M</b>" in out
+        assert "• Discount: <b>at least 20%</b>" in out
+        assert "• Pro-rata rights: <b>required</b>" in out
+        assert "• MFN: <b>preferred</b>" in out
+        assert "Reply <code>GO</code> to continue" in out
 
     def test_confirm_drops_primer_section(self, sample_constraints):
         out = fe.format_confirm({"type": "confirm", "constraints": sample_constraints})
@@ -81,21 +81,21 @@ class TestFormatters:
     def test_confirm_shows_founder_role_header(self, sample_constraints):
         c = {**sample_constraints, "role": "founder"}
         out = fe.format_confirm({"type": "confirm", "constraints": c})
-        assert "Review your founder-side authorization" in out
+        assert "Review your founder authorization" in out
         assert "\U0001f464" in out  # 👤
 
     def test_confirm_shows_investor_role_header(self, sample_constraints):
         c = {**sample_constraints, "role": "investor"}
         out = fe.format_confirm({"type": "confirm", "constraints": c})
-        assert "Review your investor-side authorization" in out
+        assert "Review your investor authorization" in out
         assert "\U0001f4bc" in out  # 💼
-        assert "Reply **GO** to join the negotiation" in out
+        assert "Reply <code>GO</code> to continue" in out
         assert "create the invitation code" not in out
 
     def test_confirm_defaults_to_founder_when_role_missing(self, sample_constraints):
         c = {k: v for k, v in sample_constraints.items() if k != "role"}
         out = fe.format_confirm({"type": "confirm", "constraints": c})
-        assert "Review your founder-side authorization" in out
+        assert "Review your founder authorization" in out
 
     def test_confirm_founder_identity_block(self, sample_constraints):
         c = {
@@ -108,8 +108,8 @@ class TestFormatters:
             "investor_firm": "Bay Capital",
         }
         out = fe.format_confirm({"type": "confirm", "constraints": c})
-        assert "**You:** Jane Doe, CEO of Acme Corp" in out
-        assert "**Counterparty:** Mark Stone at Bay Capital" in out
+        assert "<b>You:</b> Jane Doe, CEO of Acme Corp" in out
+        assert "<b>Investor:</b> Mark Stone at Bay Capital" in out
 
     def test_confirm_investor_identity_block(self, sample_constraints):
         c = {
@@ -122,8 +122,8 @@ class TestFormatters:
             "investor_firm": "Blue Fund",
         }
         out = fe.format_confirm({"type": "confirm", "constraints": c})
-        assert "**You:** Alex Chen at Blue Fund" in out
-        assert "**Counterparty:** Dr. Rivera, CEO of QuantumLabs" in out
+        assert "<b>You:</b> Alex Chen at Blue Fund" in out
+        assert "<b>Founder:</b> Dr. Rivera, CEO of QuantumLabs" in out
 
     def test_confirm_omits_missing_identity_fields(self, sample_constraints):
         # Only company_name known on the founder side; only firm on investor side
@@ -137,8 +137,8 @@ class TestFormatters:
             "investor_firm": "Bay Capital",
         }
         out = fe.format_confirm({"type": "confirm", "constraints": c})
-        assert "**You:** Acme Corp" in out  # just the company when no name
-        assert "**Counterparty:** Bay Capital" in out  # just the firm when no name
+        assert "<b>You:</b> Acme Corp" in out  # just the company when no name
+        assert "<b>Investor:</b> Bay Capital" in out  # just the firm when no name
 
     def test_create_group_for_founder_is_button_first_copy(self):
         out = fe.format_create_group_for_founder({
@@ -149,10 +149,11 @@ class TestFormatters:
             "investor_label": "Nora Vassileva at SD Fund",
         })
         assert "Nora Vassileva at SD Fund joined" in out
-        assert "Create or choose the live Telegram group" in out
-        assert "Founder bot: `@AgenticPOA_bot`" in out
-        assert "Investor bot: `@AgenticPOAInvestor_bot`" in out
-        assert "Bind command: `/bind INV-1`" in out
+        assert "Set up the negotiation room" in out
+        assert "In Telegram, create a new group with you and Nora" in out
+        assert "Add both AI agents using the buttons below" in out
+        assert "Copy and paste the bind command" in out
+        assert "Founder bot:" not in out
         assert "Tap **+**" not in out
 
     def test_group_setup_reply_markup_adds_startgroup_and_copy_buttons(self):
@@ -164,11 +165,11 @@ class TestFormatters:
         assert markup == {
             "inline_keyboard": [
                 [{
-                    "text": "Add founder bot to group",
+                    "text": "Add founder AI agent",
                     "url": "https://t.me/AgenticPOA_bot?startgroup=INV-1",
                 }],
                 [{
-                    "text": "Add investor bot to group",
+                    "text": "Add investor AI agent",
                     "url": "https://t.me/AgenticPOAInvestor_bot?startgroup=INV-1",
                 }],
                 [{
@@ -189,9 +190,9 @@ class TestFormatters:
             "investor_firm": None,
         }
         out = fe.format_confirm({"type": "confirm", "constraints": c})
-        assert "**You:**" not in out
-        assert "**Counterparty:**" not in out
-        assert "Review your founder-side authorization" in out
+        assert "<b>You:</b>" not in out
+        assert "<b>Investor:</b>" not in out
+        assert "Review your founder authorization" in out
 
     # ---- authorized (our emit) ----
 
@@ -208,12 +209,12 @@ class TestFormatters:
             "ttl_hours": 1,
         }
         out = fe.format_authorized(event)
-        assert "Your agent's authorization is set" in out
+        assert "Authorization set" in out
         assert "$8M – $12M" in out
-        assert "terms within these limits" in out
+        assert "only within these limits" in out
         assert "20%" in out
-        assert "Pro-rata rights: required" in out
-        assert "MFN: preferred" in out
+        assert "Pro-rata rights: <b>required</b>" in out
+        assert "MFN: <b>preferred</b>" in out
         assert "cancel" in out.lower()
         assert "APOA" in out  # cited in footer, not headline
         # Token ID should NOT be shown — user-first framing
@@ -221,7 +222,7 @@ class TestFormatters:
 
     def test_authorized_handles_missing_fields_gracefully(self):
         out = fe.format_authorized({"type": "authorized", "constraints": {}})
-        assert "Your agent's authorization is set" in out
+        assert "Authorization set" in out
         # No bounds to show → skip those lines, but footer is still present
         assert "APOA" in out
 
@@ -242,23 +243,24 @@ class TestFormatters:
             "immudb_tx": 48326,
         }
         out = fe.format_offer(event)
-        assert out.startswith("\U0001f464 **Round 2 — Founder**")  # 👤
+        assert out.startswith("\U0001f464 <b>Offer 3 — Founder AI agent</b>")  # 👤
         assert '"Counter at 10M, 20% discount."' in out
-        assert "• Cap: **$10M**" in out
-        assert "• Discount: **20%**" in out
-        assert "• Pro-rata: yes\n• MFN: no" in out
+        assert "Terms:" in out
+        assert "• Valuation cap: <b>$10M</b>" in out
+        assert "• Discount: <b>20%</b>" in out
+        assert "• Pro-rata rights: <b>yes</b>\n• MFN: <b>no</b>" in out
 
     def test_counter_uses_founder_icon_and_label(self):
         event = {"type": "counter", "round": 3, "party": "founder",
                  "terms": {"valuation_cap": 8_000_000, "discount_rate": 0.15}}
         out = fe.format_offer(event)
-        assert out.startswith("\U0001f464 **Round 3 — Founder**")  # 👤 (counter uses same header)
+        assert out.startswith("\U0001f464 <b>Offer 4 — Founder AI agent</b>")  # 👤
 
     def test_investor_uses_briefcase_icon(self):
         event = {"type": "counter", "round": 3, "party": "investor",
                  "terms": {"valuation_cap": 8_000_000, "discount_rate": 0.15}}
         out = fe.format_offer(event)
-        assert out.startswith("\U0001f4bc **Round 3 — Investor**")  # 💼
+        assert out.startswith("\U0001f4bc <b>Offer 4 — Investor AI agent</b>")  # 💼
 
     def test_demo_mode_labels_ai_counterparty_as_ai(self):
         """Solo-demo: the AI side of the negotiation gets a '(AI)' suffix
@@ -268,11 +270,11 @@ class TestFormatters:
                  "terms": {"valuation_cap": 9_000_000, "discount_rate": 0.20}}
         # User is playing founder → investor side is AI
         out = fe.format_offer(event, constraints={"role": "founder", "mode": "demo"})
-        assert "**Round 2 — Investor (AI)**" in out
+        assert "<b>Offer 3 — Investor AI agent</b>" in out
 
         # User is playing investor → investor side is the human user
         out = fe.format_offer(event, constraints={"role": "investor", "mode": "demo"})
-        assert "**Round 2 — Investor**" in out
+        assert "<b>Offer 3 — Investor AI agent</b>" in out
         assert "(AI)" not in out
 
     def test_two_party_mode_never_shows_ai_suffix(self):
@@ -288,12 +290,13 @@ class TestFormatters:
                  "terms": {"valuation_cap": 9_000_000, "discount_rate": 0.20,
                            "pro_rata": True, "mfn": False}}
         out = fe.format_offer(event)
-        assert out.startswith("\U0001f91d **Deal!**")  # 🤝
-        assert "Terms agreed:" in out
-        assert "• Cap: **$9M**" in out
-        assert "• Discount: **20%**" in out
-        assert "• Pro-rata: yes" in out
-        assert "• MFN: no" in out
+        assert out.startswith("\U0001f91d <b>Deal reached</b>")  # 🤝
+        assert "Both AI agents agreed to these terms:" in out
+        assert "• Valuation cap: <b>$9M</b>" in out
+        assert "• Discount: <b>20%</b>" in out
+        assert "• Pro-rata rights: <b>yes</b>" in out
+        assert "• MFN: <b>no</b>" in out
+        assert "each party will review and sign privately" in out
         # Not a round card — no "Round" header
         assert "Round 5" not in out
 
@@ -341,8 +344,8 @@ class TestFormatters:
     def test_offer_missing_terms_renders_dashes(self):
         event = {"type": "offer", "round": 1, "party": "founder"}
         out = fe.format_offer(event)
-        assert "• Cap: **-**" in out
-        assert "• Discount: **-**" in out
+        assert "• Valuation cap: <b>-</b>" in out
+        assert "• Discount: <b>-</b>" in out
 
     def test_offer_whitespace_message_ignored(self):
         event = {"type": "offer", "round": 1, "party": "founder",
@@ -350,18 +353,16 @@ class TestFormatters:
         out = fe.format_offer(event)
         assert '"' not in out
 
-    def test_offer_escapes_markdown_in_message(self):
+    def test_offer_escapes_html_in_message(self):
         event = {
             "type": "offer",
             "round": 1,
             "party": "founder",
-            "message": "We want *bold* and _italic_ and `code`",
+            "message": "We want <b>bold</b> & terms",
             "terms": {"valuation_cap": 10_000_000, "discount_rate": 0.20},
         }
         out = fe.format_offer(event)
-        assert "\\*bold\\*" in out
-        assert "\\_italic\\_" in out
-        assert "\\`code\\`" in out
+        assert "&lt;b&gt;bold&lt;/b&gt; &amp; terms" in out
 
     # ---- outcome (upstream schema) ----
 
@@ -409,9 +410,9 @@ class TestFormatters:
             "requires_signature": True,
         }
         out = fe.format_signing(event)
-        assert "\u270d\ufe0f **Almost done — your signature, please.**" in out  # ✍️
-        assert "Tap the link below and draw your signature." in out
-        assert "within a minute of signing" in out
+        assert "\u270d\ufe0f <b>Review and sign</b>" in out  # ✍️
+        assert "Open the secure signing page below" in out
+        assert "Do not share this link" in out
         # URL is emitted verbatim. Escaping underscores was breaking the link
         # on Telegram → sshsign (Telegram kept the backslash in the hyperlink
         # target, yielding "Invalid pending ID" on sshsign's side).
@@ -432,19 +433,21 @@ class TestFormatters:
     def test_signed_with_terms(self):
         event = {
             "type": "signed",
-            "terms": {"valuation_cap": 9_000_000, "discount_rate": 0.20, "pro_rata": True},
+            "terms": {"valuation_cap": 9_000_000, "discount_rate": 0.20, "pro_rata": True, "mfn": False},
         }
         out = fe.format_signed(event)
-        assert out.startswith("\u2705 **Signed & sealed.**")  # ✅
-        assert "Here's your executed SAFE:" in out
-        assert "• Cap: $9M" in out
-        assert "• Discount: 20%" in out
-        assert "• Pro-rata: yes" in out
+        assert out.startswith("\u2705 <b>SAFE executed</b>")  # ✅
+        assert "The signed SAFE is attached below." in out
+        assert "<b>Final terms:</b>" in out
+        assert "• Valuation cap: <b>$9M</b>" in out
+        assert "• Discount: <b>20%</b>" in out
+        assert "• Pro-rata rights: <b>yes</b>" in out
+        assert "• MFN: <b>no</b>" in out
         assert "audit trail" in out.lower()
 
     def test_signed_without_terms(self):
         out = fe.format_signed({"type": "signed"})
-        assert "**Signed & sealed.**" in out
+        assert "<b>SAFE executed</b>" in out
         assert "audit trail" in out.lower()
 
 
@@ -467,8 +470,8 @@ class TestFormatInvitation:
         # The "Joining INV-X via @handle" anchor phrase is what the
         # investor's parser keys on. Drop this and the design breaks.
         assert "Joining INV-7K3X9 via @alice_negotiator_bot" in out
-        # Should hint at sharing channels, not just "copy this".
-        assert any(ch in out for ch in ("Signal", "SMS", "email"))
+        assert "Ready to invite" in out
+        assert "<pre>" in out
         # Should tell the user what they can do while waiting.
         assert "cancel" in out.lower()
 
@@ -591,29 +594,29 @@ class TestFormatProfile:
             "company_name": "APOA Inc",
         }})
         assert "Your saved profile" in out
-        assert "**Founder side**" in out
-        assert "**Juan Figuera**" in out
+        assert "<b>Founder side</b>" in out
+        assert "<b>Juan Figuera</b>" in out
         assert "CEO" in out
         assert "APOA Inc" in out
-        assert "**Investor side**" not in out
+        assert "<b>Investor side</b>" not in out
         assert "update" in out.lower()
 
     def test_investor_side_only(self):
         out = fe.format_profile({"profile": {
             "investor_name": "Mark Stone", "investor_firm": "Blue Fund",
         }})
-        assert "**Investor side**" in out
-        assert "**Mark Stone**" in out
+        assert "<b>Investor side</b>" in out
+        assert "<b>Mark Stone</b>" in out
         assert "Blue Fund" in out
-        assert "**Founder side**" not in out
+        assert "<b>Founder side</b>" not in out
 
     def test_both_sides_shown(self):
         out = fe.format_profile({"profile": {
             "founder_name": "Juan", "company_name": "APOA",
             "investor_name": "Mark", "investor_firm": "Blue Fund",
         }})
-        assert "**Founder side**" in out
-        assert "**Investor side**" in out
+        assert "<b>Founder side</b>" in out
+        assert "<b>Investor side</b>" in out
 
     def test_missing_fields_silently_dropped(self):
         out = fe.format_profile({"profile": {"founder_name": "Juan"}})
@@ -629,17 +632,17 @@ class TestCancellationCards:
         out = fe.format_canceled_before_deal_initiator({"session_code": "INV-7K3X9"})
         assert "INV-7K3X9" in out
         assert "canceled" in out.lower()
-        assert "APOA" in out
+        assert "authorization" in out
 
     def test_canceled_before_deal_initiator_no_code(self):
         # Falls back to generic phrasing when session code missing.
         out = fe.format_canceled_before_deal_initiator({})
         assert "canceled" in out.lower()
-        assert "APOA" in out
+        assert "authorization" in out
 
     def test_canceled_before_deal_observer(self):
         out = fe.format_canceled_before_deal_observer({"by": "Jane"})
-        assert "Jane stopped negotiating" in out
+        assert "Jane stopped the negotiation" in out
 
     def test_canceled_before_deal_observer_default_label(self):
         out = fe.format_canceled_before_deal_observer({})
@@ -676,8 +679,7 @@ class TestCancellationCards:
         out = fe.format_cancel_completed_deal_refused({})
         assert "already executed" in out
         assert "/cancel" in out
-        assert "No changes were made" in out
-        assert "rescission" not in out
+        assert "rescission agreement" in out
 
 
 class TestDispatcher:
@@ -686,7 +688,7 @@ class TestDispatcher:
                  "terms": {"valuation_cap": 10_000_000, "discount_rate": 0.20}}
         out = fe.format_event(event)
         assert out is not None
-        assert "**Round 1 — Founder**" in out
+        assert "<b>Offer 2 — Founder AI agent</b>" in out
 
     def test_dispatch_offer_forwards_constraints(self, sample_constraints):
         event = {"type": "offer", "round": 1, "party": "founder",
@@ -698,14 +700,14 @@ class TestDispatcher:
         event = {"type": "counter", "round": 2, "party": "investor",
                  "terms": {"valuation_cap": 8_000_000, "discount_rate": 0.15}}
         out = fe.format_event(event)
-        assert "**Round 2 — Investor**" in out
+        assert "<b>Offer 3 — Investor AI agent</b>" in out
 
     def test_dispatch_accept(self):
         event = {"type": "accept", "round": 4, "party": "founder",
                  "terms": {"valuation_cap": 9_000_000, "discount_rate": 0.20}}
         out = fe.format_event(event)
         # Accept renders as the Deal celebration, not a round card
-        assert "Deal!" in out
+        assert "Deal reached" in out
 
     def test_dispatch_outcome(self):
         out = fe.format_event({"type": "outcome", "result": "max_rounds"})
@@ -750,11 +752,11 @@ class TestProposeNewTerms:
 
     def test_dispatch_signed(self):
         out = fe.format_event({"type": "signed"})
-        assert "Signed" in out
+        assert "SAFE executed" in out
 
     def test_dispatch_confirm(self, sample_constraints):
         out = fe.format_event({"type": "confirm", "constraints": sample_constraints})
-        assert "Review your founder-side authorization" in out
+        assert "Review your founder authorization" in out
 
     def test_dispatch_authorized(self):
         out = fe.format_event({
@@ -767,7 +769,7 @@ class TestProposeNewTerms:
                 "mfn": "indifferent",
             },
         })
-        assert "Your agent's authorization is set" in out
+        assert "Authorization set" in out
 
     def test_dispatch_unknown_returns_none(self):
         assert fe.format_event({"type": "mystery"}) is None
@@ -807,8 +809,8 @@ class TestHelpers:
     def test_fmt_percent(self, d, expected):
         assert fe.fmt_percent(d) == expected
 
-    def test_escape_md_handles_all_reserved_chars(self):
-        assert fe._escape_md("*_`[") == "\\*\\_\\`\\["
+    def test_escape_html_handles_reserved_chars(self):
+        assert fe._escape_html("<b>&") == "&lt;b&gt;&amp;"
 
 
 class TestCli:
@@ -827,7 +829,7 @@ class TestCli:
             text=True,
         )
         assert result.returncode == 0
-        assert "**Round 2 — Founder**" in result.stdout
+        assert "<b>Offer 3 — Founder AI agent</b>" in result.stdout
 
     def test_cli_formats_outcome(self):
         result = subprocess.run(
