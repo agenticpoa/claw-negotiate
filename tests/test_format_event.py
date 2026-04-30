@@ -59,8 +59,8 @@ class TestFormatters:
     def test_confirm_new_copy(self, sample_constraints):
         event = {"type": "confirm", "constraints": sample_constraints}
         out = fe.format_confirm(event)
-        assert "<b>Review your founder authorization</b>" in out
-        assert "Your agent will only agree to:" in out
+        assert "<b>Review your Founder AI Agent authorization</b>" in out
+        assert "Your Founder AI Agent will only agree to:" in out
         assert "• Valuation cap: <b>$8M – $12M</b>" in out
         assert "• Discount: <b>at least 20%</b>" in out
         assert "• Pro-rata rights: <b>required</b>" in out
@@ -83,13 +83,13 @@ class TestFormatters:
     def test_confirm_shows_founder_role_header(self, sample_constraints):
         c = {**sample_constraints, "role": "founder"}
         out = fe.format_confirm({"type": "confirm", "constraints": c})
-        assert "Review your founder authorization" in out
+        assert "Review your Founder AI Agent authorization" in out
         assert "\U0001f464" in out  # 👤
 
     def test_confirm_shows_investor_role_header(self, sample_constraints):
         c = {**sample_constraints, "role": "investor"}
         out = fe.format_confirm({"type": "confirm", "constraints": c})
-        assert "Review your investor authorization" in out
+        assert "Review your Investor AI Agent authorization" in out
         assert "\U0001f4bc" in out  # 💼
         assert "Reply <code>GO</code> to continue" in out
         assert "create the invitation code" not in out
@@ -97,7 +97,7 @@ class TestFormatters:
     def test_confirm_defaults_to_founder_when_role_missing(self, sample_constraints):
         c = {k: v for k, v in sample_constraints.items() if k != "role"}
         out = fe.format_confirm({"type": "confirm", "constraints": c})
-        assert "Review your founder authorization" in out
+        assert "Review your Founder AI Agent authorization" in out
 
     def test_confirm_founder_identity_block(self, sample_constraints):
         c = {
@@ -183,13 +183,13 @@ class TestFormatters:
 
     def test_turn_heartbeat_copy(self):
         out = fe.format_event({"type": "turn_heartbeat", "role": "investor"})
-        assert "Investor AI agent is reviewing the latest offer" in out
+        assert "Investor AI agent is preparing the next offer" in out
 
     def test_turn_still_working_copy(self):
         out = fe.format_event({"type": "turn_still_working", "role": "founder"})
         assert "Still working" in out
         assert "Founder AI agent" in out
-        assert "checking the offer against your authorization" in out
+        assert "checking the latest offer against the APOA authorization" in out
 
     def test_confirm_drops_identity_lines_when_nothing_known(self, sample_constraints):
         c = {
@@ -204,7 +204,7 @@ class TestFormatters:
         out = fe.format_confirm({"type": "confirm", "constraints": c})
         assert "<b>You:</b>" not in out
         assert "<b>Investor:</b>" not in out
-        assert "Review your founder authorization" in out
+        assert "Review your Founder AI Agent authorization" in out
 
     # ---- authorized (our emit) ----
 
@@ -768,7 +768,7 @@ class TestProposeNewTerms:
 
     def test_dispatch_confirm(self, sample_constraints):
         out = fe.format_event({"type": "confirm", "constraints": sample_constraints})
-        assert "Review your founder authorization" in out
+        assert "Review your Founder AI Agent authorization" in out
 
     def test_dispatch_authorized(self):
         out = fe.format_event({

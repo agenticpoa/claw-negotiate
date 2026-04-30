@@ -120,8 +120,9 @@ def format_confirm(event: dict[str, Any]) -> str:
         "indifferent": "no preference",
     }
     role = (c.get("role") or "founder").lower()
-    role_label = "founder" if role == "founder" else "investor"
+    role_label = "Founder" if role == "founder" else "Investor"
     role_icon = "\U0001f464" if role == "founder" else "\U0001f4bc"  # 👤 / 💼
+    agent_label = f"{role_label} AI Agent"
 
     founder_name = c.get("founder_name")
     founder_title = c.get("founder_title")
@@ -146,7 +147,7 @@ def format_confirm(event: dict[str, Any]) -> str:
         counterparty_label = "Founder"
 
     identity_lines = [
-        f"{role_icon} {_b(f'Review your {role_label} authorization')}",
+        f"{role_icon} {_b(f'Review your {agent_label} authorization')}",
     ]
     if you_line or counterparty_line:
         identity_lines.append("")
@@ -160,14 +161,14 @@ def format_confirm(event: dict[str, Any]) -> str:
     lines = [
         "\n".join(identity_lines),
         "",
-        "Your agent will only agree to:",
+        f"Your {agent_label} will only agree to:",
         "",
         f"• Valuation cap: {_b(fmt_dollars(c['valuation_cap_min']) + ' – ' + fmt_dollars(c['valuation_cap_max']))}",
         f"• Discount: {_b('at least ' + fmt_percent(c['discount_min']))}",
         f"• Pro-rata rights: {_b(labels[c['pro_rata']])}",
         f"• MFN: {_b(mfn_labels[c['mfn']])}",
         "",
-        "You will review and sign the final SAFE yourself.",
+        "You will personally review and sign the final SAFE.",
         "",
         f"Reply {_code('GO')} to continue, or send edits.",
     ]
@@ -196,11 +197,15 @@ def format_authorized(event: dict[str, Any]) -> str:
         "indifferent": "no preference",
     }
     ttl_hours = event.get("ttl_hours") or 1
+    role = (c.get("role") or event.get("role") or "agent").strip().lower()
+    agent_label = "Founder AI Agent" if role == "founder" else (
+        "Investor AI Agent" if role == "investor" else "AI Agent"
+    )
 
     lines = [
         "\U0001f512 " + _b("Authorization set"),  # 🔒
         "",
-        "Your agent can now negotiate, but only within these limits:",
+        f"Your {agent_label} can now negotiate, but only within these limits:",
         "",
     ]
     if cap_min is not None and cap_max is not None:
@@ -216,7 +221,7 @@ def format_authorized(event: dict[str, Any]) -> str:
         f"Valid for {ttl_hours} hour"
         f"{'s' if ttl_hours != 1 else ''}. Reply {_code('cancel')} anytime to revoke.",
         "",
-        f"{_b('APOA constraint:')} every offer your agent makes is "
+        f"{_b('APOA constraint:')} every offer your {agent_label} makes is "
         "cryptographically bound to this authorization.",
     ])
     return "\n".join(lines)
@@ -625,10 +630,10 @@ def format_session_expired(event: dict[str, Any]) -> str:
     ran out of time before both parties signed.
     """
     return (
-        "\u23f0 Your negotiation session expired mid-flight.\n\n"  # ⏰
-        "No SAFE was executed. Your APOA authorization is no longer valid "
-        "for this session. To pick up where you left off, say \"negotiate "
-        "my SAFE with \u2026\" again."
+        "\u23f0 " + _b("Authorization expired") + "\n\n"  # ⏰
+        "No SAFE was executed. This session is now closed because the APOA "
+        "authorization expired before both parties signed.\n\n"
+        "To continue, start a new SAFE negotiation with the same terms."
     )
 
 
@@ -779,7 +784,7 @@ def format_group_bound(event: dict[str, Any]) -> str:
         f"Both AI agents will post their offers here so you and {_escape_html(name)} "
         "can follow the rounds live.",
         "",
-        f"{_b('Signing stays private.')} Each person will receive their own signing link in DM.",
+        f"{_b('Signing stays private.')} Each person gets their own signing link in DM.",
     ]
     return "\n".join(lines)
 
@@ -865,13 +870,13 @@ def format_investor_waiting_for_founder(event: dict[str, Any]) -> str:
             f"✅ {_b('Joined.')} Waiting for the founder AI agent.\n\n"  # ✅
             f"Founder AI agent: {_code(founder_bot)}\n\n"
             "They're setting up a Telegram group where the negotiation "
-            "rounds will stream live. You'll be invited to it shortly. "
+            "offers will stream live. You'll be invited to it shortly. "
             "No action needed from you — sit tight."
         )
     return (
         f"✅ {_b('Joined.')} Waiting for the founder AI agent.\n\n"  # ✅
         "They're setting up a Telegram group where the negotiation "
-        "rounds will stream live. You'll be invited to it shortly. "
+        "offers will stream live. You'll be invited to it shortly. "
         "No action needed from you — sit tight."
     )
 
@@ -910,7 +915,7 @@ def format_create_group_for_founder(event: dict[str, Any]) -> str:
         "2. Add both AI agents using the buttons below.",
         "3. Copy and paste the bind command in the group.",
         "",
-        "Signing links stay private in each person's DM.",
+        "Signing stays private. Each person gets their own signing link in DM.",
     ]
     return "\n".join(lines)
 
@@ -964,7 +969,7 @@ def format_turn_heartbeat(event: dict[str, Any]) -> str:
     label = "Founder AI agent" if role == "founder" else (
         "Investor AI agent" if role == "investor" else "AI agent"
     )
-    return f"⏳ {_b(label + ' is reviewing the latest offer…')}"
+    return f"⏳ {_b(label + ' is preparing the next offer…')}"
 
 
 def format_turn_still_working(event: dict[str, Any]) -> str:
@@ -974,7 +979,7 @@ def format_turn_still_working(event: dict[str, Any]) -> str:
     )
     return (
         f"⏳ {_b('Still working')}\n\n"
-        f"{_escape_html(label)} is checking the offer against your authorization before replying."
+        f"{_escape_html(label)} is checking the latest offer against the APOA authorization before replying."
     )
 
 
