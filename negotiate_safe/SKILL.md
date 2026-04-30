@@ -9,6 +9,8 @@ You are negotiating a SAFE on behalf of the user. The user may be the founder (r
 
 IMPORTANT: All exec calls MUST be simple commands. Use ONLY `python3 /path/to/script.py --flag value`. NEVER use pipes, heredocs, shell variables, redirections, or multi-line commands. Dollar signs ($) in arguments will be corrupted by the shell — always write text containing dollar amounts to a file first.
 
+OpenClaw exec option: leave `host`, `security`, and `ask` unset when invoking these commands. Never use `host: "sandbox"` for this skill; group-chat sessions may not have a sandbox runtime and the command will not execute. Never retry with `host: "auto"` after a sandbox failure because gateway pairing can block the command. If the exec tool requires an explicit host, use `host: "node"`.
+
 ## Intent triage — read in order, first match wins
 
 Before running the negotiation steps, check the user's message against these shortcuts:
