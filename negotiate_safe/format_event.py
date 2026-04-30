@@ -905,6 +905,10 @@ def format_create_group_for_founder(event: dict[str, Any]) -> str:
         investor_bot = "(your investor's agent — handle not yet known)"
 
     bind_payload = f"/bind {code}" if code else "/bind INV-XXXXX"
+    handles = " ".join(
+        h for h in (founder_bot, investor_bot)
+        if h and not h.startswith("(")
+    )
 
     lines = [
         f"✅ {_b(investor_label + ' joined')}",  # ✅
@@ -912,7 +916,8 @@ def format_create_group_for_founder(event: dict[str, Any]) -> str:
         f"{_b('Set up the negotiation room:')}",
         "",
         f"1. In Telegram, create a new group with you and {_escape_html(investor_label.split()[0] if investor_label else 'your investor')}.",
-        "2. Add both AI agents using the buttons below.",
+        "2. Add both AI agents using the buttons below, or paste both handles into Telegram search:",
+        _code(handles) if handles else "",
         "3. Copy and paste the bind command in the group.",
         "",
         "Signing stays private. Each person gets their own signing link in DM.",
@@ -944,12 +949,23 @@ def group_setup_reply_markup(event: dict[str, Any]) -> dict[str, Any] | None:
 
     founder_url = bot_url(event.get("founder_bot_handle") or "")
     investor_url = bot_url(event.get("investor_bot_handle") or "")
+    handles = " ".join(
+        h for h in (
+            event.get("founder_bot_handle") or "",
+            event.get("investor_bot_handle") or "",
+        )
+        if h
+    )
 
     keyboard: list[list[dict[str, Any]]] = []
     if founder_url:
         keyboard.append([{"text": "Add founder AI agent", "url": founder_url}])
     if investor_url:
         keyboard.append([{"text": "Add investor AI agent", "url": investor_url}])
+    if handles:
+        keyboard.append([
+            {"text": "Copy AI agent handles", "copy_text": {"text": handles}},
+        ])
     keyboard.append([
         {"text": "Copy bind command", "copy_text": {"text": bind_payload}},
     ])

@@ -154,6 +154,7 @@ class TestFormatters:
         assert "Set up the negotiation room" in out
         assert "In Telegram, create a new group with you and Nora" in out
         assert "Add both AI agents using the buttons below" in out
+        assert "@AgenticPOA_bot @AgenticPOAInvestor_bot" in out
         assert "Copy and paste the bind command" in out
         assert "Founder bot:" not in out
         assert "Tap **+**" not in out
@@ -173,6 +174,10 @@ class TestFormatters:
                 [{
                     "text": "Add investor AI agent",
                     "url": "https://t.me/AgenticPOAInvestor_bot?startgroup",
+                }],
+                [{
+                    "text": "Copy AI agent handles",
+                    "copy_text": {"text": "@AgenticPOA_bot @AgenticPOAInvestor_bot"},
                 }],
                 [{
                     "text": "Copy bind command",

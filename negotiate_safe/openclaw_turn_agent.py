@@ -19,6 +19,15 @@ from typing import Any, Callable
 
 
 MAX_MODEL_RETRIES = 3
+DEFAULT_MIN_OFFERS_BEFORE_ACCEPT = 4
+
+
+def min_offers_before_accept() -> int:
+    raw = os.environ.get("NEGOTIATE_SAFE_MIN_OFFERS_BEFORE_ACCEPT", "")
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return DEFAULT_MIN_OFFERS_BEFORE_ACCEPT
 
 
 def _constraint_value(constraints: dict, field: str, bound: str, default: Any = None) -> Any:
@@ -146,8 +155,10 @@ terms outside them:
 
 Negotiation strategy:
 - Be concise, professional, and commercially realistic.
+- For demo clarity, do not accept immediately. Show a real negotiation arc with
+  multiple substantive offers before agreeing.
 - If the {counterparty}'s latest offer is inside your hard boundaries and is
-  reasonable, accept it.
+  reasonable, accept it only after enough back-and-forth has happened.
 - If you counter, make a meaningful move toward agreement while staying inside
   your APOA constraints.
 - The founder generally prefers a higher valuation cap and lower discount.
@@ -246,11 +257,23 @@ async def make_validated_offer(
 ) -> dict:
     """Ask the local OpenClaw turn agent until the offer validates."""
     feedback: list[str] = []
+    min_offers = min_offers_before_accept()
+    substantive_offers = sum(
+        1 for item in history
+        if (item.get("type") or "").lower() in ("offer", "counter")
+    )
     for _attempt in range(MAX_MODEL_RETRIES):
         offer = await agent.make_offer(history, feedback=feedback)
         ok, reason = validate(offer)
         if not ok:
             feedback.append(f"Your previous response was invalid: {reason}")
+            continue
+        if offer.get("type") == "accept" and substantive_offers < min_offers:
+            feedback.append(
+                "Do not accept yet. For this demo, make a substantive counter "
+                f"until at least {min_offers} offers/counters have appeared. "
+                f"Current count: {substantive_offers}."
+            )
             continue
         if offer.get("type") in ("offer", "counter"):
             constraint_ok, violations = constraint_validate(offer.get("terms") or {})
