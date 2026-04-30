@@ -189,7 +189,7 @@ class TestFormatters:
     def test_turn_heartbeat_copy(self):
         out = fe.format_event({"type": "turn_heartbeat", "role": "investor"})
         assert "Investor AI agent is preparing the next offer" in out
-        assert "OpenClaw is checking the latest terms" in out
+        assert "Your OpenClaw is reviewing the latest terms" in out
 
     def test_turn_still_working_copy(self):
         out = fe.format_event({"type": "turn_still_working", "role": "founder"})

@@ -135,7 +135,7 @@ def build_turn_prompt(
     history_json = json.dumps(history, indent=2, sort_keys=True)
     feedback_text = "\n".join(f"- {item}" for item in (feedback or [])) or "- none"
 
-    return f"""You are the user's OpenClaw agent negotiating a YC SAFE as the {role}.
+    return f"""You are the user's OpenClaw agent negotiating a SAFE as the {role}.
 
 APOA authorization constraints are hard boundaries. You may not propose or accept
 terms outside them:

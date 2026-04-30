@@ -784,7 +784,7 @@ def format_group_bound(event: dict[str, Any]) -> str:
         f"Both AI agents will post their offers here so you and {_escape_html(name)} "
         "can follow the rounds live.",
         "",
-        f"{_b('Signing stays private.')} If a deal is reached, each person gets their own signing link in DM.",
+        f"{_b('Signing stays private.')} If a deal is reached, each party gets their own signing link in DM.",
     ]
     return "\n".join(lines)
 
@@ -920,7 +920,7 @@ def format_create_group_for_founder(event: dict[str, Any]) -> str:
         _code(handles) if handles else "",
         "3. Copy and paste the bind command in the group.",
         "",
-        "Signing stays private. If a deal is reached, each person gets their own signing link in DM.",
+        "Signing stays private. If a deal is reached, each party gets their own signing link in DM.",
     ]
     return "\n".join(lines)
 
@@ -987,7 +987,7 @@ def format_turn_heartbeat(event: dict[str, Any]) -> str:
     )
     return (
         f"⏳ {_b(label + ' is preparing the next offer…')}\n\n"
-        "OpenClaw is checking the latest terms against the APOA authorization."
+        "Your OpenClaw is reviewing the latest terms before replying."
     )
 
 

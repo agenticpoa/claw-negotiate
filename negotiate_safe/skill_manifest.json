@@ -1,7 +1,7 @@
 {
   "name": "negotiate_safe",
   "version": "0.1.0",
-  "description": "OpenClaw skill for APOA-constrained YC SAFE negotiation.",
+  "description": "OpenClaw skill for APOA-constrained SAFE negotiation.",
   "entrypoint": "run_safe.py",
   "skill_file": "SKILL.md",
   "files": [
