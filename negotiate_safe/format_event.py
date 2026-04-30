@@ -148,6 +148,8 @@ def format_confirm(event: dict[str, Any]) -> str:
     identity_lines = [
         f"{role_icon} {_b(f'Review your {role_label} authorization')}",
     ]
+    if you_line or counterparty_line:
+        identity_lines.append("")
     if you_line:
         identity_lines.append(f"{_b('You:')} {_escape_html(you_line)}")
     if counterparty_line:
