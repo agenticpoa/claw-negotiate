@@ -6,6 +6,7 @@ cases, CLI exit codes. Live-API behavior is covered in integration tests.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -17,6 +18,11 @@ import pytest
 import parse_constraints as pc
 
 SCRIPT = Path(__file__).parent.parent / "negotiate_safe" / "parse_constraints.py"
+
+
+@pytest.fixture(autouse=True)
+def _default_anthropic_key(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
 
 
 def make_mock_client(response_text: str) -> MagicMock:
@@ -31,7 +37,8 @@ def make_mock_client(response_text: str) -> MagicMock:
 class TestExtractConstraints:
     def test_happy_path(self, sample_constraints):
         response_text = json.dumps(sample_constraints)
-        with patch("anthropic.Anthropic", return_value=make_mock_client(response_text)):
+        with patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-test"}), \
+             patch("anthropic.Anthropic", return_value=make_mock_client(response_text)):
             result = pc.extract_constraints("Negotiate my SAFE with an $8M-$12M cap.")
         assert result == sample_constraints
 
@@ -135,15 +142,26 @@ class TestModeAndSessionCodeDefaults:
 
 
 class TestCli:
-    def test_missing_api_key(self, monkeypatch):
+    def test_missing_api_key_uses_deterministic_parser(self, monkeypatch):
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
         result = subprocess.run(
-            [sys.executable, str(SCRIPT), "--message", "test"],
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--message",
+                "Live negotiation with Nora Vassileva at SD Fund. Cap $30M to $40M, 10% discount, pro-rata required.",
+            ],
             capture_output=True,
             text=True,
         )
-        assert result.returncode == 2
-        assert "ANTHROPIC_API_KEY" in result.stderr
+        assert result.returncode == 0
+        parsed = json.loads(result.stdout)
+        assert parsed["role"] == "founder"
+        assert parsed["mode"] == "two_party"
+        assert parsed["valuation_cap_min"] == 30_000_000
+        assert parsed["valuation_cap_max"] == 40_000_000
+        assert parsed["investor_name"] == "Nora Vassileva"
+        assert parsed["investor_firm"] == "SD Fund"
 
     def test_message_arg(self, tmp_path, monkeypatch):
         """--message flag should be accepted as an alternative to stdin."""

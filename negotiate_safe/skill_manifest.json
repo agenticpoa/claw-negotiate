@@ -40,7 +40,6 @@
     "openclaw"
   ],
   "required_env": [
-    "ANTHROPIC_API_KEY",
     "NEGOTIATE_REPO_PATH",
     "USER_DID",
     "NEGOTIATE_SAFE_BOT_ROLE",

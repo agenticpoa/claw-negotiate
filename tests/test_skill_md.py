@@ -53,7 +53,7 @@ class TestFrontmatter:
         # vars (FOUNDER_NAME, INVESTOR_NAME, COMPANY_NAME, etc) come from
         # upstream's .env.example convention; they're optional because the
         # user can also supply them in the NL, so they're not in `requires`.
-        assert {"ANTHROPIC_API_KEY", "NEGOTIATE_REPO_PATH", "USER_DID"} <= env
+        assert {"NEGOTIATE_REPO_PATH", "USER_DID"} <= env
 
     def test_requires_lists_bins(self, frontmatter):
         m = re.search(r"^metadata:\s*(\{.*\})\s*$", frontmatter, re.M)

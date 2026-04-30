@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -130,7 +131,129 @@ Output: {"role": "investor", "mode": "two_party", "session_code": "INV-DEMO99", 
 """
 
 
+def _money_to_dollars(text: str) -> int:
+    raw = text.strip().replace("$", "").replace(",", "")
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*([kmb])?", raw, re.IGNORECASE)
+    if not m:
+        raise ValueError(f"Could not parse money value: {text!r}")
+    n = float(m.group(1))
+    suffix = (m.group(2) or "").lower()
+    if suffix == "k":
+        n *= 1_000
+    elif suffix == "m":
+        n *= 1_000_000
+    elif suffix == "b":
+        n *= 1_000_000_000
+    return int(n)
+
+
+def _normalize_constraints(parsed: dict[str, Any]) -> dict[str, Any]:
+    # Defensive: LLM and deterministic parsers share this normalization.
+    if not parsed.get("role"):
+        parsed["role"] = "founder"
+    parsed["role"] = str(parsed["role"]).lower()
+    if parsed["role"] not in ("founder", "investor"):
+        parsed["role"] = "founder"
+
+    if not parsed.get("mode"):
+        parsed["mode"] = "demo"
+    parsed["mode"] = str(parsed["mode"]).lower()
+    if parsed["mode"] not in ("demo", "two_party"):
+        parsed["mode"] = "demo"
+
+    code = parsed.get("session_code")
+    if code:
+        code = str(code).strip().upper()
+        parsed["session_code"] = code if code else None
+    else:
+        parsed["session_code"] = None
+    if parsed["session_code"]:
+        parsed["mode"] = "two_party"
+
+    for field in (
+        "company_name", "founder_name", "founder_title",
+        "investor_name", "investor_firm", "investment_amount",
+    ):
+        parsed.setdefault(field, None)
+    return parsed
+
+
+def _extract_constraints_deterministic(message: str) -> dict[str, Any]:
+    """Parse the constrained demo copy without any external LLM dependency."""
+    text = " ".join(message.strip().split())
+    lower = text.lower()
+    code_m = re.search(r"\bINV-[A-Z0-9]{5,}\b", text, re.IGNORECASE)
+    role = "investor" if code_m or re.search(r"\b(joining|join)\b", lower) else "founder"
+    mode = "two_party" if code_m or "live negotiation" in lower or "real negotiation" in lower else "demo"
+
+    founder_bot = None
+    bot_m = re.search(r"\bvia\s+(@[A-Za-z0-9_]+)", text)
+    if bot_m:
+        founder_bot = bot_m.group(1)
+
+    valuation_min = None
+    valuation_max = None
+    range_m = re.search(
+        r"\bcap\b[^$]*(\$?\d+(?:\.\d+)?\s*[kmb]?)\s*(?:-|–|to|through)\s*(\$?\d+(?:\.\d+)?\s*[kmb]?)",
+        text,
+        re.IGNORECASE,
+    )
+    up_to_m = re.search(r"\bcap\s+up\s+to\s+(\$?\d+(?:\.\d+)?\s*[kmb]?)", text, re.IGNORECASE)
+    single_m = re.search(r"\bcap\b[^$]*(\$?\d+(?:\.\d+)?\s*[kmb]?)", text, re.IGNORECASE)
+    if range_m:
+        valuation_min = _money_to_dollars(range_m.group(1))
+        valuation_max = _money_to_dollars(range_m.group(2))
+    elif up_to_m:
+        valuation_min = 0
+        valuation_max = _money_to_dollars(up_to_m.group(1))
+    elif single_m:
+        cap = _money_to_dollars(single_m.group(1))
+        valuation_min = cap
+        valuation_max = cap
+
+    disc_m = re.search(r"(\d+(?:\.\d+)?)\s*%\s+discount", text, re.IGNORECASE)
+    if not disc_m:
+        disc_m = re.search(r"discount[^0-9]*(\d+(?:\.\d+)?)\s*%", text, re.IGNORECASE)
+    discount = float(disc_m.group(1)) / 100 if disc_m else None
+
+    pro_rata = "required" if re.search(r"pro[- ]?rata[^.,;]*(required|must|included)|pro[- ]?rata required", lower) else "preferred"
+    mfn = "required" if re.search(r"\bmfn\b[^.,;]*(required|must)", lower) else "indifferent"
+
+    investor_name = investor_firm = None
+    if role == "founder":
+        im = re.search(r"\bwith\s+(.+?)\s+at\s+(.+?)(?=\.|,|\s+cap\b|$)", text, re.IGNORECASE)
+        if im:
+            investor_name = im.group(1).strip()
+            investor_firm = im.group(2).strip()
+    else:
+        im = re.search(r"\bI\s*(?:am|'m)\s+(.+?)\s+(?:at|from)\s+(.+?)(?=,\s*cap\b|\.|$)", text, re.IGNORECASE)
+        if im:
+            investor_name = im.group(1).strip(" ,")
+            investor_firm = im.group(2).strip(" ,")
+
+    return _normalize_constraints({
+        "role": role,
+        "mode": mode,
+        "session_code": code_m.group(0).upper() if code_m else None,
+        "founder_bot_handle": founder_bot,
+        "valuation_cap_min": valuation_min,
+        "valuation_cap_max": valuation_max,
+        "discount_min": discount,
+        "pro_rata": pro_rata,
+        "mfn": mfn,
+        "company_name": None,
+        "founder_name": None,
+        "founder_title": None,
+        "investor_name": investor_name,
+        "investor_firm": investor_firm,
+        "investment_amount": None,
+    })
+
+
 def extract_constraints(message: str) -> dict[str, Any]:
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return _extract_constraints_deterministic(message)
+
     try:
         from anthropic import Anthropic
     except ImportError as e:
@@ -158,40 +281,7 @@ def extract_constraints(message: str) -> dict[str, Any]:
     except json.JSONDecodeError as e:
         raise ValueError(f"Claude returned non-JSON: {text!r}") from e
 
-    # Defensive: Haiku occasionally omits fields even when the prompt
-    # demands them. Ensure every documented field is present (null-ok for
-    # the identity fields; role/mode normalized to a valid value).
-    if not parsed.get("role"):
-        parsed["role"] = "founder"
-    parsed["role"] = str(parsed["role"]).lower()
-    if parsed["role"] not in ("founder", "investor"):
-        parsed["role"] = "founder"
-
-    # Mode: default to "demo" when missing/ambiguous; coerce to "two_party"
-    # whenever a session_code is present (the two fields are dependent).
-    if not parsed.get("mode"):
-        parsed["mode"] = "demo"
-    parsed["mode"] = str(parsed["mode"]).lower()
-    if parsed["mode"] not in ("demo", "two_party"):
-        parsed["mode"] = "demo"
-
-    # Normalize session_code: None if absent/empty; uppercase with no
-    # surrounding whitespace otherwise. Presence forces mode=two_party.
-    code = parsed.get("session_code")
-    if code:
-        code = str(code).strip().upper()
-        parsed["session_code"] = code if code else None
-    else:
-        parsed["session_code"] = None
-    if parsed["session_code"]:
-        parsed["mode"] = "two_party"
-
-    for field in (
-        "company_name", "founder_name", "founder_title",
-        "investor_name", "investor_firm", "investment_amount",
-    ):
-        parsed.setdefault(field, None)
-    return parsed
+    return _normalize_constraints(parsed)
 
 
 def main() -> int:
@@ -201,10 +291,6 @@ def main() -> int:
     parser.add_argument("--message-file", default="", help="Path to a file containing the request text")
     parser.add_argument("--output-file", default="", help="Write JSON to this file instead of stdout")
     args = parser.parse_args()
-
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        sys.stderr.write("ANTHROPIC_API_KEY not set.\n")
-        return 2
 
     if args.message:
         message = args.message

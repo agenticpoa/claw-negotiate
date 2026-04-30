@@ -82,6 +82,7 @@ def _json_suffix(text: str) -> dict:
     """Return the last full JSON object in a noisy CLI output string."""
     decoder = JSONDecoder()
     best = None
+    envelope = None
     for i, ch in enumerate(text or ""):
         if ch != "{":
             continue
@@ -89,10 +90,15 @@ def _json_suffix(text: str) -> dict:
             obj, end = decoder.raw_decode(text[i:])
         except json.JSONDecodeError:
             continue
-        if str(text[i + end:]).strip():
-            continue
         if isinstance(obj, dict):
             best = obj
+            if "payloads" in obj or "outputs" in obj or (
+                isinstance(obj.get("meta"), dict)
+                and obj["meta"].get("finalAssistantVisibleText")
+            ):
+                envelope = obj
+    if envelope is not None:
+        return envelope
     if best is None:
         raise ValueError("no trailing JSON object found in OpenClaw output")
     return best
@@ -227,7 +233,7 @@ class OpenClawTurnAgent:
         if result.returncode != 0:
             err = (result.stderr or result.stdout or "").strip()
             raise RuntimeError(f"openclaw agent turn failed: {err[:500]}")
-        payload = _json_suffix(result.stdout or "")
+        payload = _json_suffix((result.stdout or "") + "\n" + (result.stderr or ""))
         return parse_offer_text(_openclaw_text_from_json(payload))
 
 

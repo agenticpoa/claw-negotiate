@@ -214,7 +214,6 @@ def doctor_checks(
 ) -> list[Check]:
     e = _env(env)
     checks = [
-        _check_env_present(e, "ANTHROPIC_API_KEY"),
         _check_env_present(e, "USER_DID"),
         _check_env_present(e, "TELEGRAM_BOT_USERNAME"),
         _check_role(e),
