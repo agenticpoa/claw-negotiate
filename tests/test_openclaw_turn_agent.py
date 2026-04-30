@@ -21,7 +21,8 @@ def test_build_turn_prompt_frames_local_openclaw_agent():
 
     assert "user's OpenClaw agent" in prompt
     assert "$30,000,000 to $40,000,000" in prompt
-    assert "multiple substantive offers" in prompt
+    assert "real negotiation arc" in prompt
+    assert "Do not force extra rounds just for show" in prompt
     assert "Return ONLY a JSON object" in prompt
 
 
@@ -108,35 +109,22 @@ def test_make_validated_offer_retries_feedback():
     assert fake.calls[1] == ["Your previous response was invalid: missing discount"]
 
 
-def test_make_validated_offer_rejects_accept_before_demo_arc(monkeypatch):
-    monkeypatch.setenv("NEGOTIATE_SAFE_MIN_OFFERS_BEFORE_ACCEPT", "4")
-
+def test_make_validated_offer_allows_early_accept_when_valid():
     class FakeAgent:
         def __init__(self):
             self.calls = []
 
         async def make_offer(self, history, feedback=None):
             self.calls.append(list(feedback or []))
-            if len(self.calls) == 1:
-                return {
-                    "type": "accept",
-                    "terms": {
-                        "valuation_cap": 30_000_000,
-                        "discount_rate": 0.15,
-                        "pro_rata": True,
-                        "mfn": False,
-                    },
-                    "message": "Accepted.",
-                }
             return {
-                "type": "counter",
+                "type": "accept",
                 "terms": {
-                    "valuation_cap": 32_000_000,
+                    "valuation_cap": 30_000_000,
                     "discount_rate": 0.15,
                     "pro_rata": True,
                     "mfn": False,
                 },
-                "message": "Let's move closer.",
+                "message": "Accepted.",
             }
 
     def validate(_offer):
@@ -158,5 +146,5 @@ def test_make_validated_offer_rejects_accept_before_demo_arc(monkeypatch):
         constraint_validate=constraint_validate,
     ))
 
-    assert offer["type"] == "counter"
-    assert "Do not accept yet" in fake.calls[1][0]
+    assert offer["type"] == "accept"
+    assert fake.calls == [[]]
