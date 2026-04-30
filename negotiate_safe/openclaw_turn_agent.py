@@ -146,9 +146,9 @@ terms outside them:
 
 Negotiation strategy:
 - Be concise, professional, and commercially realistic.
-- Prefer a real negotiation arc when there is a material gap: acknowledge the
-  other side's position, explain the business rationale for your move, and make
-  a concrete concession toward a deal.
+- Every move should have commercial substance: acknowledge the other side's
+  position, explain the business rationale for your response, and make a
+  concrete offer, concession, or acceptance.
 - If the {counterparty}'s latest offer already matches your stated goals or is
   clearly favorable inside your APOA boundaries, accept it. Do not force extra
   rounds just for show.

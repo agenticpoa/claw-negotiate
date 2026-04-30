@@ -21,7 +21,7 @@ def test_build_turn_prompt_frames_local_openclaw_agent():
 
     assert "user's OpenClaw agent" in prompt
     assert "$30,000,000 to $40,000,000" in prompt
-    assert "real negotiation arc" in prompt
+    assert "Every move should have commercial substance" in prompt
     assert "Do not force extra rounds just for show" in prompt
     assert "Return ONLY a JSON object" in prompt
 
