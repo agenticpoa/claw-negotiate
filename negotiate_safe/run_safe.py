@@ -1116,7 +1116,7 @@ def run_mint(output_dir: str, config: dict, telegram_user_id: int | None = None)
         # Install the global cron scan job (idempotent). Both roles
         # need cron — investor's resume runs from the same loop as
         # the founder's, just dispatched on the pointer's `role`.
-        interval = os.environ.get("CLAW_NEGOTIATE_SCAN_INTERVAL", "5s")
+        interval = os.environ.get("CLAW_NEGOTIATE_SCAN_INTERVAL", CRON_SCAN_DEFAULT_INTERVAL)
         ok, err = ensure_cron(interval=interval)
         if not ok and err:
             sys.stderr.write(f"ensure_cron: {err}\n")
@@ -2630,6 +2630,8 @@ def _founder_two_party_gate(
 
 CRON_JOB_NAME = "negotiate_safe-scan"
 SYSTEM_CRON_MARKER = "# negotiate_safe-scan"
+CRON_SCAN_DEFAULT_INTERVAL = "60s"
+CRON_SCAN_MIN_EVERY_MS = 60_000
 
 
 # P7-5 investor-side wait tuning. Exposed as module constants so tests
@@ -2785,6 +2787,46 @@ def _investor_wait_for_founder_streaming(
             pass
 
 
+def _duration_ms(value: str | None) -> int | None:
+    """Parse the small duration subset used for OpenClaw cron intervals."""
+    if not value:
+        return None
+    text = str(value).strip().lower()
+    m = re.fullmatch(r"(\d+)\s*(ms|s|m|h)?", text)
+    if not m:
+        return None
+    n = int(m.group(1))
+    unit = m.group(2) or "ms"
+    if unit == "ms":
+        return n
+    if unit == "s":
+        return n * 1000
+    if unit == "m":
+        return n * 60_000
+    if unit == "h":
+        return n * 3_600_000
+    return None
+
+
+def _job_every_ms(job: dict) -> int | None:
+    schedule = job.get("schedule")
+    if isinstance(schedule, dict):
+        if schedule.get("kind") == "every":
+            every = schedule.get("everyMs")
+            return int(every) if isinstance(every, (int, float)) else None
+        return None
+    if isinstance(schedule, str):
+        m = re.search(r"\bevery\s+(.+)$", schedule.strip(), re.IGNORECASE)
+        if m:
+            return _duration_ms(m.group(1))
+    every = job.get("every") or job.get("everyMs")
+    if isinstance(every, (int, float)):
+        return int(every)
+    if isinstance(every, str):
+        return _duration_ms(every)
+    return None
+
+
 def ensure_cron(
     interval: str = "30s",
     runner: "callable | None" = None,
@@ -2816,6 +2858,7 @@ def ensure_cron(
         means an error prevented us from ensuring the job; error
         message is returned for caller-side logging.
     """
+    prefer_system_cron = runner is None
     allow_system_fallback = runner is None or system_runner is not None
     if runner is None:
         runner = subprocess.run
@@ -2829,6 +2872,13 @@ def ensure_cron(
         if ok:
             return True, None
         return False, f"{reason}; system cron fallback failed: {fallback_err}"
+
+    if prefer_system_cron:
+        ok, err = _ensure_system_cron(runner=system_runner)
+        if ok:
+            return True, None
+        # Fall through to OpenClaw cron only if the deterministic
+        # code-level heartbeat cannot be installed on this host.
 
     # list + parse-json to detect the existing job.
     try:
@@ -2858,8 +2908,29 @@ def ensure_cron(
 
     for job in jobs or []:
         if isinstance(job, dict) and job.get("name") == CRON_JOB_NAME:
-            # Already installed. Don't touch it — operator may have
-            # tuned the interval since mint-time.
+            # Already installed. Preserve operator tuning unless the
+            # interval is below the floor we know can starve Telegram
+            # turns: OpenClaw main-session system-event cron runs via
+            # the main heartbeat/session, so scan jobs must not overlap.
+            every_ms = _job_every_ms(job)
+            job_id = str(job.get("id") or "").strip()
+            target_ms = max(_duration_ms(interval) or CRON_SCAN_MIN_EVERY_MS, CRON_SCAN_MIN_EVERY_MS)
+            if every_ms is not None and every_ms < CRON_SCAN_MIN_EVERY_MS and job_id:
+                try:
+                    edit_res = runner(
+                        [
+                            "openclaw", "cron", "edit", job_id,
+                            "--every", f"{target_ms // 1000}s",
+                        ],
+                        capture_output=True, text=True, timeout=10,
+                    )
+                except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+                    return False, f"openclaw cron edit failed: {e}"
+                if edit_res.returncode != 0:
+                    return False, (
+                        f"openclaw cron edit rc={edit_res.returncode}: "
+                        f"{(edit_res.stderr or edit_res.stdout or '').strip()[:200]}"
+                    )
             return True, None
 
     # Not installed — add it. Flag set discovered live (OC 2026.4.x):

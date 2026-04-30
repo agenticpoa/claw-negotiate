@@ -992,7 +992,7 @@ class TestEnsureCron:
 
     def test_noop_when_job_already_exists(self):
         existing = json.dumps([
-            {"name": "negotiate_safe-scan", "schedule": "every 30s"},
+            {"name": "negotiate_safe-scan", "schedule": "every 60s"},
             {"name": "something-else"},
         ])
         calls = []
@@ -1006,6 +1006,30 @@ class TestEnsureCron:
         # only list was called; add was skipped
         assert len(calls) == 1
         assert calls[0][:3] == ["openclaw", "cron", "list"]
+
+    def test_repairs_too_frequent_existing_job(self):
+        existing = json.dumps([
+            {
+                "id": "job-123",
+                "name": "negotiate_safe-scan",
+                "schedule": {"kind": "every", "everyMs": 10_000},
+            }
+        ])
+        calls = []
+
+        def runner(argv, **kwargs):
+            calls.append(argv)
+            if argv[:3] == ["openclaw", "cron", "list"]:
+                return self._cp(0, stdout=existing)
+            if argv[:3] == ["openclaw", "cron", "edit"]:
+                return self._cp(0, stdout=json.dumps({"ok": True}))
+            raise AssertionError(f"unexpected argv {argv}")
+
+        ok, err = rs.ensure_cron(runner=runner)
+        assert ok and err is None
+        edit_call = next(c for c in calls if c[:3] == ["openclaw", "cron", "edit"])
+        assert edit_call[3] == "job-123"
+        assert edit_call[edit_call.index("--every") + 1] == "60s"
 
     def test_tolerates_wrapped_jobs_list(self):
         """Some OC versions wrap the list under {jobs: [...]}."""
