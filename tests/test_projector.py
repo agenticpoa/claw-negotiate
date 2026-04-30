@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import urllib.parse
 from unittest.mock import MagicMock
 
 import delivery_store
@@ -105,6 +106,7 @@ def test_project_history_does_not_repost_counterparty_offer(tmp_path, monkeypatc
 
 def test_project_signing_records_dm_and_group_targets(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAW_NEGOTIATE_DELIVERY_DIR", str(tmp_path))
+    monkeypatch.setenv("TELEGRAM_BOT_USERNAME", "AgenticPOA_bot")
     sender = MagicMock()
     dm_sender = MagicMock()
 
@@ -124,6 +126,9 @@ def test_project_signing_records_dm_and_group_targets(tmp_path, monkeypatch):
 
     assert projected is True
     dm_sender.assert_called_once()
+    dm_message = dm_sender.call_args.kwargs["message"]
+    assert "callback=" in dm_message
+    assert urllib.parse.quote("https://t.me/AgenticPOA_bot") in dm_message
     sender.assert_called_once()
     payload = delivery_store.read_deliveries("session_neg_sign")
     assert payload["delivered"]["signing:pnd_123"]["target"] == "dm:123;group:-100"

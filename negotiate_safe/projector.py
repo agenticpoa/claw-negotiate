@@ -1,13 +1,14 @@
 """Idempotent Telegram projector for shared-orchestrator events."""
 from __future__ import annotations
 
+import os
 from typing import Callable
 
 import delivery_store
 from format_event import format_event
 from telegram import route_stream_message, should_publish_stream_event
 from telegram_push import send_signing_url_to_dm, send_telegram
-from upstream import synthesize_offer_event
+from upstream import augment_signing_url, synthesize_offer_event
 
 
 def delivery_key(event: dict) -> str:
@@ -56,6 +57,12 @@ def project_event(
     dm_sender: Callable = send_signing_url_to_dm,
     delivery_client=None,
 ) -> bool:
+    if event.get("type") == "signing":
+        event = augment_signing_url(
+            event,
+            os.environ.get("TELEGRAM_BOT_USERNAME", ""),
+        )
+
     role = (constraints or {}).get("role") or ""
     if event.get("type") in ("offer", "counter", "accept"):
         party = event.get("party") or ""
