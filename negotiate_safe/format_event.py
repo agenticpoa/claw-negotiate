@@ -122,7 +122,7 @@ def format_confirm(event: dict[str, Any]) -> str:
     role = (c.get("role") or "founder").lower()
     role_label = "Founder" if role == "founder" else "Investor"
     role_icon = "\U0001f464" if role == "founder" else "\U0001f4bc"  # 👤 / 💼
-    agent_label = f"{role_label} AI Agent"
+    agent_label = f"{role_label} OpenClaw"
 
     founder_name = c.get("founder_name")
     founder_title = c.get("founder_title")
@@ -198,8 +198,8 @@ def format_authorized(event: dict[str, Any]) -> str:
     }
     ttl_hours = event.get("ttl_hours") or 1
     role = (c.get("role") or event.get("role") or "agent").strip().lower()
-    agent_label = "Founder AI Agent" if role == "founder" else (
-        "Investor AI Agent" if role == "investor" else "AI Agent"
+    agent_label = "Founder OpenClaw" if role == "founder" else (
+        "Investor OpenClaw" if role == "investor" else "OpenClaw"
     )
 
     lines = [
@@ -260,11 +260,7 @@ def format_offer(
     cap = terms.get("valuation_cap")
     discount = terms.get("discount_rate")
 
-    mode = (constraints or {}).get("mode") if constraints else None
-    user_role = ((constraints or {}).get("role") or "").lower() if constraints else ""
-    agent_suffix = " AI agent"
-    if mode == "demo" and user_role and party_raw and party_raw != user_role:
-        agent_suffix = " AI agent"
+    agent_suffix = " OpenClaw"
 
     header_prefix = f"{icon} " if icon else ""
     header = f"{header_prefix}{_b(f'Offer {offer_num} — {party}{agent_suffix}')}"
@@ -310,7 +306,7 @@ def _format_accept(event: dict[str, Any]) -> str:
     terms = event.get("terms") or {}
     return (
         f"\U0001f91d {_b('Deal reached')}\n\n"  # 🤝
-        "Both AI agents agreed to these terms:\n\n"
+        "Both OpenClaws agreed to these terms:\n\n"
         f"• Valuation cap: {_b(fmt_dollars(terms.get('valuation_cap')))}\n"
         f"• Discount: {_b(fmt_percent(terms.get('discount_rate')))}\n"
         f"• Pro-rata rights: {_b(_yn(terms.get('pro_rata')))}\n"
@@ -752,7 +748,7 @@ def format_go_live(event: dict[str, Any]) -> str:
     bind_payload = f"/bind {code}" if code else "/bind INV-XXXXX"
 
     lines = [
-        f"\U0001f3ac {_b('Want to see both AI agents negotiate in one chat?')}",  # 🎬
+        f"\U0001f3ac {_b('Want to see both OpenClaws negotiate in one chat?')}",  # 🎬
         "",
         "Create a new Telegram group with these three members:",
         "",
@@ -781,7 +777,7 @@ def format_group_bound(event: dict[str, Any]) -> str:
     lines = [
         f"✅ {_b('Negotiation room ready' + code_part)}",  # ✅
         "",
-        f"Both AI agents will post their offers here so you and {_escape_html(name)} "
+        f"Both OpenClaws will post their offers here so you and {_escape_html(name)} "
         "can follow the rounds live.",
         "",
         f"{_b('Signing stays private.')} If a deal is reached, each party gets their own signing link in DM.",
@@ -849,7 +845,7 @@ def format_founder_resumed(event: dict[str, Any]) -> str:
     code = (event.get("session_code") or "").strip()
     return (
         f"⚡ {_b('Starting the negotiation')}\n\n"  # ⚡
-        "The founder AI agent will post the first offer in a moment."
+        "The founder OpenClaw will post the first offer in a moment."
     )
 
 
@@ -867,14 +863,14 @@ def format_investor_waiting_for_founder(event: dict[str, Any]) -> str:
         founder_bot = "@" + founder_bot
     if founder_bot:
         return (
-            f"✅ {_b('Joined.')} Waiting for the founder AI agent.\n\n"  # ✅
-            f"Founder AI agent: {_code(founder_bot)}\n\n"
+            f"✅ {_b('Joined.')} Waiting for the founder OpenClaw.\n\n"  # ✅
+            f"Founder OpenClaw: {_code(founder_bot)}\n\n"
             "They're setting up a Telegram group where the negotiation "
             "offers will stream live. You'll be invited to it shortly. "
             "No action needed from you — sit tight."
         )
     return (
-        f"✅ {_b('Joined.')} Waiting for the founder AI agent.\n\n"  # ✅
+        f"✅ {_b('Joined.')} Waiting for the founder OpenClaw.\n\n"  # ✅
         "They're setting up a Telegram group where the negotiation "
         "offers will stream live. You'll be invited to it shortly. "
         "No action needed from you — sit tight."
@@ -916,7 +912,7 @@ def format_create_group_for_founder(event: dict[str, Any]) -> str:
         f"{_b('Set up the negotiation room:')}",
         "",
         f"1. In Telegram, create a new group with you and {_escape_html(investor_label.split()[0] if investor_label else 'your investor')}.",
-        "2. Add both AI agents using the buttons below, or paste both handles into Telegram search:",
+        "2. Add both OpenClaws using the buttons below, or paste both handles into Telegram search:",
         _code(handles) if handles else "",
         "3. Copy and paste the bind command in the group.",
         "",
@@ -959,12 +955,12 @@ def group_setup_reply_markup(event: dict[str, Any]) -> dict[str, Any] | None:
 
     keyboard: list[list[dict[str, Any]]] = []
     if founder_url:
-        keyboard.append([{"text": "Add founder AI agent", "url": founder_url}])
+        keyboard.append([{"text": "Add founder OpenClaw", "url": founder_url}])
     if investor_url:
-        keyboard.append([{"text": "Add investor AI agent", "url": investor_url}])
+        keyboard.append([{"text": "Add investor OpenClaw", "url": investor_url}])
     if handles:
         keyboard.append([
-            {"text": "Copy AI agent handles", "copy_text": {"text": handles}},
+            {"text": "Copy OpenClaw handles", "copy_text": {"text": handles}},
         ])
     keyboard.append([
         {"text": "Copy bind command", "copy_text": {"text": bind_payload}},
@@ -977,13 +973,13 @@ def format_investor_waiting_heartbeat(event: dict[str, Any]) -> str:
     signaled streaming_at. Keeps the chat from feeling dead during
     the cron window. Posted at most once per wait.
     """
-    return "⏳ Still waking the founder AI agent…"  # ⏳
+    return "⏳ Still waking the founder OpenClaw…"  # ⏳
 
 
 def format_turn_heartbeat(event: dict[str, Any]) -> str:
     role = (event.get("role") or "agent").strip().lower()
-    label = "Founder AI agent" if role == "founder" else (
-        "Investor AI agent" if role == "investor" else "AI agent"
+    label = "Founder OpenClaw" if role == "founder" else (
+        "Investor OpenClaw" if role == "investor" else "OpenClaw"
     )
     return (
         f"⏳ {_b(label + ' is preparing the next offer…')}\n\n"
@@ -993,8 +989,8 @@ def format_turn_heartbeat(event: dict[str, Any]) -> str:
 
 def format_turn_still_working(event: dict[str, Any]) -> str:
     role = (event.get("role") or "agent").strip().lower()
-    label = "Founder AI agent" if role == "founder" else (
-        "Investor AI agent" if role == "investor" else "AI agent"
+    label = "Founder OpenClaw" if role == "founder" else (
+        "Investor OpenClaw" if role == "investor" else "OpenClaw"
     )
     return (
         f"⏳ {_b('Still working')}\n\n"
@@ -1008,7 +1004,7 @@ def format_investor_both_online(event: dict[str, Any]) -> str:
     up" and the first offer card arriving from upstream.
     """
     return (
-        f"✅ {_b('Both AI agents are live')}\n\nStarting the negotiation now."  # ✅
+        f"✅ {_b('Both OpenClaws are live')}\n\nStarting the negotiation now."  # ✅
     )
 
 

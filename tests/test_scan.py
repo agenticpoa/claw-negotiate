@@ -1160,7 +1160,7 @@ class TestInvestorWaitForFounderStreaming:
         # is now the one who joined (not waking anything).
         msgs = [c.kwargs.get("message") or c.args[1] for c in sender.call_args_list]
         assert any("Waiting for the founder" in m or "Joined" in m for m in msgs)
-        assert any("Both AI agents are live" in m for m in msgs)
+        assert any("Both OpenClaws are live" in m for m in msgs)
         typing.start.assert_called_once()
         typing.stop.assert_called_once()
 

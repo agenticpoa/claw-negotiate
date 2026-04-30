@@ -59,8 +59,8 @@ class TestFormatters:
     def test_confirm_new_copy(self, sample_constraints):
         event = {"type": "confirm", "constraints": sample_constraints}
         out = fe.format_confirm(event)
-        assert "<b>Review your Founder AI Agent authorization</b>" in out
-        assert "Your Founder AI Agent will only agree to:" in out
+        assert "<b>Review your Founder OpenClaw authorization</b>" in out
+        assert "Your Founder OpenClaw will only agree to:" in out
         assert "• Valuation cap: <b>$8M – $12M</b>" in out
         assert "• Discount: <b>at least 20%</b>" in out
         assert "• Pro-rata rights: <b>required</b>" in out
@@ -83,13 +83,13 @@ class TestFormatters:
     def test_confirm_shows_founder_role_header(self, sample_constraints):
         c = {**sample_constraints, "role": "founder"}
         out = fe.format_confirm({"type": "confirm", "constraints": c})
-        assert "Review your Founder AI Agent authorization" in out
+        assert "Review your Founder OpenClaw authorization" in out
         assert "\U0001f464" in out  # 👤
 
     def test_confirm_shows_investor_role_header(self, sample_constraints):
         c = {**sample_constraints, "role": "investor"}
         out = fe.format_confirm({"type": "confirm", "constraints": c})
-        assert "Review your Investor AI Agent authorization" in out
+        assert "Review your Investor OpenClaw authorization" in out
         assert "\U0001f4bc" in out  # 💼
         assert "Reply <code>GO</code> to continue" in out
         assert "create the invitation code" not in out
@@ -97,7 +97,7 @@ class TestFormatters:
     def test_confirm_defaults_to_founder_when_role_missing(self, sample_constraints):
         c = {k: v for k, v in sample_constraints.items() if k != "role"}
         out = fe.format_confirm({"type": "confirm", "constraints": c})
-        assert "Review your Founder AI Agent authorization" in out
+        assert "Review your Founder OpenClaw authorization" in out
 
     def test_confirm_founder_identity_block(self, sample_constraints):
         c = {
@@ -153,7 +153,7 @@ class TestFormatters:
         assert "Nora Vassileva at SD Fund joined" in out
         assert "Set up the negotiation room" in out
         assert "In Telegram, create a new group with you and Nora" in out
-        assert "Add both AI agents using the buttons below" in out
+        assert "Add both OpenClaws using the buttons below" in out
         assert "@AgenticPOA_bot @AgenticPOAInvestor_bot" in out
         assert "Copy and paste the bind command" in out
         assert "Founder bot:" not in out
@@ -168,15 +168,15 @@ class TestFormatters:
         assert markup == {
             "inline_keyboard": [
                 [{
-                    "text": "Add founder AI agent",
+                    "text": "Add founder OpenClaw",
                     "url": "https://t.me/AgenticPOA_bot?startgroup",
                 }],
                 [{
-                    "text": "Add investor AI agent",
+                    "text": "Add investor OpenClaw",
                     "url": "https://t.me/AgenticPOAInvestor_bot?startgroup",
                 }],
                 [{
-                    "text": "Copy AI agent handles",
+                    "text": "Copy OpenClaw handles",
                     "copy_text": {"text": "@AgenticPOA_bot @AgenticPOAInvestor_bot"},
                 }],
                 [{
@@ -188,13 +188,13 @@ class TestFormatters:
 
     def test_turn_heartbeat_copy(self):
         out = fe.format_event({"type": "turn_heartbeat", "role": "investor"})
-        assert "Investor AI agent is preparing the next offer" in out
+        assert "Investor OpenClaw is preparing the next offer" in out
         assert "Your OpenClaw is reviewing the latest terms" in out
 
     def test_turn_still_working_copy(self):
         out = fe.format_event({"type": "turn_still_working", "role": "founder"})
         assert "Still working" in out
-        assert "Founder AI agent" in out
+        assert "Founder OpenClaw" in out
         assert "drafting a compliant response" in out
 
     def test_confirm_drops_identity_lines_when_nothing_known(self, sample_constraints):
@@ -210,7 +210,7 @@ class TestFormatters:
         out = fe.format_confirm({"type": "confirm", "constraints": c})
         assert "<b>You:</b>" not in out
         assert "<b>Investor:</b>" not in out
-        assert "Review your Founder AI Agent authorization" in out
+        assert "Review your Founder OpenClaw authorization" in out
 
     # ---- authorized (our emit) ----
 
@@ -261,7 +261,7 @@ class TestFormatters:
             "immudb_tx": 48326,
         }
         out = fe.format_offer(event)
-        assert out.startswith("\U0001f464 <b>Offer 3 — Founder AI agent</b>")  # 👤
+        assert out.startswith("\U0001f464 <b>Offer 3 — Founder OpenClaw</b>")  # 👤
         assert '"Counter at 10M, 20% discount."' in out
         assert "Terms:" in out
         assert "• Valuation cap: <b>$10M</b>" in out
@@ -272,13 +272,13 @@ class TestFormatters:
         event = {"type": "counter", "round": 3, "party": "founder",
                  "terms": {"valuation_cap": 8_000_000, "discount_rate": 0.15}}
         out = fe.format_offer(event)
-        assert out.startswith("\U0001f464 <b>Offer 4 — Founder AI agent</b>")  # 👤
+        assert out.startswith("\U0001f464 <b>Offer 4 — Founder OpenClaw</b>")  # 👤
 
     def test_investor_uses_briefcase_icon(self):
         event = {"type": "counter", "round": 3, "party": "investor",
                  "terms": {"valuation_cap": 8_000_000, "discount_rate": 0.15}}
         out = fe.format_offer(event)
-        assert out.startswith("\U0001f4bc <b>Offer 4 — Investor AI agent</b>")  # 💼
+        assert out.startswith("\U0001f4bc <b>Offer 4 — Investor OpenClaw</b>")  # 💼
 
     def test_demo_mode_labels_ai_counterparty_as_ai(self):
         """Solo-demo: the AI side of the negotiation gets a '(AI)' suffix
@@ -288,11 +288,11 @@ class TestFormatters:
                  "terms": {"valuation_cap": 9_000_000, "discount_rate": 0.20}}
         # User is playing founder → investor side is AI
         out = fe.format_offer(event, constraints={"role": "founder", "mode": "demo"})
-        assert "<b>Offer 3 — Investor AI agent</b>" in out
+        assert "<b>Offer 3 — Investor OpenClaw</b>" in out
 
         # User is playing investor → investor side is the human user
         out = fe.format_offer(event, constraints={"role": "investor", "mode": "demo"})
-        assert "<b>Offer 3 — Investor AI agent</b>" in out
+        assert "<b>Offer 3 — Investor OpenClaw</b>" in out
         assert "(AI)" not in out
 
     def test_two_party_mode_never_shows_ai_suffix(self):
@@ -309,7 +309,7 @@ class TestFormatters:
                            "pro_rata": True, "mfn": False}}
         out = fe.format_offer(event)
         assert out.startswith("\U0001f91d <b>Deal reached</b>")  # 🤝
-        assert "Both AI agents agreed to these terms:" in out
+        assert "Both OpenClaws agreed to these terms:" in out
         assert "• Valuation cap: <b>$9M</b>" in out
         assert "• Discount: <b>20%</b>" in out
         assert "• Pro-rata rights: <b>yes</b>" in out
@@ -706,7 +706,7 @@ class TestDispatcher:
                  "terms": {"valuation_cap": 10_000_000, "discount_rate": 0.20}}
         out = fe.format_event(event)
         assert out is not None
-        assert "<b>Offer 2 — Founder AI agent</b>" in out
+        assert "<b>Offer 2 — Founder OpenClaw</b>" in out
 
     def test_dispatch_offer_forwards_constraints(self, sample_constraints):
         event = {"type": "offer", "round": 1, "party": "founder",
@@ -718,7 +718,7 @@ class TestDispatcher:
         event = {"type": "counter", "round": 2, "party": "investor",
                  "terms": {"valuation_cap": 8_000_000, "discount_rate": 0.15}}
         out = fe.format_event(event)
-        assert "<b>Offer 3 — Investor AI agent</b>" in out
+        assert "<b>Offer 3 — Investor OpenClaw</b>" in out
 
     def test_dispatch_accept(self):
         event = {"type": "accept", "round": 4, "party": "founder",
@@ -774,7 +774,7 @@ class TestProposeNewTerms:
 
     def test_dispatch_confirm(self, sample_constraints):
         out = fe.format_event({"type": "confirm", "constraints": sample_constraints})
-        assert "Review your Founder AI Agent authorization" in out
+        assert "Review your Founder OpenClaw authorization" in out
 
     def test_dispatch_authorized(self):
         out = fe.format_event({
@@ -847,7 +847,7 @@ class TestCli:
             text=True,
         )
         assert result.returncode == 0
-        assert "<b>Offer 3 — Founder AI agent</b>" in result.stdout
+        assert "<b>Offer 3 — Founder OpenClaw</b>" in result.stdout
 
     def test_cli_formats_outcome(self):
         result = subprocess.run(

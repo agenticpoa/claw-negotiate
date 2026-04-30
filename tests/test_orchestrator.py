@@ -122,7 +122,7 @@ def test_turn_helper_posts_heartbeats_while_waiting(monkeypatch):
 
     assert result.returncode == 0
     msgs = [c.kwargs["message"] for c in sender.call_args_list]
-    assert any("Investor AI agent is preparing" in msg for msg in msgs)
+    assert any("Investor OpenClaw is preparing" in msg for msg in msgs)
     assert any("Still working" in msg for msg in msgs)
 
 
@@ -241,7 +241,7 @@ def test_reconcile_prompts_founder_to_bind_group_after_investor_joins(tmp_path, 
     assert "Set up the negotiation room" in message
     assert "Nora Vassileva at SD Fund" in message
     assert sender.call_args.kwargs["reply_markup"]["inline_keyboard"][0][0] == {
-        "text": "Add founder AI agent",
+        "text": "Add founder OpenClaw",
         "url": "https://t.me/AgenticPOA_bot?startgroup",
     }
 
