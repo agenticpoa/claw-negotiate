@@ -985,7 +985,10 @@ def format_turn_heartbeat(event: dict[str, Any]) -> str:
     label = "Founder AI agent" if role == "founder" else (
         "Investor AI agent" if role == "investor" else "AI agent"
     )
-    return f"⏳ {_b(label + ' is preparing the next offer…')}"
+    return (
+        f"⏳ {_b(label + ' is preparing the next offer…')}\n\n"
+        "OpenClaw is checking the latest terms against the APOA authorization."
+    )
 
 
 def format_turn_still_working(event: dict[str, Any]) -> str:
@@ -995,7 +998,7 @@ def format_turn_still_working(event: dict[str, Any]) -> str:
     )
     return (
         f"⏳ {_b('Still working')}\n\n"
-        f"{_escape_html(label)} is checking the latest offer against the APOA authorization before replying."
+        f"{_escape_html(label)} is still reviewing the offer and drafting a compliant response."
     )
 
 

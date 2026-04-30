@@ -255,8 +255,8 @@ def _run_turn_helper(
     heartbeat_sender=None,
     heartbeat_chat_id: str | int | None = None,
     heartbeat_role: str = "",
-    heartbeat_after: float = 45.0,
-    still_working_after: float = 120.0,
+    heartbeat_after: float = 25.0,
+    still_working_after: float = 90.0,
 ) -> tuple[int, list[dict]]:
     cmd = [
         sys.executable,
@@ -377,8 +377,8 @@ def _run_turn_helper_with_heartbeats(
     heartbeat_sender=None,
     heartbeat_chat_id: str | int | None = None,
     heartbeat_role: str = "",
-    heartbeat_after: float = 45.0,
-    still_working_after: float = 120.0,
+    heartbeat_after: float = 25.0,
+    still_working_after: float = 90.0,
 ) -> subprocess.CompletedProcess:
     proc = subprocess.Popen(
         cmd,

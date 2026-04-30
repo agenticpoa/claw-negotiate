@@ -144,6 +144,27 @@ def test_turn_helper_maps_expired_token_error(tmp_path):
     assert {"type": "session_expired", "id": "apoa_token_expired"} in events
 
 
+def test_turn_helper_uses_demo_friendly_progress_thresholds(tmp_path):
+    runner = MagicMock(return_value=MagicMock(returncode=0, stdout="", stderr=""))
+
+    orchestrator._run_turn_helper(
+        output_dir=tmp_path,
+        negotiate_repo="/repo",
+        sshsign_host="sshsign.dev",
+        runner=runner,
+    )
+
+    assert runner.call_args.kwargs["timeout"] == 180
+
+
+def test_turn_helper_default_threshold_values():
+    import inspect
+
+    sig = inspect.signature(orchestrator._run_turn_helper)
+    assert sig.parameters["heartbeat_after"].default == 25.0
+    assert sig.parameters["still_working_after"].default == 90.0
+
+
 def test_reconcile_posts_expired_card_and_cancels_session(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAW_NEGOTIATE_DELIVERY_DIR", str(tmp_path / "deliveries"))
     client = _client()

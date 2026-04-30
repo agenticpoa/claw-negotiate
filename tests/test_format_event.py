@@ -189,12 +189,13 @@ class TestFormatters:
     def test_turn_heartbeat_copy(self):
         out = fe.format_event({"type": "turn_heartbeat", "role": "investor"})
         assert "Investor AI agent is preparing the next offer" in out
+        assert "OpenClaw is checking the latest terms" in out
 
     def test_turn_still_working_copy(self):
         out = fe.format_event({"type": "turn_still_working", "role": "founder"})
         assert "Still working" in out
         assert "Founder AI agent" in out
-        assert "checking the latest offer against the APOA authorization" in out
+        assert "drafting a compliant response" in out
 
     def test_confirm_drops_identity_lines_when_nothing_known(self, sample_constraints):
         c = {
