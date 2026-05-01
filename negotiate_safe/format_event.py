@@ -614,7 +614,7 @@ def format_invitation(event: dict[str, Any]) -> str:
         join_intro,
         "Cap: $X-$Y post.",
         "Check: $Z-$W.",
-        "Pro rata: required / no preference.",
+        "Pro rata: required / not required / no preference.",
         "Discount: V%",
     ])
 
