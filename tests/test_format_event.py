@@ -534,6 +534,12 @@ class TestFormatInvitation:
         assert "Check: $Z-$W." in out
         assert "Pro rata: required / not required / no preference." in out
         assert "Discount: V%" in out
+        assert (
+            "Cap: $X-$Y post.\n"
+            "Check: $Z-$W.\n"
+            "Pro rata: required / not required / no preference.\n"
+            "Discount: V%"
+        ) in out
         assert "pro-rata preference" in out
         assert "Ready to invite" in out
         assert "<pre>" in out

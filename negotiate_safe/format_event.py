@@ -612,10 +612,12 @@ def format_invitation(event: dict[str, Any]) -> str:
     ).strip()
     join_template = "\n\n".join([
         join_intro,
-        "Cap: $X-$Y post.",
-        "Check: $Z-$W.",
-        "Pro rata: required / not required / no preference.",
-        "Discount: V%",
+        "\n".join([
+            "Cap: $X-$Y post.",
+            "Check: $Z-$W.",
+            "Pro rata: required / not required / no preference.",
+            "Discount: V%",
+        ]),
     ])
 
     invite_block = "\n\n".join([
