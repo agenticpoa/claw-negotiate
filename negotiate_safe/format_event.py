@@ -371,6 +371,19 @@ def _format_accept(event: dict[str, Any]) -> str:
     )
 
 
+def format_apoa_blocked_counterparty_offer(event: dict[str, Any]) -> str:
+    role = (event.get("role") or "agent").strip().lower()
+    label = "Founder OpenClaw" if role == "founder" else (
+        "Investor OpenClaw" if role == "investor" else "OpenClaw"
+    )
+    return (
+        f"\U0001f6e1 {_b('APOA blocked an out-of-bounds term')}\n\n"  # 🛡
+        f"The latest counterparty offer was outside your authorization, so your {label} "
+        "cannot accept it.\n\n"
+        "Your OpenClaw will counter within your authorized terms or end the negotiation."
+    )
+
+
 def format_outcome(
     event: dict[str, Any],
     constraints: dict[str, Any] | None = None,
@@ -1110,6 +1123,7 @@ FORMATTERS = {
     "invitation": format_invitation,
     "waiting": format_waiting,
     "counterparty_joined": format_counterparty_joined,
+    "apoa_blocked_counterparty_offer": format_apoa_blocked_counterparty_offer,
     "invitation_expired": format_invitation_expired,
     "session_expired": format_session_expired,
     "canceled_before_deal_initiator": format_canceled_before_deal_initiator,

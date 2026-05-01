@@ -169,6 +169,100 @@ def test_turn_helper_records_heartbeat_message_id(monkeypatch):
     )
 
 
+def test_send_blocked_notice_for_counterparty_offer_outside_bounds():
+    sender = MagicMock()
+    client = MagicMock()
+    client.claim_delivery.return_value = {"created": True}
+    rows = [
+        {
+            "round": 0,
+            "from": "founder",
+            "type": "offer",
+            "metadata": json.dumps({
+                "valuation_cap": 30_000_000,
+                "investment_amount": 750_000,
+                "discount_rate": 0,
+            }),
+        },
+        {
+            "round": 1,
+            "from": "investor",
+            "type": "counter",
+            "metadata": json.dumps({
+                "valuation_cap": 15_000_000,
+                "investment_amount": 300_000,
+                "discount_rate": 0,
+            }),
+        },
+    ]
+
+    sent = orchestrator._send_blocked_notice_if_needed(
+        session_id="session_neg_1",
+        role="founder",
+        rows=rows,
+        constraints={
+            "valuation_cap_min": 20_000_000,
+            "valuation_cap_max": 30_000_000,
+            "investment_amount_min": 500_000,
+            "investment_amount_max": 1_000_000,
+            "discount_min": 0,
+            "discount_max": 0,
+            "pro_rata": "indifferent",
+            "mfn": "indifferent",
+        },
+        dm_chat_id="123",
+        sender=sender,
+        client=client,
+    )
+
+    assert sent is True
+    sender.assert_called_once()
+    assert sender.call_args.args[0] == "123"
+    message = sender.call_args.kwargs["message"]
+    assert "APOA blocked an out-of-bounds term" in message
+    assert "$20M" not in message
+    assert "$500K" not in message
+    client.claim_delivery.assert_called_once()
+
+
+def test_does_not_send_blocked_notice_for_counterparty_offer_inside_bounds():
+    sender = MagicMock()
+    client = MagicMock()
+    rows = [
+        {
+            "round": 0,
+            "from": "founder",
+            "type": "offer",
+            "metadata": json.dumps({"valuation_cap": 30_000_000, "discount_rate": 0}),
+        },
+        {
+            "round": 1,
+            "from": "investor",
+            "type": "counter",
+            "metadata": json.dumps({"valuation_cap": 22_000_000, "discount_rate": 0}),
+        },
+    ]
+
+    sent = orchestrator._send_blocked_notice_if_needed(
+        session_id="session_neg_1",
+        role="founder",
+        rows=rows,
+        constraints={
+            "valuation_cap_min": 20_000_000,
+            "valuation_cap_max": 30_000_000,
+            "discount_min": 0,
+            "discount_max": 0,
+        },
+        dm_chat_id="123",
+        sender=sender,
+        client=client,
+    )
+
+    assert sent is False
+    sender.assert_not_called()
+    client.claim_delivery.assert_not_called()
+
+
 def test_turn_helper_maps_expired_token_error(tmp_path):
     result = MagicMock(
         returncode=1,

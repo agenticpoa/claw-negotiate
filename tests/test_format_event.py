@@ -34,6 +34,7 @@ class TestFormatters:
             "rescinded_after_sign_initiator", "rescinded_after_sign_observer",
             "cancel_completed_refused",
             "propose_new_terms",
+            "apoa_blocked_counterparty_offer",
             "session_expired",
             # Phase 8 (K1): group-mode bind UX
             "go_live", "group_bound",
@@ -218,6 +219,15 @@ class TestFormatters:
         assert "Still working" in out
         assert "Founder OpenClaw" in out
         assert "drafting a compliant response" in out
+
+    def test_apoa_blocked_counterparty_offer_private_card(self):
+        out = fe.format_event({
+            "type": "apoa_blocked_counterparty_offer",
+            "role": "founder",
+        })
+        assert "APOA blocked an out-of-bounds term" in out
+        assert "Founder OpenClaw cannot accept it" in out
+        assert "counter within your authorized terms" in out
 
     def test_confirm_drops_identity_lines_when_nothing_known(self, sample_constraints):
         c = {

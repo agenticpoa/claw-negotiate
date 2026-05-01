@@ -24,7 +24,7 @@ from session_flow import sshsign_session_id
 from sshsign_session import LeaseHeldError, SshsignSession, SshsignSessionError
 from telegram_push import send_signing_url_to_dm, send_telegram
 from trace_log import write_trace
-from upstream import finalize_executed_pdf, ssh_history
+from upstream import finalize_executed_pdf, ssh_history, synthesize_offer_event
 
 
 TURN_HELPER = Path(__file__).with_name("_turn_once.py")
@@ -142,6 +142,101 @@ def _due_role(history_rows: list[dict]) -> str:
     # SAFE schema first mover is founder. Rounds alternate by accepted
     # authoritative history count: 0 founder, 1 investor, 2 founder, ...
     return "founder" if len(history_rows) % 2 == 0 else "investor"
+
+
+def _as_float(value) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _constraint_bool_required(constraints: dict, field: str) -> bool:
+    value = constraints.get(field)
+    if isinstance(value, dict):
+        return bool(value.get("required"))
+    return str(value or "").lower() == "required" or bool(constraints.get(f"{field}_required"))
+
+
+def _terms_fit_constraints(terms: dict, constraints: dict) -> bool:
+    checks = (
+        ("valuation_cap", "valuation_cap_min", "valuation_cap_max"),
+        ("investment_amount", "investment_amount_min", "investment_amount_max"),
+        ("discount_rate", "discount_min", "discount_max"),
+    )
+    for term_key, min_key, max_key in checks:
+        value = _as_float(terms.get(term_key))
+        min_value = _as_float(constraints.get(min_key))
+        max_value = _as_float(constraints.get(max_key))
+        if value is None:
+            continue
+        if min_value is not None and value < min_value:
+            return False
+        if max_value is not None and value > max_value:
+            return False
+    if _constraint_bool_required(constraints, "pro_rata") and terms.get("pro_rata") is not True:
+        return False
+    if _constraint_bool_required(constraints, "mfn") and terms.get("mfn") is not True:
+        return False
+    return True
+
+
+def _blocked_delivery_key(role: str, row: dict) -> str:
+    return "apoa_blocked:{role}:{party}:{round}:{etype}".format(
+        role=role,
+        party=row.get("from") or "",
+        round=row.get("round"),
+        etype=row.get("type") or "",
+    )
+
+
+def _claim_private_notice(client, session_id: str, key: str, target: str) -> bool:
+    if client is None:
+        if delivery_store.has_delivery(session_id, key):
+            return False
+        return True
+    payload = client.claim_delivery(session_id, key, target=target)
+    return bool(payload.get("created"))
+
+
+def _send_blocked_notice_if_needed(
+    *,
+    session_id: str,
+    role: str,
+    rows: list[dict],
+    constraints: dict,
+    dm_chat_id: str,
+    sender,
+    client,
+) -> bool:
+    if not rows or _due_role(rows) != role:
+        return False
+    latest = rows[-1]
+    if latest.get("from") == role:
+        return False
+    event = synthesize_offer_event(latest)
+    if not event:
+        return False
+    terms = event.get("terms") or {}
+    if not terms or _terms_fit_constraints(terms, constraints):
+        return False
+    key = _blocked_delivery_key(role, latest)
+    if not _claim_private_notice(client, session_id, key, str(dm_chat_id)):
+        return False
+    body = format_event({"type": "apoa_blocked_counterparty_offer", "role": role})
+    if not body:
+        return False
+    result = sender(dm_chat_id, message=body)
+    if client is None:
+        delivery_store.mark_delivery(
+            session_id,
+            key,
+            str(dm_chat_id),
+            message_id=getattr(result, "message_id", None),
+        )
+    return True
 
 
 def _load_json(path: Path) -> dict:
@@ -720,6 +815,23 @@ def reconcile_state(
                     pass
 
         return ReconcileResult("awaiting_signatures", projected=projected)
+
+    if _send_blocked_notice_if_needed(
+        session_id=session_id,
+        role=role,
+        rows=rows,
+        constraints=constraints,
+        dm_chat_id=dm_chat_id,
+        sender=sender,
+        client=client,
+    ):
+        write_trace(
+            output_dir,
+            "orchestrator.apoa_blocked_counterparty_offer",
+            negotiation_id=negotiation_id,
+            role=role,
+            round=rows[-1].get("round") if rows else None,
+        )
 
     if _due_role(rows) != role:
         return ReconcileResult("waiting_for_counterparty", projected=projected)
