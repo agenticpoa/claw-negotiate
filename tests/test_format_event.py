@@ -530,6 +530,9 @@ class TestFormatInvitation:
         # The "Joining INV-X via @handle" anchor phrase is what the
         # investor's parser keys on. Drop this and the design breaks.
         assert "Joining INV-7K3X9 via @alice_negotiator_bot" in out
+        assert "Cap: $X-$Y post." in out
+        assert "Check: $Z-$W." in out
+        assert "Discount: V%" in out
         assert "Ready to invite" in out
         assert "<pre>" in out
         # Should tell the user what they can do while waiting.
@@ -545,8 +548,10 @@ class TestFormatInvitation:
         })
         assert (
             "Joining INV-7K3X9 via @alice_negotiator_bot, "
-            "I am Nora Vassileva at SD Fund, cap up to $X"
+            "I am Nora Vassileva at SD Fund."
         ) in out
+        assert "Cap: $X-$Y post." in out
+        assert "Check: $Z-$W." in out
 
     def test_generic_counterparty_label_when_missing(self):
         out = fe.format_invitation({

@@ -603,19 +603,26 @@ def format_invitation(event: dict[str, Any]) -> str:
     elif investor_firm:
         identity_fragment = f"I am at {investor_firm}, "
 
-    join_template = (
-        f"Joining {code} via {founder_bot}, "
-        f"{identity_fragment}cap up to $X, Y% discount, pro-rata required"
+    if identity_fragment.endswith(", "):
+        identity_fragment = identity_fragment[:-2] + "."
+    join_intro = (
+        f"Joining {code} via {founder_bot}, {identity_fragment}"
         if founder_bot
-        else f"Joining {code} as investor, {identity_fragment}cap up to $X, "
-             "Y% discount, pro-rata required"
-    )
+        else f"Joining {code} as investor, {identity_fragment}"
+    ).strip()
+    join_template = "\n\n".join([
+        join_intro,
+        "Cap: $X-$Y post.",
+        "Check: $Z-$W.",
+        "Pro rata: required.",
+        "Discount: V%",
+    ])
 
     invite_block = "\n\n".join([
         "Please join our SAFE negotiation.",
         "DM your investor agent on Telegram and paste:",
         join_template,
-        "Replace $X and Y% with your investor-side limits.",
+        "Replace $X, $Y, $Z, $W, and V% with your investor-side limits.",
     ])
 
     first_name = counterparty.split()[0] if counterparty and counterparty != "your investor" else "your investor"
