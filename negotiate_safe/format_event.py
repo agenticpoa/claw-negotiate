@@ -614,7 +614,7 @@ def format_invitation(event: dict[str, Any]) -> str:
         join_intro,
         "Cap: $X-$Y post.",
         "Check: $Z-$W.",
-        "Pro rata: required.",
+        "Pro rata: required / no preference.",
         "Discount: V%",
     ])
 
@@ -622,7 +622,7 @@ def format_invitation(event: dict[str, Any]) -> str:
         "Please join our SAFE negotiation.",
         "DM your investor agent on Telegram and paste:",
         join_template,
-        "Replace $X, $Y, $Z, $W, and V% with your investor-side limits.",
+        "Replace $X, $Y, $Z, $W, V%, and the pro-rata preference with your investor-side limits.",
     ])
 
     first_name = counterparty.split()[0] if counterparty and counterparty != "your investor" else "your investor"

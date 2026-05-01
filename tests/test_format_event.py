@@ -532,7 +532,9 @@ class TestFormatInvitation:
         assert "Joining INV-7K3X9 via @alice_negotiator_bot" in out
         assert "Cap: $X-$Y post." in out
         assert "Check: $Z-$W." in out
+        assert "Pro rata: required / no preference." in out
         assert "Discount: V%" in out
+        assert "pro-rata preference" in out
         assert "Ready to invite" in out
         assert "<pre>" in out
         # Should tell the user what they can do while waiting.
