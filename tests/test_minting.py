@@ -4,6 +4,7 @@ from negotiate_safe.minting import (
     build_create_tokens_cmd,
     build_service_name,
     normalize_user_role,
+    resolve_investment_amount,
     resolve_mint_identity,
     role_plan,
 )
@@ -16,6 +17,7 @@ def _constraints(**overrides):
         "valuation_cap_min": 10_000_000,
         "valuation_cap_max": 20_000_000,
         "discount_min": 0.15,
+        "discount_max": 0.15,
         "pro_rata": "required",
         "mfn": "preferred",
         "company_name": "Acme Labs",
@@ -118,7 +120,39 @@ def test_build_create_tokens_cmd_binds_founder_and_ai_env_flags(tmp_path):
     assert cmd[cmd.index("--principal-id") + 1] == "did:apoa:u1"
     assert cmd[cmd.index("--investment-amount") + 1] == "500000.0"
     assert cmd[cmd.index("--founder-cap-min") + 1] == "10000000"
+    assert cmd[cmd.index("--founder-investment-amount-min") + 1] == "500000.0"
+    assert cmd[cmd.index("--founder-investment-amount-max") + 1] == "500000.0"
+    assert cmd[cmd.index("--founder-discount-min") + 1] == "0.15"
+    assert cmd[cmd.index("--founder-discount-max") + 1] == "0.15"
     assert cmd[cmd.index("--investor-cap-min") + 1] == "30000000"
+
+
+def test_resolve_investment_amount_uses_check_range_floor():
+    assert resolve_investment_amount(_constraints(
+        investment_amount=None,
+        investment_amount_min=250_000.0,
+        investment_amount_max=750_000.0,
+    )) == 250_000.0
+
+
+def test_build_create_tokens_cmd_binds_check_size_range(tmp_path):
+    cmd, _ = build_create_tokens_cmd(
+        repo=tmp_path,
+        negotiation_id="neg_1",
+        constraints=_constraints(
+            investment_amount=None,
+            investment_amount_min=250_000.0,
+            investment_amount_max=750_000.0,
+        ),
+        neg_dir=tmp_path / "negotiations" / "neg_1",
+        expires_str="2026-04-27T00:00:00Z",
+        service="safe:acme:neg_1",
+        env={},
+        python_executable="/py",
+    )
+    assert cmd[cmd.index("--investment-amount") + 1] == "250000.0"
+    assert cmd[cmd.index("--founder-investment-amount-min") + 1] == "250000.0"
+    assert cmd[cmd.index("--founder-investment-amount-max") + 1] == "750000.0"
 
 
 def test_build_create_tokens_cmd_join_mode_skips_ai_env_flags(tmp_path):

@@ -124,6 +124,30 @@ def _build_config(module, output_dir: Path, sshsign_host: str):
             or constraints.get("investment_amount")
             or 500000.0
         ),
+        founder_investment_amount_min=(
+            constraints.get("investment_amount_min")
+            or constraints.get("investment_amount")
+            or f_cfg.get("investment_amount")
+            or 500000.0
+        ),
+        founder_investment_amount_max=(
+            constraints.get("investment_amount_max")
+            or constraints.get("investment_amount")
+            or f_cfg.get("investment_amount")
+            or 500000.0
+        ),
+        investor_investment_amount_min=(
+            constraints.get("investment_amount_min")
+            or constraints.get("investment_amount")
+            or i_cfg.get("investment_amount")
+            or 500000.0
+        ),
+        investor_investment_amount_max=(
+            constraints.get("investment_amount_max")
+            or constraints.get("investment_amount")
+            or i_cfg.get("investment_amount")
+            or 500000.0
+        ),
         sshsign_host=f_cfg.get("sshsign_host") or i_cfg.get("sshsign_host") or sshsign_host,
         no_sshsign=False,
         output_dir=str(neg_dir / "output"),
@@ -146,6 +170,7 @@ def _build_config(module, output_dir: Path, sshsign_host: str):
 
     import dataclasses
     fields = {f.name for f in dataclasses.fields(module.NegotiationConfig)}
+    kwargs = {k: v for k, v in kwargs.items() if k in fields}
     if "signer_role" in fields:
         kwargs["signer_role"] = user_role
     return module.NegotiationConfig(**kwargs)

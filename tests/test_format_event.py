@@ -62,7 +62,7 @@ class TestFormatters:
         assert "<b>Review your Founder OpenClaw authorization</b>" in out
         assert "Your Founder OpenClaw will only agree to:" in out
         assert "• Valuation cap: <b>$8M – $12M</b>" in out
-        assert "• Discount: <b>at least 20%</b>" in out
+        assert "• Discount: <b>20%</b>" in out
         assert "• Pro-rata rights: <b>required</b>" in out
         assert "• MFN: <b>preferred</b>" in out
         assert "Reply <code>GO</code> to continue" in out
@@ -208,8 +208,9 @@ class TestFormatters:
 
     def test_turn_heartbeat_copy(self):
         out = fe.format_event({"type": "turn_heartbeat", "role": "investor"})
-        assert "Investor OpenClaw is preparing the next offer" in out
-        assert "Your OpenClaw is reviewing the latest terms" in out
+        assert "Investor OC is drafting an offer" in out
+        assert "Investor OpenClaw" not in out
+        assert "within the authorized terms" in out
 
     def test_turn_still_working_copy(self):
         out = fe.format_event({"type": "turn_still_working", "role": "founder"})
@@ -240,7 +241,10 @@ class TestFormatters:
             "constraints": {
                 "valuation_cap_min": 8_000_000,
                 "valuation_cap_max": 12_000_000,
+                "investment_amount_min": 250_000.0,
+                "investment_amount_max": 750_000.0,
                 "discount_min": 0.20,
+                "discount_max": 0.20,
                 "pro_rata": "required",
                 "mfn": "preferred",
             },
@@ -249,6 +253,7 @@ class TestFormatters:
         out = fe.format_authorized(event)
         assert "Authorization set" in out
         assert "$8M – $12M" in out
+        assert "$250K – $750K" in out
         assert "only within these limits" in out
         assert "20%" in out
         assert "Pro-rata rights: <b>required</b>" in out
@@ -274,6 +279,7 @@ class TestFormatters:
             "message": "Counter at 10M, 20% discount.",
             "terms": {
                 "valuation_cap": 10_000_000,
+                "investment_amount": 500_000,
                 "discount_rate": 0.20,
                 "pro_rata": True,
                 "mfn": False,
@@ -285,6 +291,7 @@ class TestFormatters:
         assert '"Counter at 10M, 20% discount."' in out
         assert "Terms:" in out
         assert "• Valuation cap: <b>$10M</b>" in out
+        assert "• Check size: <b>$500K</b>" in out
         assert "• Discount: <b>20%</b>" in out
         assert "• Pro-rata rights: <b>yes</b>\n• MFN: <b>no</b>" in out
 
@@ -326,11 +333,13 @@ class TestFormatters:
     def test_accept_renders_deal_celebration(self):
         event = {"type": "accept", "round": 5, "party": "founder",
                  "terms": {"valuation_cap": 9_000_000, "discount_rate": 0.20,
+                           "investment_amount": 500_000,
                            "pro_rata": True, "mfn": False}}
         out = fe.format_offer(event)
         assert out.startswith("\U0001f91d <b>Deal reached</b>")  # 🤝
         assert "Both OpenClaws agreed to these terms:" in out
         assert "• Valuation cap: <b>$9M</b>" in out
+        assert "• Check size: <b>$500K</b>" in out
         assert "• Discount: <b>20%</b>" in out
         assert "• Pro-rata rights: <b>yes</b>" in out
         assert "• MFN: <b>no</b>" in out
@@ -353,7 +362,7 @@ class TestFormatters:
         }
         out = fe.format_offer(event, constraints=sample_constraints)
         assert "(your range: $8M–$12M)" in out
-        assert "(your min: 20%)" in out
+        assert "(your term: 20%)" in out
 
     def test_offer_without_constraints_no_range(self):
         event = {"type": "offer", "round": 1, "party": "founder",
@@ -361,10 +370,11 @@ class TestFormatters:
         out = fe.format_offer(event)
         assert "(your range:" not in out
         assert "(your min:" not in out
+        assert "(your term:" not in out
 
     def test_offer_two_party_suppresses_range(self, sample_constraints):
         """PRIVACY regression: in two-party mode round cards land in
-        the shared group. The "your range" / "your min" hints would
+        the shared group. The "your range" / "your term" hints would
         leak each side's private bounds to the counterparty. Must
         be suppressed even when constraints are passed.
         """
@@ -378,6 +388,7 @@ class TestFormatters:
         out = fe.format_offer(event, constraints=two_party_constraints)
         assert "(your range:" not in out, f"PRIVACY LEAK: {out}"
         assert "(your min:" not in out, f"PRIVACY LEAK: {out}"
+        assert "(your term:" not in out, f"PRIVACY LEAK: {out}"
 
     def test_offer_missing_terms_renders_dashes(self):
         event = {"type": "offer", "round": 1, "party": "founder"}
@@ -830,6 +841,8 @@ class TestHelpers:
         (500_000, "$500K"),
         (8_000_000, "$8M"),
         (12_500_000, "$12.5M"),
+        (23_250_000, "$23.25M"),
+        (23_255_000, "$23,255,000"),
         (100_000_000, "$100M"),
         (12.7, "$12"),
         (-8_000_000, "-$8M"),

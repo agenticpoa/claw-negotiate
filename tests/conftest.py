@@ -124,6 +124,7 @@ def sample_constraints() -> dict:
         "valuation_cap_min": 8_000_000,
         "valuation_cap_max": 12_000_000,
         "discount_min": 0.20,
+        "discount_max": 0.20,
         "pro_rata": "required",
         "mfn": "preferred",
         "company_name": "Acme Corp",
@@ -132,6 +133,8 @@ def sample_constraints() -> dict:
         "investor_name": "Angel Ventures",
         "investor_firm": None,
         "investment_amount": 500_000.0,
+        "investment_amount_min": None,
+        "investment_amount_max": None,
     }
 
 

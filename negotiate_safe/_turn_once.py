@@ -97,6 +97,8 @@ async def _run(args: argparse.Namespace) -> int:
         constraints = module.build_founder_constraints(
             cap_min=ns.founder_cap_min,
             cap_max=ns.founder_cap_max,
+            investment_amount_min=ns.founder_investment_amount_min,
+            investment_amount_max=ns.founder_investment_amount_max,
             discount_min=ns.founder_discount_min,
             pro_rata_required=ns.founder_pro_rata_required,
             mfn_required=ns.founder_mfn_required,
@@ -105,6 +107,8 @@ async def _run(args: argparse.Namespace) -> int:
         constraints = module.build_investor_constraints(
             cap_min=ns.investor_cap_min,
             cap_max=ns.investor_cap_max,
+            investment_amount_min=ns.investor_investment_amount_min,
+            investment_amount_max=ns.investor_investment_amount_max,
             discount_min=ns.investor_discount_min,
             discount_max=ns.investor_discount_max,
             pro_rata_required=ns.investor_pro_rata_required,
@@ -117,7 +121,7 @@ async def _run(args: argparse.Namespace) -> int:
         candidate["from"] = role
         candidate["negotiation_id"] = schema.negotiation_id
         candidate["round"] = state.current_round
-        return module.validate_offer_structure(candidate, schema)
+        return module.validate_offer_structure(candidate, schema, previous_offer=state.last_offer())
 
     def _validate_constraints(terms: dict) -> tuple[bool, list[str]]:
         return module.validate_apoa_constraints(terms, constraints)

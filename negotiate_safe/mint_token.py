@@ -24,6 +24,7 @@ REQUIRED_CONSTRAINTS = (
     "valuation_cap_min",
     "valuation_cap_max",
     "discount_min",
+    "discount_max",
     "pro_rata",
     "mfn",
 )
@@ -75,6 +76,21 @@ def slugify(s: str) -> str:
     return "".join(c.lower() if c.isalnum() else "-" for c in s).strip("-")
 
 
+def _resolve_investment_amount(constraints: dict, fallback: float) -> float:
+    return float(
+        constraints.get("investment_amount")
+        or constraints.get("investment_amount_min")
+        or fallback
+    )
+
+
+def _resolve_investment_amount_bounds(constraints: dict, fallback: float) -> tuple[float, float]:
+    amount = _resolve_investment_amount(constraints, fallback)
+    amount_min = float(constraints.get("investment_amount_min") or amount)
+    amount_max = float(constraints.get("investment_amount_max") or amount)
+    return amount_min, amount_max
+
+
 def _resolve_investor_constraints(args) -> dict:
     """Resolve investor constraints from --investor-constraints-json, env vars, or defaults."""
     if args.investor_constraints_json:
@@ -84,14 +100,18 @@ def _resolve_investor_constraints(args) -> dict:
         return {
             "cap_min": int(ic.get("valuation_cap_min", ic.get("cap_min", 6_000_000))),
             "cap_max": int(ic.get("valuation_cap_max", ic.get("cap_max", 10_000_000))),
+            "investment_amount_min": float(ic.get("investment_amount_min") or ic.get("investment_amount") or 500_000.0),
+            "investment_amount_max": float(ic.get("investment_amount_max") or ic.get("investment_amount") or 500_000.0),
             "discount_min": float(ic.get("discount_min", 0.15)),
-            "discount_max": float(max(0.25, ic.get("discount_min", 0.15))),
+            "discount_max": float(ic.get("discount_max", ic.get("discount_min", 0.15))),
             "pro_rata_required": pro_rata,
             "mfn_required": mfn,
         }
     return {
         "cap_min": int(os.environ.get("INVESTOR_CAP_MIN", "6000000")),
         "cap_max": int(os.environ.get("INVESTOR_CAP_MAX", "10000000")),
+        "investment_amount_min": float(os.environ.get("INVESTOR_INVESTMENT_AMOUNT_MIN", os.environ.get("INVESTMENT_AMOUNT", "500000"))),
+        "investment_amount_max": float(os.environ.get("INVESTOR_INVESTMENT_AMOUNT_MAX", os.environ.get("INVESTMENT_AMOUNT", "500000"))),
         "discount_min": float(os.environ.get("INVESTOR_DISCOUNT_MIN", "0.15")),
         "discount_max": float(os.environ.get("INVESTOR_DISCOUNT_MAX", "0.25")),
         "pro_rata_required": os.environ.get("INVESTOR_PRO_RATA_REQUIRED", "false").lower() in ("true", "1", "yes"),
@@ -118,6 +138,8 @@ def main() -> int:
         sys.stderr.write("Provide --constraints-json or --constraints-file.\n")
         return 2
     constraints = validate_constraints(constraints_raw)
+    investment_amount = _resolve_investment_amount(constraints, args.investment_amount)
+    investment_amount_min, investment_amount_max = _resolve_investment_amount_bounds(constraints, args.investment_amount)
 
     negotiation_id = args.negotiation_id or f"neg_{uuid.uuid4().hex[:12]}"
     out_dir = repo / "negotiations" / negotiation_id
@@ -129,9 +151,7 @@ def main() -> int:
     pro_rata_required = constraints["pro_rata"] == "required"
     mfn_required = constraints["mfn"] == "required"
     service = f"safe:{slugify(args.company_name)}:{negotiation_id}"
-    # Upstream requires a max discount. The user only specified a floor;
-    # cap the ceiling at 25% or the floor, whichever is higher.
-    discount_max = max(0.25, float(constraints["discount_min"]))
+    discount_max = float(constraints.get("discount_max", constraints["discount_min"]))
 
     cmd = [
         sys.executable, str(repo / "create_tokens.py"),
@@ -143,9 +163,11 @@ def main() -> int:
         "--founder-name", args.founder_name,
         "--founder-title", args.founder_title,
         "--investor-name", args.investor_name,
-        "--investment-amount", str(args.investment_amount),
+        "--investment-amount", str(investment_amount),
         "--founder-cap-min", str(constraints["valuation_cap_min"]),
         "--founder-cap-max", str(constraints["valuation_cap_max"]),
+        "--founder-investment-amount-min", str(investment_amount_min),
+        "--founder-investment-amount-max", str(investment_amount_max),
         "--founder-discount-min", str(constraints["discount_min"]),
         "--founder-discount-max", str(discount_max),
         "--founder-pro-rata-required", "true" if pro_rata_required else "false",
@@ -163,10 +185,12 @@ def main() -> int:
         ic_mfn = "true" if ic.get("mfn") == "required" else (
             ic.get("mfn_required", "false") if isinstance(ic.get("mfn_required"), str)
             else ("true" if ic.get("mfn_required") else "false"))
-        ic_discount_max = str(max(0.25, float(ic.get("discount_min", 0.15))))
+        ic_discount_max = str(float(ic.get("discount_max", ic.get("discount_min", 0.15))))
         cmd.extend([
             "--investor-cap-min", str(ic.get("valuation_cap_min", ic.get("cap_min", 6_000_000))),
             "--investor-cap-max", str(ic.get("valuation_cap_max", ic.get("cap_max", 10_000_000))),
+            "--investor-investment-amount-min", str(ic.get("investment_amount_min") or ic.get("investment_amount") or investment_amount),
+            "--investor-investment-amount-max", str(ic.get("investment_amount_max") or ic.get("investment_amount") or investment_amount),
             "--investor-discount-min", str(ic.get("discount_min", 0.15)),
             "--investor-discount-max", ic_discount_max,
             "--investor-pro-rata-required", ic_pro,
@@ -176,6 +200,8 @@ def main() -> int:
         investor_env_flags = {
             "INVESTOR_CAP_MIN": "--investor-cap-min",
             "INVESTOR_CAP_MAX": "--investor-cap-max",
+            "INVESTOR_INVESTMENT_AMOUNT_MIN": "--investor-investment-amount-min",
+            "INVESTOR_INVESTMENT_AMOUNT_MAX": "--investor-investment-amount-max",
             "INVESTOR_DISCOUNT_MIN": "--investor-discount-min",
             "INVESTOR_DISCOUNT_MAX": "--investor-discount-max",
             "INVESTOR_PRO_RATA_REQUIRED": "--investor-pro-rata-required",
@@ -207,6 +233,8 @@ def main() -> int:
         "founder_constraints": {
             "cap_min": constraints["valuation_cap_min"],
             "cap_max": constraints["valuation_cap_max"],
+            "investment_amount_min": investment_amount_min,
+            "investment_amount_max": investment_amount_max,
             "discount_min": float(constraints["discount_min"]),
             "discount_max": discount_max,
             "pro_rata_required": pro_rata_required,

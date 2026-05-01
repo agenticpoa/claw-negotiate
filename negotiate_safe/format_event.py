@@ -31,7 +31,7 @@ from urllib.parse import quote
 
 
 def fmt_dollars(n: float | int | None) -> str:
-    """Smart-shorten dollar amounts: $8M, $12.5M, $500K, $1,000, $12."""
+    """Smart-shorten dollar amounts without hiding negotiated precision."""
     if n is None:
         return "-"
     n = int(n)
@@ -42,7 +42,10 @@ def fmt_dollars(n: float | int | None) -> str:
     if n >= 1_000_000:
         if n % 1_000_000 == 0:
             return f"{sign}${n // 1_000_000}M"
-        return f"{sign}${n / 1_000_000:.1f}M"
+        if n % 10_000 == 0:
+            millions = f"{n / 1_000_000:.2f}".rstrip("0").rstrip(".")
+            return f"{sign}${millions}M"
+        return f"{sign}${n:,}"
     if n >= 10_000 and n % 1000 == 0:
         return f"{sign}${n // 1000}K"
     return f"{sign}${n:,}"
@@ -108,6 +111,27 @@ def _clean_bot_handle(value: Any) -> str:
     handle = str(value or "").strip()
     return "" if handle.lower() in _PLACEHOLDER_BOT_HANDLES else handle
 
+
+def _format_check_bounds(c: dict[str, Any]) -> str | None:
+    amount_min = c.get("investment_amount_min")
+    amount_max = c.get("investment_amount_max")
+    if amount_min is not None and amount_max is not None:
+        return fmt_dollars(amount_min) + " – " + fmt_dollars(amount_max)
+    amount = c.get("investment_amount")
+    if amount is not None:
+        return fmt_dollars(amount)
+    return None
+
+
+def _format_discount_bounds(c: dict[str, Any]) -> str | None:
+    disc_min = c.get("discount_min")
+    disc_max = c.get("discount_max", disc_min)
+    if disc_min is None:
+        return None
+    if disc_max is None or disc_max == disc_min:
+        return fmt_percent(disc_min)
+    return fmt_percent(disc_min) + " – " + fmt_percent(disc_max)
+
 # ──────────────────────────────────────────────────────────────
 # Wrapper-side events
 # ──────────────────────────────────────────────────────────────
@@ -164,20 +188,26 @@ def format_confirm(event: dict[str, Any]) -> str:
             f"{_b(counterparty_label + ':')} {_escape_html(counterparty_line)}"
         )
 
+    check_bounds = _format_check_bounds(c)
+    discount_bounds = _format_discount_bounds(c)
     lines = [
         "\n".join(identity_lines),
         "",
         f"Your {agent_label} will only agree to:",
         "",
         f"• Valuation cap: {_b(fmt_dollars(c['valuation_cap_min']) + ' – ' + fmt_dollars(c['valuation_cap_max']))}",
-        f"• Discount: {_b('at least ' + fmt_percent(c['discount_min']))}",
+    ]
+    if check_bounds:
+        lines.append(f"• Check size: {_b(check_bounds)}")
+    lines.extend([
+        f"• Discount: {_b(discount_bounds or fmt_percent(c['discount_min']))}",
         f"• Pro-rata rights: {_b(labels[c['pro_rata']])}",
         f"• MFN: {_b(mfn_labels[c['mfn']])}",
         "",
         "You will personally review and sign the final SAFE.",
         "",
         f"Reply {_code('GO')} to continue, or send edits.",
-    ]
+    ])
     return "\n".join(lines)
 
 
@@ -194,6 +224,7 @@ def format_authorized(event: dict[str, Any]) -> str:
     cap_min = c.get("valuation_cap_min")
     cap_max = c.get("valuation_cap_max")
     disc_min = c.get("discount_min")
+    discount_bounds = _format_discount_bounds(c)
     pro_rata = (c.get("pro_rata") or "indifferent").lower()
     mfn = (c.get("mfn") or "indifferent").lower()
 
@@ -218,8 +249,11 @@ def format_authorized(event: dict[str, Any]) -> str:
         lines.append(
             f"• Valuation cap: {_b(fmt_dollars(cap_min) + ' – ' + fmt_dollars(cap_max))}"
         )
+    check_bounds = _format_check_bounds(c)
+    if check_bounds:
+        lines.append(f"• Check size: {_b(check_bounds)}")
     if disc_min is not None:
-        lines.append(f"• Discount: {_b('at least ' + fmt_percent(disc_min))}")
+        lines.append(f"• Discount: {_b(discount_bounds or fmt_percent(disc_min))}")
     lines.append(f"• Pro-rata rights: {_b(pr_labels.get(pro_rata, pro_rata))}")
     lines.append(f"• MFN: {_b(pr_labels.get(mfn, mfn))}")
     lines.extend([
@@ -264,6 +298,7 @@ def format_offer(
 
     terms = event.get("terms") or {}
     cap = terms.get("valuation_cap")
+    amount = terms.get("investment_amount")
     discount = terms.get("discount_rate")
 
     mode = (constraints or {}).get("mode") if constraints else None
@@ -286,8 +321,12 @@ def format_offer(
         cap_min = constraints.get("valuation_cap_min")
         cap_max = constraints.get("valuation_cap_max")
         disc_min = constraints.get("discount_min")
+        disc_max = constraints.get("discount_max", disc_min)
         cap_range = f" (your range: {fmt_dollars(cap_min)}–{fmt_dollars(cap_max)})" if cap_min is not None else ""
-        disc_range = f" (your min: {fmt_percent(disc_min)})" if disc_min is not None else ""
+        if disc_min is not None and disc_max is not None and disc_max != disc_min:
+            disc_range = f" (your range: {fmt_percent(disc_min)}–{fmt_percent(disc_max)})"
+        else:
+            disc_range = f" (your term: {fmt_percent(disc_min)})" if disc_min is not None else ""
     else:
         cap_range = disc_range = ""
 
@@ -295,6 +334,10 @@ def format_offer(
         "",
         "Terms:",
         f"• Valuation cap: {_b(fmt_dollars(cap))}{_escape_html(cap_range)}",
+    ])
+    if amount is not None:
+        lines.append(f"• Check size: {_b(fmt_dollars(amount))}")
+    lines.extend([
         f"• Discount: {_b(fmt_percent(discount))}{_escape_html(disc_range)}",
         f"• Pro-rata rights: {_b(_yn(terms.get('pro_rata')))}",
         f"• MFN: {_b(_yn(terms.get('mfn')))}",
@@ -311,10 +354,16 @@ def _format_accept(event: dict[str, Any]) -> str:
     between the two; user sees the deal land the instant it's struck.
     """
     terms = event.get("terms") or {}
+    amount = terms.get("investment_amount")
+    amount_line = (
+        f"• Check size: {_b(fmt_dollars(amount))}\n"
+        if amount is not None else ""
+    )
     return (
         f"\U0001f91d {_b('Deal reached')}\n\n"  # 🤝
         "Both OpenClaws agreed to these terms:\n\n"
         f"• Valuation cap: {_b(fmt_dollars(terms.get('valuation_cap')))}\n"
+        f"{amount_line}"
         f"• Discount: {_b(fmt_percent(terms.get('discount_rate')))}\n"
         f"• Pro-rata rights: {_b(_yn(terms.get('pro_rata')))}\n"
         f"• MFN: {_b(_yn(terms.get('mfn')))}\n\n"
@@ -417,6 +466,7 @@ def format_signing(event: dict[str, Any]) -> str:
 def format_signed(event: dict[str, Any]) -> str:
     terms = event.get("terms") or {}
     cap = terms.get("valuation_cap")
+    amount = terms.get("investment_amount")
     discount = terms.get("discount_rate")
     pro_rata = terms.get("pro_rata")
     mfn = terms.get("mfn")
@@ -431,6 +481,8 @@ def format_signed(event: dict[str, Any]) -> str:
         ]
         if cap is not None:
             lines.append(f"• Valuation cap: {_b(fmt_dollars(cap))}")
+        if amount is not None:
+            lines.append(f"• Check size: {_b(fmt_dollars(amount))}")
         if discount is not None:
             lines.append(f"• Discount: {_b(fmt_percent(discount))}")
         if pro_rata is not None:
@@ -634,7 +686,7 @@ def format_session_expired(event: dict[str, Any]) -> str:
     """
     return (
         "\u23f0 " + _b("Authorization expired") + "\n\n"  # ⏰
-        "No SAFE was executed. This session is now closed because the APOA "
+        "No SAFE was executed. This mid-flight session is now closed because the APOA "
         "authorization expired before both parties signed.\n\n"
         "To continue, start a new SAFE negotiation with the same terms."
     )
@@ -985,12 +1037,12 @@ def format_investor_waiting_heartbeat(event: dict[str, Any]) -> str:
 
 def format_turn_heartbeat(event: dict[str, Any]) -> str:
     role = (event.get("role") or "agent").strip().lower()
-    label = "Founder OpenClaw" if role == "founder" else (
-        "Investor OpenClaw" if role == "investor" else "OpenClaw"
+    label = "Founder OC" if role == "founder" else (
+        "Investor OC" if role == "investor" else "OC"
     )
     return (
-        f"⏳ {_b(label + ' is preparing the next offer…')}\n\n"
-        "Your OpenClaw is reviewing the latest terms before replying."
+        f"⏳ {_b(label + ' is drafting an offer…')}\n\n"
+        "One moment while it works within the authorized terms."
     )
 
 

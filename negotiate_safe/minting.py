@@ -11,6 +11,8 @@ from typing import Mapping
 AI_FLAG_SUFFIXES = {
     "CAP_MIN": "cap-min",
     "CAP_MAX": "cap-max",
+    "INVESTMENT_AMOUNT_MIN": "investment-amount-min",
+    "INVESTMENT_AMOUNT_MAX": "investment-amount-max",
     "DISCOUNT_MIN": "discount-min",
     "DISCOUNT_MAX": "discount-max",
     "PRO_RATA_REQUIRED": "pro-rata-required",
@@ -152,6 +154,23 @@ def build_service_name(company: str, negotiation_id: str) -> str:
     return f"safe:{slugify_company(company)}:{negotiation_id}"
 
 
+def resolve_investment_amount(constraints: Mapping[str, object]) -> float:
+    """Return the legacy single check size for upstream SAFE generation."""
+    amount = (
+        constraints.get("investment_amount")
+        or constraints.get("investment_amount_min")
+        or 500_000.0
+    )
+    return float(amount)
+
+
+def resolve_investment_amount_bounds(constraints: Mapping[str, object]) -> tuple[float, float]:
+    amount = resolve_investment_amount(constraints)
+    amount_min = float(constraints.get("investment_amount_min") or amount)
+    amount_max = float(constraints.get("investment_amount_max") or amount)
+    return amount_min, amount_max
+
+
 def build_create_tokens_cmd(
     *,
     repo: str | Path,
@@ -174,8 +193,9 @@ def build_create_tokens_cmd(
     pro_rata_required = constraints.get("pro_rata") == "required"
     mfn_required = constraints.get("mfn") == "required"
     discount_min = float(constraints.get("discount_min", 0.20))
-    discount_max = discount_min + 0.10
-    amount = constraints.get("investment_amount") or 500_000.0
+    discount_max = float(constraints.get("discount_max", discount_min))
+    amount = resolve_investment_amount(constraints)
+    amount_min, amount_max = resolve_investment_amount_bounds(constraints)
 
     cmd = [
         python_executable or sys.executable,
@@ -192,6 +212,8 @@ def build_create_tokens_cmd(
         "--investment-amount", str(amount),
         f"{plan.user_flag_prefix}cap-min", str(constraints["valuation_cap_min"]),
         f"{plan.user_flag_prefix}cap-max", str(constraints["valuation_cap_max"]),
+        f"{plan.user_flag_prefix}investment-amount-min", str(amount_min),
+        f"{plan.user_flag_prefix}investment-amount-max", str(amount_max),
         f"{plan.user_flag_prefix}discount-min", str(constraints["discount_min"]),
         f"{plan.user_flag_prefix}discount-max", str(discount_max),
         f"{plan.user_flag_prefix}pro-rata-required",

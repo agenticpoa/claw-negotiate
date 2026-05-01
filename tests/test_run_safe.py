@@ -75,7 +75,7 @@ class TestPrepare:
         assert "Reading your negotiation terms" in first_msg
         # Second call: the confirm card
         second_msg = sender.call_args_list[1].kwargs.get("message") or ""
-        assert "Review your founder authorization" in second_msg
+        assert "Review your Founder OpenClaw authorization" in second_msg
         assert "• Valuation cap:" in second_msg
         assert "<code>GO</code>" in second_msg
 
@@ -247,6 +247,70 @@ class TestPrepare:
         config = json.loads((tmp_path / "out" / "config.json").read_text())
         assert config["constraints"]["investor_name"] == "Nora Vassileva"
         assert config["constraints"]["investor_firm"] == "SD Fund"
+
+    def test_investor_join_identity_in_multiline_message_skips_profile_prompt(
+        self, tmp_path, monkeypatch,
+    ):
+        monkeypatch.setenv("NEGOTIATE_SAFE_BOT_ROLE", "investor")
+        monkeypatch.delenv("INVESTOR_NAME", raising=False)
+        monkeypatch.delenv("INVESTOR_FIRM", raising=False)
+        monkeypatch.setattr(rs, "IDENTITY_SENTINEL_PATH", tmp_path / "pending.txt")
+        sender = MagicMock()
+        constraints = {
+            "role": "investor",
+            "mode": "two_party",
+            "session_code": "INV-94X34",
+            "valuation_cap_min": 15_000_000,
+            "valuation_cap_max": 30_000_000,
+            "discount_min": 0,
+            "pro_rata": "required",
+            "mfn": "indifferent",
+            "company_name": None,
+            "founder_name": None,
+            "founder_title": None,
+            "investor_name": None,
+            "investor_firm": None,
+            "investment_amount": 250_000.0,
+            "investment_amount_min": 250_000.0,
+            "investment_amount_max": 300_000.0,
+        }
+        sess_payload = {
+            "session_id": "session_neg_abc",
+            "session_code": "INV-94X34",
+            "status": "open",
+            "metadata_public": {
+                "company_name": "Avocado",
+                "founder_name": "Juan Figuera",
+                "founder_title": "CEO",
+            },
+            "members": [{"role": "founder", "apoa_pubkey_pem": "FOUNDER_PEM"}],
+        }
+        persist = MagicMock(return_value=[])
+
+        with patch.object(rs, "_persist_env_updates", persist), \
+             patch.object(rs, "extract_constraints", return_value=constraints), \
+             patch.object(rs, "_fetch_session_for_join", return_value=(sess_payload, None)), \
+             patch.object(rs, "resolve_chat_id", return_value="12345"):
+            rc = rs.run_prepare(
+                "Joining INV-94X34 via @AgenticPOA_bot, I am Nora Vassileva at SD Capital.\n\n"
+                "Cap: $15M-$30M post.\n"
+                "Check: $250k-$300k.\n"
+                "Pro rata: required.",
+                str(tmp_path / "out"),
+                chat_id_flag="12345",
+                sender=sender,
+            )
+
+        assert rc == 0
+        persist.assert_called_once_with({
+            "INVESTOR_NAME": "Nora Vassileva",
+            "INVESTOR_FIRM": "SD Capital",
+        })
+        messages = "\n".join(c.kwargs.get("message") or "" for c in sender.call_args_list)
+        assert "Before we negotiate" not in messages
+        config = json.loads((tmp_path / "out" / "config.json").read_text())
+        assert config["constraints"]["investor_name"] == "Nora Vassileva"
+        assert config["constraints"]["investor_firm"] == "SD Capital"
 
     def test_enriches_founder_profile_and_requires_counterparty_identity(
         self, tmp_path, monkeypatch,

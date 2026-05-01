@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import projector
+import delivery_store
 from artifacts import build_artifact_uri
 from format_event import format_event, group_setup_reply_markup
 from reconcile import has_executed_delivered, mark_executed_delivered
@@ -255,6 +256,9 @@ def _run_turn_helper(
     heartbeat_sender=None,
     heartbeat_chat_id: str | int | None = None,
     heartbeat_role: str = "",
+    heartbeat_session_id: str = "",
+    heartbeat_delivery_client=None,
+    heartbeat_round: int | None = None,
     heartbeat_after: float = 25.0,
     still_working_after: float = 90.0,
 ) -> tuple[int, list[dict]]:
@@ -275,6 +279,9 @@ def _run_turn_helper(
             heartbeat_sender=heartbeat_sender,
             heartbeat_chat_id=heartbeat_chat_id,
             heartbeat_role=heartbeat_role,
+            heartbeat_session_id=heartbeat_session_id,
+            heartbeat_delivery_client=heartbeat_delivery_client,
+            heartbeat_round=heartbeat_round,
             heartbeat_after=heartbeat_after,
             still_working_after=still_working_after,
         )
@@ -377,6 +384,9 @@ def _run_turn_helper_with_heartbeats(
     heartbeat_sender=None,
     heartbeat_chat_id: str | int | None = None,
     heartbeat_role: str = "",
+    heartbeat_session_id: str = "",
+    heartbeat_delivery_client=None,
+    heartbeat_round: int | None = None,
     heartbeat_after: float = 25.0,
     still_working_after: float = 90.0,
 ) -> subprocess.CompletedProcess:
@@ -400,7 +410,27 @@ def _run_turn_helper_with_heartbeats(
         ):
             body = format_event({"type": "turn_heartbeat", "role": heartbeat_role})
             if body:
-                heartbeat_sender(heartbeat_chat_id, message=body)
+                result = heartbeat_sender(heartbeat_chat_id, message=body)
+                message_id = str(getattr(result, "message_id", "") or "")
+                if message_id and heartbeat_session_id and heartbeat_round is not None:
+                    key = projector.heartbeat_delivery_key(heartbeat_role, heartbeat_round)
+                    if heartbeat_delivery_client is None:
+                        delivery_store.mark_delivery(
+                            heartbeat_session_id,
+                            key,
+                            str(heartbeat_chat_id),
+                            message_id=message_id,
+                        )
+                    else:
+                        try:
+                            heartbeat_delivery_client.claim_delivery(
+                                heartbeat_session_id,
+                                key,
+                                target=str(heartbeat_chat_id),
+                                message_id=message_id,
+                            )
+                        except Exception:
+                            pass
             heartbeat_sent = True
         if (
             heartbeat_sender
@@ -539,6 +569,9 @@ def reconcile_state(
                     heartbeat_sender=sender,
                     heartbeat_chat_id=group_chat_id,
                     heartbeat_role=role,
+                    heartbeat_session_id=session_id,
+                    heartbeat_delivery_client=client,
+                    heartbeat_round=len(rows),
                 )
                 if rc != 0:
                     expired = _project_and_close_expired_session(
@@ -719,6 +752,9 @@ def reconcile_state(
             heartbeat_sender=sender,
             heartbeat_chat_id=group_chat_id,
             heartbeat_role=role,
+            heartbeat_session_id=session_id,
+            heartbeat_delivery_client=client,
+            heartbeat_round=len(rows),
         )
         if rc != 0:
             write_trace(output_dir, "orchestrator.turn_failed", negotiation_id=negotiation_id, role=role, returncode=rc)

@@ -218,7 +218,8 @@ def _embedded_investor_identity(message: str) -> dict | None:
         return None
     m = re.search(
         r"\bI\s*(?:am|'m)\s+(.+?)\s+(?:at|from)\s+(.+?)"
-        r"(?=,\s*(?:cap|valuation|discount|pro[- ]?rata|mfn|invest)|[.!?]?$)",
+        r"(?=(?:[,.!?]\s*)?"
+        r"(?:cap|valuation|discount|pro[- ]?rata|mfn|invest|investment|check)\b|[.!?]?\s*$)",
         message,
         re.IGNORECASE,
     )
@@ -821,6 +822,8 @@ def run_prepare(
             write_trace(out, "prepare.parse_error", phase="prepare", error=str(e), chat_id=chat_id)
             return 1
 
+        if constraints.get("discount_max") is None and constraints.get("discount_min") is not None:
+            constraints["discount_max"] = constraints["discount_min"]
         required_fields = ("valuation_cap_min", "valuation_cap_max", "discount_min", "pro_rata", "mfn")
         missing = [f for f in required_fields if constraints.get(f) is None]
         if missing:

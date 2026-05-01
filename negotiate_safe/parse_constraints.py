@@ -15,7 +15,7 @@ from typing import Any
 
 SYSTEM_PROMPT = """You extract structured SAFE negotiation constraints from a user's natural-language message. The user may be negotiating as the FOUNDER (raising money for their company) or as the INVESTOR (evaluating an investment in someone else's company).
 
-Return ONLY a JSON object (no prose, no code fences). It MUST contain ALL 14 of these fields — never omit any, especially `role` and `mode`:
+Return ONLY a JSON object (no prose, no code fences). It MUST contain ALL 18 of these fields — never omit any, especially `role` and `mode`:
 
 {
   "role": "founder" | "investor",
@@ -25,6 +25,7 @@ Return ONLY a JSON object (no prose, no code fences). It MUST contain ALL 14 of 
   "valuation_cap_min": <integer dollars>,
   "valuation_cap_max": <integer dollars>,
   "discount_min": <decimal 0-1>,
+  "discount_max": <decimal 0-1>,
   "pro_rata": "required" | "preferred" | "indifferent",
   "mfn": "required" | "preferred" | "indifferent",
   "company_name": <string or null>,
@@ -32,7 +33,9 @@ Return ONLY a JSON object (no prose, no code fences). It MUST contain ALL 14 of 
   "founder_title": <string or null>,
   "investor_name": <string or null>,
   "investor_firm": <string or null>,
-  "investment_amount": <float dollars or null>
+  "investment_amount": <float dollars or null>,
+  "investment_amount_min": <float dollars or null>,
+  "investment_amount_max": <float dollars or null>
 }
 
 CRITICAL: `role` and `mode` are ALWAYS REQUIRED. Every response must include role as "founder" or "investor" (lowercase) and mode as "demo" or "two_party" (lowercase). Never omit either.
@@ -68,6 +71,26 @@ Identity fields (strings or null):
   `investor_firm` is "Babes Fund".
 Use null for any field the user did not mention; do not invent names.
 
+Investment/check size rules:
+- Extract a single check size into `investment_amount`.
+- Extract a check size range into `investment_amount_min` and `investment_amount_max`.
+- For a range, set `investment_amount` to the lower bound for compatibility with
+  legacy SAFE generation that still requires one initial amount.
+- Treat "check", "check size", "investment", "invest", and "$X check" as
+  investment amount signals.
+
+Discount rules:
+- Extract a discount range such as "Discount: 5%-10%" into `discount_min`
+  and `discount_max`.
+- A single plain discount such as "Discount: 0%" or "10% discount" means the
+  exact authorized discount, so set `discount_min` and `discount_max` to the
+  same value.
+- Directional wording such as "at least 10% discount", "10% discount floor",
+  or "minimum 10% discount" means a lower bound. Set `discount_min` to that
+  value and `discount_max` to 1.0 unless the user also gives an upper bound.
+- Directional wording such as "up to 10% discount" means an upper bound. Set
+  `discount_min` to 0 and `discount_max` to that value.
+
 Role detection rules:
 - If user says "my SAFE", "raise", "on my behalf", uses "my company" language, or mentions the investor as a third party → "founder"
 - If user says "evaluate", "review", "investing in", "as an investor", "from this company" language, or mentions the company as the counterparty → "investor"
@@ -83,51 +106,54 @@ Other rules:
 Founder-side examples (demo mode — AI plays the investor):
 
 Input: "Negotiate my SAFE. I'm Jane Doe, CEO of Acme Corp, raising from Bay Capital (Mark Stone). Cap $8M-$12M, 20% discount, pro-rata, MFN preferred. $500k investment."
-Output: {"role": "founder", "mode": "demo", "session_code": null, "founder_bot_handle": null, "valuation_cap_min": 8000000, "valuation_cap_max": 12000000, "discount_min": 0.20, "pro_rata": "required", "mfn": "preferred", "company_name": "Acme Corp", "founder_name": "Jane Doe", "founder_title": "CEO", "investor_name": "Mark Stone", "investor_firm": "Bay Capital", "investment_amount": 500000.0}
+Output: {"role": "founder", "mode": "demo", "session_code": null, "founder_bot_handle": null, "valuation_cap_min": 8000000, "valuation_cap_max": 12000000, "discount_min": 0.20, "discount_max": 0.20, "pro_rata": "required", "mfn": "preferred", "company_name": "Acme Corp", "founder_name": "Jane Doe", "founder_title": "CEO", "investor_name": "Mark Stone", "investor_firm": "Bay Capital", "investment_amount": 500000.0, "investment_amount_min": null, "investment_amount_max": null}
 
 Input: "SAFE for TechCo. Looking for $150M cap, no less than $120M. Discount 15%. Pro-rata is a must. Investment: $1.5M."
-Output: {"role": "founder", "mode": "demo", "session_code": null, "founder_bot_handle": null, "valuation_cap_min": 120000000, "valuation_cap_max": 150000000, "discount_min": 0.15, "pro_rata": "required", "mfn": "indifferent", "company_name": "TechCo", "founder_name": null, "founder_title": null, "investor_name": null, "investor_firm": null, "investment_amount": 1500000.0}
+Output: {"role": "founder", "mode": "demo", "session_code": null, "founder_bot_handle": null, "valuation_cap_min": 120000000, "valuation_cap_max": 150000000, "discount_min": 0.15, "discount_max": 0.15, "pro_rata": "required", "mfn": "indifferent", "company_name": "TechCo", "founder_name": null, "founder_title": null, "investor_name": null, "investor_firm": null, "investment_amount": 1500000.0, "investment_amount_min": null, "investment_amount_max": null}
 
 Input: "Cap no lower than $5M, up to $10M. Twenty percent discount minimum. No strong feelings on pro-rata or MFN. $250,000."
-Output: {"role": "founder", "mode": "demo", "session_code": null, "founder_bot_handle": null, "valuation_cap_min": 5000000, "valuation_cap_max": 10000000, "discount_min": 0.20, "pro_rata": "preferred", "mfn": "indifferent", "company_name": null, "founder_name": null, "founder_title": null, "investor_name": null, "investor_firm": null, "investment_amount": 250000.0}
+Output: {"role": "founder", "mode": "demo", "session_code": null, "founder_bot_handle": null, "valuation_cap_min": 5000000, "valuation_cap_max": 10000000, "discount_min": 0.20, "discount_max": 0.20, "pro_rata": "preferred", "mfn": "indifferent", "company_name": null, "founder_name": null, "founder_title": null, "investor_name": null, "investor_firm": null, "investment_amount": 250000.0, "investment_amount_min": null, "investment_amount_max": null}
 
 Founder-side two-party examples (AI does NOT play the investor; a real investor joins separately):
 
 Input: "Live negotiation: I'm Juan Figuera, CEO of APOA Inc. My investor is Alex Smith at Central Park Labs and will join separately. Cap $20M-$50M, 10% discount, pro-rata required, MFN preferred. $500K."
-Output: {"role": "founder", "mode": "two_party", "session_code": null, "founder_bot_handle": null, "valuation_cap_min": 20000000, "valuation_cap_max": 50000000, "discount_min": 0.10, "pro_rata": "required", "mfn": "preferred", "company_name": "APOA Inc", "founder_name": "Juan Figuera", "founder_title": "CEO", "investor_name": "Alex Smith", "investor_firm": "Central Park Labs", "investment_amount": 500000.0}
+Output: {"role": "founder", "mode": "two_party", "session_code": null, "founder_bot_handle": null, "valuation_cap_min": 20000000, "valuation_cap_max": 50000000, "discount_min": 0.10, "discount_max": 0.10, "pro_rata": "required", "mfn": "preferred", "company_name": "APOA Inc", "founder_name": "Juan Figuera", "founder_title": "CEO", "investor_name": "Alex Smith", "investor_firm": "Central Park Labs", "investment_amount": 500000.0, "investment_amount_min": null, "investment_amount_max": null}
 
 Input: "Real negotiation with my investor. Cap $8M-$12M, 20% discount, pro-rata, MFN preferred. $500K. I'll share the code with them."
-Output: {"role": "founder", "mode": "two_party", "session_code": null, "founder_bot_handle": null, "valuation_cap_min": 8000000, "valuation_cap_max": 12000000, "discount_min": 0.20, "pro_rata": "required", "mfn": "preferred", "company_name": null, "founder_name": null, "founder_title": null, "investor_name": null, "investor_firm": null, "investment_amount": 500000.0}
+Output: {"role": "founder", "mode": "two_party", "session_code": null, "founder_bot_handle": null, "valuation_cap_min": 8000000, "valuation_cap_max": 12000000, "discount_min": 0.20, "discount_max": 0.20, "pro_rata": "required", "mfn": "preferred", "company_name": null, "founder_name": null, "founder_title": null, "investor_name": null, "investor_firm": null, "investment_amount": 500000.0, "investment_amount_min": null, "investment_amount_max": null}
 
 Input: "Live negotiation with Nora at Babes Fund. She'll join separately and I'll share the invitation code. Cap $30M to $40M, 10% discount, pro-rata required."
-Output: {"role": "founder", "mode": "two_party", "session_code": null, "founder_bot_handle": null, "valuation_cap_min": 30000000, "valuation_cap_max": 40000000, "discount_min": 0.10, "pro_rata": "required", "mfn": "indifferent", "company_name": null, "founder_name": null, "founder_title": null, "investor_name": "Nora", "investor_firm": "Babes Fund", "investment_amount": null}
+Output: {"role": "founder", "mode": "two_party", "session_code": null, "founder_bot_handle": null, "valuation_cap_min": 30000000, "valuation_cap_max": 40000000, "discount_min": 0.10, "discount_max": 0.10, "pro_rata": "required", "mfn": "indifferent", "company_name": null, "founder_name": null, "founder_title": null, "investor_name": "Nora", "investor_firm": "Babes Fund", "investment_amount": null, "investment_amount_min": null, "investment_amount_max": null}
+
+Input: "Live negotiation for Series Seed SAFE with Nora Vassileva (SD Capital). Cap: $15M-$30M post. Check: $250k-$750k. Pro rata: required. Discount: 0%"
+Output: {"role": "founder", "mode": "two_party", "session_code": null, "founder_bot_handle": null, "valuation_cap_min": 15000000, "valuation_cap_max": 30000000, "discount_min": 0.0, "discount_max": 0.0, "pro_rata": "required", "mfn": "indifferent", "company_name": null, "founder_name": null, "founder_title": null, "investor_name": "Nora Vassileva", "investor_firm": "SD Capital", "investment_amount": 250000.0, "investment_amount_min": 250000.0, "investment_amount_max": 750000.0}
 
 Investor-side examples (demo mode — AI plays the founder):
 
 Input: "As Alex Chen from Blue Fund, evaluate an investment in QuantumLabs (CEO Dr. Rivera). Cap between $20M and $40M, need at least a 15% discount. Pro-rata required, MFN nice to have. $500K check."
-Output: {"role": "investor", "mode": "demo", "session_code": null, "founder_bot_handle": null, "valuation_cap_min": 20000000, "valuation_cap_max": 40000000, "discount_min": 0.15, "pro_rata": "required", "mfn": "preferred", "company_name": "QuantumLabs", "founder_name": "Dr. Rivera", "founder_title": "CEO", "investor_name": "Alex Chen", "investor_firm": "Blue Fund", "investment_amount": 500000.0}
+Output: {"role": "investor", "mode": "demo", "session_code": null, "founder_bot_handle": null, "valuation_cap_min": 20000000, "valuation_cap_max": 40000000, "discount_min": 0.15, "discount_max": 1.0, "pro_rata": "required", "mfn": "preferred", "company_name": "QuantumLabs", "founder_name": "Dr. Rivera", "founder_title": "CEO", "investor_name": "Alex Chen", "investor_firm": "Blue Fund", "investment_amount": 500000.0, "investment_amount_min": null, "investment_amount_max": null}
 
 Input: "Evaluate an investment in Helios Robotics. I can take a cap between $25M and $50M with a 12% discount floor. Pro-rata required, MFN preferred. $500K check."
-Output: {"role": "investor", "mode": "demo", "session_code": null, "founder_bot_handle": null, "valuation_cap_min": 25000000, "valuation_cap_max": 50000000, "discount_min": 0.12, "pro_rata": "required", "mfn": "preferred", "company_name": "Helios Robotics", "founder_name": null, "founder_title": null, "investor_name": null, "investor_firm": null, "investment_amount": 500000.0}
+Output: {"role": "investor", "mode": "demo", "session_code": null, "founder_bot_handle": null, "valuation_cap_min": 25000000, "valuation_cap_max": 50000000, "discount_min": 0.12, "discount_max": 1.0, "pro_rata": "required", "mfn": "preferred", "company_name": "Helios Robotics", "founder_name": null, "founder_title": null, "investor_name": null, "investor_firm": null, "investment_amount": 500000.0, "investment_amount_min": null, "investment_amount_max": null}
 
 Investor joining an existing session (two_party, code supplied):
 
 Input: "Join negotiation INV-7K3X9 as investor. Cap up to $40M, 12% discount floor, pro-rata required. $500K check."
-Output: {"role": "investor", "mode": "two_party", "session_code": "INV-7K3X9", "founder_bot_handle": null, "valuation_cap_min": 0, "valuation_cap_max": 40000000, "discount_min": 0.12, "pro_rata": "required", "mfn": "indifferent", "company_name": null, "founder_name": null, "founder_title": null, "investor_name": null, "investor_firm": null, "investment_amount": 500000.0}
+Output: {"role": "investor", "mode": "two_party", "session_code": "INV-7K3X9", "founder_bot_handle": null, "valuation_cap_min": 0, "valuation_cap_max": 40000000, "discount_min": 0.12, "discount_max": 1.0, "pro_rata": "required", "mfn": "indifferent", "company_name": null, "founder_name": null, "founder_title": null, "investor_name": null, "investor_firm": null, "investment_amount": 500000.0, "investment_amount_min": null, "investment_amount_max": null}
 
 Input: "I'm Mark Stone from Blue Fund. Joining INV-3BQ7K as investor. Cap $15M-$30M, 15% discount, pro-rata required, MFN preferred."
-Output: {"role": "investor", "mode": "two_party", "session_code": "INV-3BQ7K", "founder_bot_handle": null, "valuation_cap_min": 15000000, "valuation_cap_max": 30000000, "discount_min": 0.15, "pro_rata": "required", "mfn": "preferred", "company_name": null, "founder_name": null, "founder_title": null, "investor_name": "Mark Stone", "investor_firm": "Blue Fund", "investment_amount": null}
+Output: {"role": "investor", "mode": "two_party", "session_code": "INV-3BQ7K", "founder_bot_handle": null, "valuation_cap_min": 15000000, "valuation_cap_max": 30000000, "discount_min": 0.15, "discount_max": 0.15, "pro_rata": "required", "mfn": "preferred", "company_name": null, "founder_name": null, "founder_title": null, "investor_name": "Mark Stone", "investor_firm": "Blue Fund", "investment_amount": null, "investment_amount_min": null, "investment_amount_max": null}
 
 Investor join WITH the founder bot handle (the standard inverted-invitation shape):
 
 Input: "Joining INV-7K3X9 via @AgenticPOA_bot, cap up to $40M, 10% discount, pro-rata required."
-Output: {"role": "investor", "mode": "two_party", "session_code": "INV-7K3X9", "founder_bot_handle": "@AgenticPOA_bot", "valuation_cap_min": 0, "valuation_cap_max": 40000000, "discount_min": 0.10, "pro_rata": "required", "mfn": "indifferent", "company_name": null, "founder_name": null, "founder_title": null, "investor_name": null, "investor_firm": null, "investment_amount": null}
+Output: {"role": "investor", "mode": "two_party", "session_code": "INV-7K3X9", "founder_bot_handle": "@AgenticPOA_bot", "valuation_cap_min": 0, "valuation_cap_max": 40000000, "discount_min": 0.10, "discount_max": 0.10, "pro_rata": "required", "mfn": "indifferent", "company_name": null, "founder_name": null, "founder_title": null, "investor_name": null, "investor_firm": null, "investment_amount": null, "investment_amount_min": null, "investment_amount_max": null}
 
 Input: "Joining INV-7K3X9 via @AgenticPOA_bot, I am Nora Vassileva at SD Fund, cap up to $35M, 10% discount, pro-rata required."
-Output: {"role": "investor", "mode": "two_party", "session_code": "INV-7K3X9", "founder_bot_handle": "@AgenticPOA_bot", "valuation_cap_min": 0, "valuation_cap_max": 35000000, "discount_min": 0.10, "pro_rata": "required", "mfn": "indifferent", "company_name": null, "founder_name": null, "founder_title": null, "investor_name": "Nora Vassileva", "investor_firm": "SD Fund", "investment_amount": null}
+Output: {"role": "investor", "mode": "two_party", "session_code": "INV-7K3X9", "founder_bot_handle": "@AgenticPOA_bot", "valuation_cap_min": 0, "valuation_cap_max": 35000000, "discount_min": 0.10, "discount_max": 0.10, "pro_rata": "required", "mfn": "indifferent", "company_name": null, "founder_name": null, "founder_title": null, "investor_name": "Nora Vassileva", "investor_firm": "SD Fund", "investment_amount": null, "investment_amount_min": null, "investment_amount_max": null}
 
 Input: "Join INV-DEMO99 as investor. Founder bot is @alice_negotiator_bot. Cap $20M-$45M, 12% discount, pro-rata required. $750K."
-Output: {"role": "investor", "mode": "two_party", "session_code": "INV-DEMO99", "founder_bot_handle": "@alice_negotiator_bot", "valuation_cap_min": 20000000, "valuation_cap_max": 45000000, "discount_min": 0.12, "pro_rata": "required", "mfn": "indifferent", "company_name": null, "founder_name": null, "founder_title": null, "investor_name": null, "investor_firm": null, "investment_amount": 750000.0}
+Output: {"role": "investor", "mode": "two_party", "session_code": "INV-DEMO99", "founder_bot_handle": "@alice_negotiator_bot", "valuation_cap_min": 20000000, "valuation_cap_max": 45000000, "discount_min": 0.12, "discount_max": 0.12, "pro_rata": "required", "mfn": "indifferent", "company_name": null, "founder_name": null, "founder_title": null, "investor_name": null, "investor_firm": null, "investment_amount": 750000.0, "investment_amount_min": null, "investment_amount_max": null}
 """
 
 
@@ -169,12 +195,17 @@ def _normalize_constraints(parsed: dict[str, Any]) -> dict[str, Any]:
         parsed["session_code"] = None
     if parsed["session_code"]:
         parsed["mode"] = "two_party"
+    if parsed.get("discount_max") is None and parsed.get("discount_min") is not None:
+        parsed["discount_max"] = parsed["discount_min"]
 
     for field in (
         "company_name", "founder_name", "founder_title",
         "investor_name", "investor_firm", "investment_amount",
+        "investment_amount_min", "investment_amount_max",
     ):
         parsed.setdefault(field, None)
+    if parsed.get("investment_amount") is None and parsed.get("investment_amount_min") is not None:
+        parsed["investment_amount"] = parsed["investment_amount_min"]
     return parsed
 
 
@@ -211,20 +242,72 @@ def _extract_constraints_deterministic(message: str) -> dict[str, Any]:
         valuation_min = cap
         valuation_max = cap
 
-    disc_m = re.search(r"(\d+(?:\.\d+)?)\s*%\s+discount", text, re.IGNORECASE)
-    if not disc_m:
-        disc_m = re.search(r"discount[^0-9]*(\d+(?:\.\d+)?)\s*%", text, re.IGNORECASE)
-    discount = float(disc_m.group(1)) / 100 if disc_m else None
+    discount_min = None
+    discount_max = None
+    disc_range_m = re.search(
+        r"(?:discount[^0-9]*)?(\d+(?:\.\d+)?)\s*%\s*(?:-|–|to|through)\s*(\d+(?:\.\d+)?)\s*%\s*(?:discount)?",
+        text,
+        re.IGNORECASE,
+    )
+    disc_floor_m = re.search(
+        r"(?:at\s+least|minimum|floor|no\s+less\s+than)[^0-9]*(\d+(?:\.\d+)?)\s*%\s*(?:discount)?|(\d+(?:\.\d+)?)\s*%\s+discount\s+(?:minimum|floor)",
+        text,
+        re.IGNORECASE,
+    )
+    disc_ceiling_m = re.search(
+        r"(?:up\s+to|maximum|no\s+more\s+than)[^0-9]*(\d+(?:\.\d+)?)\s*%\s*(?:discount)?",
+        text,
+        re.IGNORECASE,
+    )
+    disc_single_m = re.search(r"(\d+(?:\.\d+)?)\s*%\s+discount", text, re.IGNORECASE)
+    if not disc_single_m:
+        disc_single_m = re.search(r"discount[^0-9]*(\d+(?:\.\d+)?)\s*%", text, re.IGNORECASE)
+    if disc_range_m:
+        discount_min = float(disc_range_m.group(1)) / 100
+        discount_max = float(disc_range_m.group(2)) / 100
+    elif disc_floor_m:
+        discount_min = float(disc_floor_m.group(1) or disc_floor_m.group(2)) / 100
+        discount_max = 1.0
+    elif disc_ceiling_m:
+        discount_min = 0.0
+        discount_max = float(disc_ceiling_m.group(1)) / 100
+    elif disc_single_m:
+        discount_min = float(disc_single_m.group(1)) / 100
+        discount_max = discount_min
 
     pro_rata = "required" if re.search(r"pro[- ]?rata[^.,;]*(required|must|included)|pro[- ]?rata required", lower) else "preferred"
     mfn = "required" if re.search(r"\bmfn\b[^.,;]*(required|must)", lower) else "indifferent"
 
+    amount = None
+    amount_min = None
+    amount_max = None
+    check_range_m = re.search(
+        r"\b(?:check(?:\s+size)?|investment|invest)\b[^$]*(\$?\d+(?:\.\d+)?\s*[kmb]?)\s*(?:-|–|to|through)\s*(\$?\d+(?:\.\d+)?\s*[kmb]?)",
+        text,
+        re.IGNORECASE,
+    )
+    check_single_m = re.search(
+        r"\b(?:check(?:\s+size)?|investment|invest)\b[^$]*(\$?\d+(?:\.\d+)?\s*[kmb]?)|(\$?\d+(?:\.\d+)?\s*[kmb]?)\s+check\b",
+        text,
+        re.IGNORECASE,
+    )
+    if check_range_m:
+        amount_min = float(_money_to_dollars(check_range_m.group(1)))
+        amount_max = float(_money_to_dollars(check_range_m.group(2)))
+        amount = amount_min
+    elif check_single_m:
+        amount = float(_money_to_dollars(check_single_m.group(1) or check_single_m.group(2)))
+
     investor_name = investor_firm = None
     if role == "founder":
         im = re.search(r"\bwith\s+(.+?)\s+at\s+(.+?)(?=\.|,|\s+cap\b|$)", text, re.IGNORECASE)
+        paren_im = re.search(r"\bwith\s+(.+?)\s*\((.+?)\)", text, re.IGNORECASE)
         if im:
             investor_name = im.group(1).strip()
             investor_firm = im.group(2).strip()
+        elif paren_im:
+            investor_name = paren_im.group(1).strip()
+            investor_firm = paren_im.group(2).strip()
     else:
         im = re.search(r"\bI\s*(?:am|'m)\s+(.+?)\s+(?:at|from)\s+(.+?)(?=,\s*cap\b|\.|$)", text, re.IGNORECASE)
         if im:
@@ -238,7 +321,8 @@ def _extract_constraints_deterministic(message: str) -> dict[str, Any]:
         "founder_bot_handle": founder_bot,
         "valuation_cap_min": valuation_min,
         "valuation_cap_max": valuation_max,
-        "discount_min": discount,
+        "discount_min": discount_min,
+        "discount_max": discount_max,
         "pro_rata": pro_rata,
         "mfn": mfn,
         "company_name": None,
@@ -246,7 +330,9 @@ def _extract_constraints_deterministic(message: str) -> dict[str, Any]:
         "founder_title": None,
         "investor_name": investor_name,
         "investor_firm": investor_firm,
-        "investment_amount": None,
+        "investment_amount": amount,
+        "investment_amount_min": amount_min,
+        "investment_amount_max": amount_max,
     })
 
 

@@ -66,6 +66,18 @@ def _parse_bot_api_result(body: str) -> SendResult:
     return SendResult(ok=False, message_id=None, error=json.dumps(payload))
 
 
+def _parse_bot_api_edit_result(body: str) -> SendResult:
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return SendResult(ok=False, message_id=None, error="non-JSON response from Telegram")
+    if isinstance(payload, dict) and payload.get("ok"):
+        result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+        mid = result.get("message_id")
+        return SendResult(ok=True, message_id=str(mid) if mid is not None else None, error=None)
+    return SendResult(ok=False, message_id=None, error=json.dumps(payload))
+
+
 def _multipart_body(
     fields: dict[str, str],
     file_field: str,
@@ -153,6 +165,44 @@ def _send_telegram_bot_api(
             return _parse_bot_api_result(resp.read().decode())
     except Exception as e:
         return SendResult(ok=False, message_id=None, error=f"Telegram Bot API send failed: {e}")
+
+
+def _edit_telegram_bot_api(
+    chat_id: str,
+    message_id: str | int,
+    message: str,
+    bot_token: str | None = None,
+    opener=urllib.request.urlopen,
+) -> SendResult:
+    token = bot_token or get_bot_token()
+    if not token:
+        return SendResult(ok=False, message_id=None, error="Telegram bot token not available")
+
+    try:
+        numeric_message_id = int(message_id)
+    except (TypeError, ValueError):
+        return SendResult(ok=False, message_id=None, error="invalid Telegram message_id")
+
+    payload = {
+        "chat_id": _normalize_telegram_target(chat_id),
+        "message_id": numeric_message_id,
+        "text": message,
+    }
+    parse_mode = _infer_parse_mode(message)
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    body = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{token}/editMessageText",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with opener(req, timeout=30) as resp:
+            return _parse_bot_api_edit_result(resp.read().decode())
+    except Exception as e:
+        return SendResult(ok=False, message_id=None, error=f"Telegram Bot API edit failed: {e}")
 
 
 def resolve_chat_id(
@@ -291,6 +341,26 @@ def send_telegram(
         return SendResult(ok=True, message_id=str(mid) if mid is not None else None, error=None)
 
     return SendResult(ok=False, message_id=None, error=json.dumps(payload))
+
+
+def edit_telegram_message(
+    chat_id: str,
+    message_id: str | int,
+    message: str,
+    opener=urllib.request.urlopen,
+) -> SendResult:
+    """Edit a bot-sent Telegram text message via the official Bot API.
+
+    OpenClaw's generic message CLI currently gives this skill a send
+    primitive. Editing is Telegram-specific, so use the Bot API directly when
+    a bot token is available and let callers fall back to sending a new card.
+    """
+    return _edit_telegram_bot_api(
+        chat_id=chat_id,
+        message_id=message_id,
+        message=message,
+        opener=opener,
+    )
 
 
 def send_signing_url_to_dm(

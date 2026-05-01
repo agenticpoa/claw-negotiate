@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import urllib.parse
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import delivery_store
@@ -9,8 +10,9 @@ import projector
 
 
 class FakeDeliveryClient:
-    def __init__(self, created=True):
+    def __init__(self, created=True, deliveries=None):
         self.created = created
+        self.deliveries = deliveries or {}
         self.calls = []
 
     def claim_delivery(self, session_id, key, target=""):
@@ -20,6 +22,9 @@ class FakeDeliveryClient:
             "target": target,
         })
         return {"created": self.created}
+
+    def get_delivery(self, session_id, key):
+        return self.deliveries.get(key, {})
 
 
 def test_project_history_sends_local_role_once(tmp_path, monkeypatch):
@@ -218,3 +223,72 @@ def test_project_event_suppresses_when_server_delivery_already_claimed(tmp_path,
     assert projected is False
     sender.assert_not_called()
     assert client.calls[0]["key"] == "offer:investor:1:counter"
+
+
+def test_project_event_edits_matching_heartbeat_instead_of_sending_new_card(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAW_NEGOTIATE_DELIVERY_DIR", str(tmp_path))
+    sender = MagicMock()
+    editor = MagicMock(return_value=SimpleNamespace(ok=True))
+    client = FakeDeliveryClient(
+        created=True,
+        deliveries={
+            "turn_heartbeat:investor:1": {"message_id": "88", "target": "-100"},
+        },
+    )
+
+    projected = projector.project_event(
+        session_id="session_neg_1",
+        event={
+            "type": "counter",
+            "party": "investor",
+            "round": 1,
+            "terms": {"valuation_cap": 30_000_000, "discount_rate": 0.10},
+            "message": "Investor counter.",
+        },
+        constraints={"mode": "two_party", "role": "investor"},
+        dm_chat_id="123",
+        group_chat_id="-100",
+        sender=sender,
+        editor=editor,
+        delivery_client=client,
+    )
+
+    assert projected is True
+    sender.assert_not_called()
+    editor.assert_called_once()
+    assert editor.call_args.args[0] == "-100"
+    assert editor.call_args.kwargs["message_id"] == "88"
+    assert "Offer 2" in editor.call_args.kwargs["message"]
+
+
+def test_project_event_sends_new_card_when_heartbeat_edit_fails(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAW_NEGOTIATE_DELIVERY_DIR", str(tmp_path))
+    sender = MagicMock()
+    editor = MagicMock(return_value=SimpleNamespace(ok=False))
+    client = FakeDeliveryClient(
+        created=True,
+        deliveries={
+            "turn_heartbeat:investor:1": {"message_id": "88", "target": "-100"},
+        },
+    )
+
+    projected = projector.project_event(
+        session_id="session_neg_1",
+        event={
+            "type": "counter",
+            "party": "investor",
+            "round": 1,
+            "terms": {"valuation_cap": 30_000_000, "discount_rate": 0.10},
+            "message": "Investor counter.",
+        },
+        constraints={"mode": "two_party", "role": "investor"},
+        dm_chat_id="123",
+        group_chat_id="-100",
+        sender=sender,
+        editor=editor,
+        delivery_client=client,
+    )
+
+    assert projected is True
+    editor.assert_called_once()
+    sender.assert_called_once()

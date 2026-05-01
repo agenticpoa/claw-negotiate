@@ -163,6 +163,35 @@ class TestCli:
         assert parsed["investor_name"] == "Nora Vassileva"
         assert parsed["investor_firm"] == "SD Fund"
 
+    def test_deterministic_parser_extracts_check_size_range(self, monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "--message",
+                (
+                    "Live negotiation for Series Seed SAFE with Nora Vassileva "
+                    "(SD Capital). Cap: $15M-$30M post. Check: $250k-$750k. "
+                    "Pro rata: required. Discount: 0%"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0
+        parsed = json.loads(result.stdout)
+        assert parsed["mode"] == "two_party"
+        assert parsed["investor_name"] == "Nora Vassileva"
+        assert parsed["investor_firm"] == "SD Capital"
+        assert parsed["valuation_cap_min"] == 15_000_000
+        assert parsed["valuation_cap_max"] == 30_000_000
+        assert parsed["investment_amount"] == 250_000.0
+        assert parsed["investment_amount_min"] == 250_000.0
+        assert parsed["investment_amount_max"] == 750_000.0
+        assert parsed["discount_min"] == 0.0
+        assert parsed["discount_max"] == 0.0
+
     def test_message_arg(self, tmp_path, monkeypatch):
         """--message flag should be accepted as an alternative to stdin."""
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")

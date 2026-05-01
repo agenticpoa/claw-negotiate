@@ -135,6 +135,42 @@ class TestSendTelegram:
         assert result.message_id == "77"
         runner.assert_not_called()
 
+    def test_edit_telegram_message_uses_bot_api(self, monkeypatch):
+        monkeypatch.setattr(tp, "get_bot_token", lambda: "TOKEN")
+
+        def opener(req, timeout):
+            assert req.full_url == "https://api.telegram.org/botTOKEN/editMessageText"
+            assert json.loads(req.data.decode()) == {
+                "chat_id": "-100",
+                "message_id": 88,
+                "text": "<b>Offer 2 — Investor OpenClaw</b>",
+                "parse_mode": "HTML",
+            }
+            return _FakeHttpResponse({"ok": True, "result": {"message_id": 88}})
+
+        result = tp.edit_telegram_message(
+            "telegram:-100",
+            message_id="88",
+            message="<b>Offer 2 — Investor OpenClaw</b>",
+            opener=opener,
+        )
+
+        assert result.ok is True
+        assert result.message_id == "88"
+
+    def test_edit_telegram_message_without_token_fails_cleanly(self, monkeypatch):
+        monkeypatch.setattr(tp, "get_bot_token", lambda: None)
+
+        result = tp.edit_telegram_message(
+            "-100",
+            message_id="88",
+            message="Offer",
+            opener=MagicMock(),
+        )
+
+        assert result.ok is False
+        assert "bot token" in result.error
+
     def test_bot_api_sends_reply_markup(self, monkeypatch):
         runner = MagicMock()
         monkeypatch.setattr(tp, "get_bot_token", lambda: "TOKEN")

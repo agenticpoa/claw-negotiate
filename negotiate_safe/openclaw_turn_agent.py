@@ -38,6 +38,21 @@ def _required_value(constraints: dict, field: str) -> bool:
     return bool(constraints.get(f"{field}_required", False))
 
 
+def _amount_bounds(constraints: dict) -> tuple[Any, Any]:
+    amount_min = _constraint_value(constraints, "investment_amount", "min", None)
+    amount_max = _constraint_value(constraints, "investment_amount", "max", None)
+    if amount_min is not None or amount_max is not None:
+        return amount_min, amount_max if amount_max is not None else amount_min
+    amount = constraints.get("investment_amount")
+    return amount, amount
+
+
+def _amount_constraint_line(amount_min: Any, amount_max: Any) -> str:
+    if amount_min is None and amount_max is None:
+        return "- Investment amount / check size: no private bound provided"
+    return f"- Investment amount / check size: {_money(amount_min)} to {_money(amount_max)}"
+
+
 def _money(value: Any) -> str:
     try:
         return f"${float(value):,.0f}"
@@ -129,6 +144,7 @@ def build_turn_prompt(
     cap_max = _constraint_value(constraints, "valuation_cap", "max", 0)
     discount_min = _constraint_value(constraints, "discount_rate", "min", 0)
     discount_max = _constraint_value(constraints, "discount_rate", "max", 0.25)
+    amount_min, amount_max = _amount_bounds(constraints)
     pro_rata_required = _required_value(constraints, "pro_rata")
     mfn_required = _required_value(constraints, "mfn")
     counterparty = "investor" if role == "founder" else "founder"
@@ -140,6 +156,7 @@ def build_turn_prompt(
 APOA authorization constraints are hard boundaries. You may not propose or accept
 terms outside them:
 - Valuation cap: {_money(cap_min)} to {_money(cap_max)}
+{_amount_constraint_line(amount_min, amount_max)}
 - Discount rate: {_percent(discount_min)} to {_percent(discount_max)}
 - Pro-rata rights required: {str(pro_rata_required).lower()}
 - MFN required: {str(mfn_required).lower()}
@@ -150,8 +167,7 @@ Negotiation strategy:
   position, explain the business rationale for your response, and make a
   concrete offer, concession, or acceptance.
 - If the {counterparty}'s latest offer already matches your stated goals or is
-  clearly favorable inside your APOA boundaries, accept it. Do not force extra
-  rounds just for show.
+  clearly favorable inside your APOA boundaries, accept it. Do not force extra rounds just for show.
 - If the latest offer is acceptable but not obviously excellent, consider one
   final constructive counter before accepting.
 - Keep each message polished and substantive: 3 to 5 sentences, no boilerplate,
@@ -171,6 +187,7 @@ Return ONLY a JSON object with this exact shape:
   "type": "offer" | "counter" | "accept",
   "terms": {{
     "valuation_cap": <integer dollars>,
+    "investment_amount": <integer dollars or null>,
     "discount_rate": <decimal between 0 and 1>,
     "pro_rata": <boolean>,
     "mfn": <boolean>
@@ -258,7 +275,12 @@ async def make_validated_offer(
         if not ok:
             feedback.append(f"Your previous response was invalid: {reason}")
             continue
-        if offer.get("type") in ("offer", "counter"):
+        if offer.get("type") == "accept" and not offer.get("terms"):
+            for prior in reversed(history):
+                if prior.get("terms"):
+                    offer["terms"] = prior["terms"]
+                    break
+        if offer.get("type") in ("offer", "counter", "accept"):
             constraint_ok, violations = constraint_validate(offer.get("terms") or {})
             if not constraint_ok:
                 feedback.append(

@@ -107,6 +107,8 @@ class TestCli:
         assert "neg_test123" in cmd
         assert "--founder-cap-min" in cmd and "8000000" in cmd
         assert "--founder-cap-max" in cmd and "12000000" in cmd
+        assert "--founder-investment-amount-min" in cmd
+        assert "--founder-investment-amount-max" in cmd
         assert "--founder-pro-rata-required" in cmd and "true" in cmd
         assert "--founder-mfn-required" in cmd and "false" in cmd
         # No sshsign keys when flag passed
@@ -196,6 +198,7 @@ class TestCli:
         assert fc["cap_min"] == 8_000_000
         assert fc["cap_max"] == 12_000_000
         assert fc["discount_min"] == 0.20
+        assert fc["discount_max"] == 0.20
         assert fc["pro_rata_required"] is True
         assert fc["mfn_required"] is False
 
@@ -286,6 +289,7 @@ class TestCli:
         assert "--investor-cap-min" in cmd and "40000000" in cmd
         assert "--investor-cap-max" in cmd and "90000000" in cmd
         assert "--investor-discount-min" in cmd and "0.08" in cmd
+        assert "--investor-discount-max" in cmd and "0.08" in cmd
 
         out = json.loads(capsys.readouterr().out)
         ic = out["investor_constraints"]

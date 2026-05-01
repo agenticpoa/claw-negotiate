@@ -7,8 +7,12 @@ from typing import Callable
 import delivery_store
 from format_event import format_event
 from telegram import route_stream_message, should_publish_stream_event
-from telegram_push import send_signing_url_to_dm, send_telegram
+from telegram_push import edit_telegram_message, send_signing_url_to_dm, send_telegram
 from upstream import augment_signing_url, synthesize_offer_event
+
+
+def heartbeat_delivery_key(role: str, round_num: int) -> str:
+    return f"turn_heartbeat:{(role or '').lower()}:{int(round_num)}"
 
 
 def delivery_key(event: dict) -> str:
@@ -50,6 +54,49 @@ def _claim_delivery(
     return bool(payload.get("created"))
 
 
+def _delivery_message_id(*, delivery_client, session_id: str, key: str) -> str:
+    if delivery_client is None:
+        payload = delivery_store.read_deliveries(session_id).get("delivered", {}).get(key)
+    else:
+        try:
+            payload = delivery_client.get_delivery(session_id, key)
+        except Exception:
+            payload = None
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("message_id") or payload.get("messageId") or "").strip()
+
+
+def _maybe_edit_heartbeat(
+    *,
+    session_id: str,
+    event: dict,
+    message: str,
+    target: str,
+    delivery_client,
+    editor: Callable,
+) -> bool:
+    if event.get("type") not in ("offer", "counter", "accept"):
+        return False
+    party = (event.get("party") or "").lower()
+    if not party:
+        return False
+    try:
+        round_num = int(event.get("round", 0))
+    except (TypeError, ValueError):
+        return False
+    key = heartbeat_delivery_key(party, round_num)
+    message_id = _delivery_message_id(
+        delivery_client=delivery_client,
+        session_id=session_id,
+        key=key,
+    )
+    if not message_id:
+        return False
+    result = editor(target, message_id=message_id, message=message)
+    return bool(getattr(result, "ok", False))
+
+
 def project_event(
     *,
     session_id: str,
@@ -59,6 +106,7 @@ def project_event(
     group_chat_id: str | None,
     sender: Callable = send_telegram,
     dm_sender: Callable = send_signing_url_to_dm,
+    editor: Callable = edit_telegram_message,
     delivery_client=None,
 ) -> bool:
     if event.get("type") == "signing":
@@ -92,15 +140,26 @@ def project_event(
         target=target,
     ):
         return False
-    route_stream_message(
-        event=event,
-        message=message,
-        chat_id=str(dm_chat_id),
-        group_chat_id=str(group_chat_id) if group_chat_id else None,
-        constraints=constraints,
-        sender=sender,
-        dm_sender=dm_sender,
-    )
+    edited = False
+    if group_chat_id:
+        edited = _maybe_edit_heartbeat(
+            session_id=session_id,
+            event=event,
+            message=message,
+            target=target,
+            delivery_client=delivery_client,
+            editor=editor,
+        )
+    if not edited:
+        route_stream_message(
+            event=event,
+            message=message,
+            chat_id=str(dm_chat_id),
+            group_chat_id=str(group_chat_id) if group_chat_id else None,
+            constraints=constraints,
+            sender=sender,
+            dm_sender=dm_sender,
+        )
     if delivery_client is None:
         delivery_store.mark_delivery(session_id, key, target)
     return True
@@ -115,6 +174,7 @@ def project_history(
     group_chat_id: str | None,
     sender: Callable = send_telegram,
     dm_sender: Callable = send_signing_url_to_dm,
+    editor: Callable = edit_telegram_message,
     delivery_client=None,
 ) -> int:
     count = 0
@@ -130,6 +190,7 @@ def project_history(
             group_chat_id=group_chat_id,
             sender=sender,
             dm_sender=dm_sender,
+            editor=editor,
             delivery_client=delivery_client,
         ):
             count += 1

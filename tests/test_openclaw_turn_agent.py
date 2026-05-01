@@ -12,6 +12,7 @@ def test_build_turn_prompt_frames_local_openclaw_agent():
         role="founder",
         constraints={
             "valuation_cap": {"min": 30_000_000, "max": 40_000_000},
+            "investment_amount": {"min": 250_000, "max": 750_000},
             "discount_rate": {"min": 0.10, "max": 0.25},
             "pro_rata": {"required": True},
             "mfn": {"required": False},
@@ -21,7 +22,9 @@ def test_build_turn_prompt_frames_local_openclaw_agent():
 
     assert "user's OpenClaw agent" in prompt
     assert "$30,000,000 to $40,000,000" in prompt
+    assert "$250,000 to $750,000" in prompt
     assert "Every move should have commercial substance" in prompt
+    assert '"investment_amount": <integer dollars or null>' in prompt
     assert "Do not force extra rounds just for show" in prompt
     assert "Return ONLY a JSON object" in prompt
 

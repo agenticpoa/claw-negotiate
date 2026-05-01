@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import orchestrator
@@ -122,8 +123,50 @@ def test_turn_helper_posts_heartbeats_while_waiting(monkeypatch):
 
     assert result.returncode == 0
     msgs = [c.kwargs["message"] for c in sender.call_args_list]
-    assert any("Investor OpenClaw is preparing" in msg for msg in msgs)
+    assert any("Investor OC is drafting an offer" in msg for msg in msgs)
     assert any("Still working" in msg for msg in msgs)
+
+
+def test_turn_helper_records_heartbeat_message_id(monkeypatch):
+    class FakeProc:
+        returncode = 0
+
+        def __init__(self, *args, **kwargs):
+            self._polls = 0
+
+        def poll(self):
+            self._polls += 1
+            return None if self._polls == 1 else 0
+
+        def communicate(self):
+            return ("", "")
+
+        def kill(self):
+            self.returncode = -9
+
+    monkeypatch.setattr(orchestrator.subprocess, "Popen", FakeProc)
+    monkeypatch.setattr(orchestrator.time, "sleep", lambda _seconds: None)
+    sender = MagicMock(return_value=SimpleNamespace(ok=True, message_id="88"))
+    client = MagicMock()
+
+    orchestrator._run_turn_helper_with_heartbeats(
+        ["python3", "_turn_once.py"],
+        heartbeat_sender=sender,
+        heartbeat_chat_id="-100",
+        heartbeat_role="investor",
+        heartbeat_session_id="session_neg_1",
+        heartbeat_delivery_client=client,
+        heartbeat_round=1,
+        heartbeat_after=-1,
+        still_working_after=999,
+    )
+
+    client.claim_delivery.assert_called_once_with(
+        "session_neg_1",
+        "turn_heartbeat:investor:1",
+        target="-100",
+        message_id="88",
+    )
 
 
 def test_turn_helper_maps_expired_token_error(tmp_path):
@@ -348,7 +391,7 @@ def test_reconcile_founder_finalizes_after_both_signatures(tmp_path, monkeypatch
         if c.kwargs.get("media_path") == str(pdf)
     ]
     assert len(media_calls) == 1
-    assert media_calls[0].args[0] == -100
+    assert str(media_calls[0].args[0]) == "-100"
     client.complete_session.assert_called_once()
     assert client.complete_session.call_args.kwargs["lease_holder"]
     assert client.complete_session.call_args.kwargs["lease_generation"] == 1

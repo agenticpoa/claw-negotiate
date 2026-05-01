@@ -196,6 +196,30 @@ def finalize_executed_pdf(
             or constraints.get("investment_amount")
             or 500_000.0
         ),
+        founder_investment_amount_min=(
+            constraints.get("investment_amount_min")
+            or constraints.get("investment_amount")
+            or f_cfg.get("investment_amount")
+            or 500_000.0
+        ),
+        founder_investment_amount_max=(
+            constraints.get("investment_amount_max")
+            or constraints.get("investment_amount")
+            or f_cfg.get("investment_amount")
+            or 500_000.0
+        ),
+        investor_investment_amount_min=(
+            constraints.get("investment_amount_min")
+            or constraints.get("investment_amount")
+            or i_cfg.get("investment_amount")
+            or 500_000.0
+        ),
+        investor_investment_amount_max=(
+            constraints.get("investment_amount_max")
+            or constraints.get("investment_amount")
+            or i_cfg.get("investment_amount")
+            or 500_000.0
+        ),
         sshsign_host=sshsign_host,
         output_dir=str(neg_output),
         signing_key_id=(
@@ -213,7 +237,9 @@ def finalize_executed_pdf(
         json_events=False,
         poll=False,
     )
-    if "signer_role" in {f.name for f in dataclasses.fields(module.NegotiationConfig)}:
+    fields = {f.name for f in dataclasses.fields(module.NegotiationConfig)}
+    kwargs = {k: v for k, v in kwargs.items() if k in fields}
+    if "signer_role" in fields:
         kwargs["signer_role"] = user_role
     config = module.NegotiationConfig(**kwargs)
 
