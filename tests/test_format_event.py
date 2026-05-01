@@ -151,11 +151,12 @@ class TestFormatters:
             "investor_label": "Nora Vassileva at SD Fund",
         })
         assert "Nora Vassileva at SD Fund joined" in out
-        assert "Set up the negotiation room" in out
-        assert "In Telegram, create a new group with you and Nora" in out
-        assert "Add both OpenClaws using the buttons below" in out
-        assert "@AgenticPOA_bot @AgenticPOAInvestor_bot" in out
-        assert "Copy and paste the bind command" in out
+        assert "Now bring everyone into the live negotiation group" in out
+        assert "1. Create a Telegram group with you and Nora" in out
+        assert "2. Add Founder OpenClaw: <code>@AgenticPOA_bot</code>" in out
+        assert "3. Add Investor OpenClaw: <code>@AgenticPOAInvestor_bot</code>" in out
+        assert "4. Paste in the group: <code>/bind INV-1</code>" in out
+        assert "Both OpenClaws will post offers there. Signing stays private." in out
         assert "Founder bot:" not in out
         assert "Tap **+**" not in out
 

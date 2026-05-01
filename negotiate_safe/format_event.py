@@ -960,22 +960,19 @@ def format_create_group_for_founder(event: dict[str, Any]) -> str:
         investor_bot = "(your investor's agent — handle not yet known)"
 
     bind_payload = f"/bind {code}" if code else "/bind INV-XXXXX"
-    handles = " ".join(
-        h for h in (founder_bot, investor_bot)
-        if h and not h.startswith("(")
-    )
+    investor_first = investor_label.split()[0] if investor_label else "your investor"
 
     lines = [
         f"✅ {_b(investor_label + ' joined')}",  # ✅
         "",
-        f"{_b('Set up the negotiation room:')}",
+        "Now bring everyone into the live negotiation group:",
         "",
-        f"1. In Telegram, create a new group with you and {_escape_html(investor_label.split()[0] if investor_label else 'your investor')}.",
-        "2. Add both OpenClaws using the buttons below, or paste both handles into Telegram search:",
-        _code(handles) if handles else "",
-        "3. Copy and paste the bind command in the group.",
+        f"1. Create a Telegram group with you and {_escape_html(investor_first)}.",
+        f"2. Add Founder OpenClaw: {_code(founder_bot)}",
+        f"3. Add Investor OpenClaw: {_code(investor_bot)}",
+        f"4. Paste in the group: {_code(bind_payload)}",
         "",
-        "Signing stays private. If a deal is reached, each party gets their own signing link in DM.",
+        "Both OpenClaws will post offers there. Signing stays private.",
     ]
     return "\n".join(lines)
 
