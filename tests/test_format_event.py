@@ -186,6 +186,26 @@ class TestFormatters:
             ],
         }
 
+    def test_group_setup_omits_placeholder_bot_handle(self):
+        out = fe.format_create_group_for_founder({
+            "type": "create_group_for_founder",
+            "session_code": "INV-1",
+            "founder_bot_handle": "YourBot",
+            "investor_bot_handle": "@AgenticPOAInvestor_bot",
+            "investor_label": "Nora Vassileva at SD Fund",
+        })
+        assert "YourBot" not in out
+        assert "@AgenticPOAInvestor_bot" in out
+
+        markup = fe.group_setup_reply_markup({
+            "session_code": "INV-1",
+            "founder_bot_handle": "YourBot",
+            "investor_bot_handle": "@AgenticPOAInvestor_bot",
+        })
+        rows = markup["inline_keyboard"]
+        assert all("YourBot" not in str(row) for row in rows)
+        assert rows[0][0]["text"] == "Add investor OpenClaw"
+
     def test_turn_heartbeat_copy(self):
         out = fe.format_event({"type": "turn_heartbeat", "role": "investor"})
         assert "Investor OpenClaw is preparing the next offer" in out

@@ -101,6 +101,12 @@ def _format_investor_identity(
 
 
 _PARTY_ICON = {"founder": "\U0001f464", "investor": "\U0001f4bc"}  # 👤, 💼
+_PLACEHOLDER_BOT_HANDLES = {"yourbot", "@yourbot"}
+
+
+def _clean_bot_handle(value: Any) -> str:
+    handle = str(value or "").strip()
+    return "" if handle.lower() in _PLACEHOLDER_BOT_HANDLES else handle
 
 # ──────────────────────────────────────────────────────────────
 # Wrapper-side events
@@ -511,7 +517,7 @@ def format_invitation(event: dict[str, Any]) -> str:
     Optional: expires_at, ttl_hours, counterparty_label.
     """
     code = (event.get("session_code") or "").strip()
-    founder_bot = (event.get("founder_bot_handle") or "").strip()
+    founder_bot = _clean_bot_handle(event.get("founder_bot_handle"))
     if founder_bot and not founder_bot.startswith("@"):
         founder_bot = "@" + founder_bot
     expires_at = event.get("expires_at") or ""
@@ -859,7 +865,7 @@ def format_investor_waiting_for_founder(event: dict[str, Any]) -> str:
     (pulled from sshsign session.metadata_public) so the investor
     knows whose agent they're waiting on.
     """
-    founder_bot = (event.get("founder_bot_handle") or "").strip()
+    founder_bot = _clean_bot_handle(event.get("founder_bot_handle"))
     if founder_bot and not founder_bot.startswith("@"):
         founder_bot = "@" + founder_bot
     if founder_bot:
@@ -889,8 +895,8 @@ def format_create_group_for_founder(event: dict[str, Any]) -> str:
     from racing to create separate groups.
     """
     code = (event.get("session_code") or "").strip()
-    founder_bot = (event.get("founder_bot_handle") or "").strip()
-    investor_bot = (event.get("investor_bot_handle") or "").strip()
+    founder_bot = _clean_bot_handle(event.get("founder_bot_handle"))
+    investor_bot = _clean_bot_handle(event.get("investor_bot_handle"))
     investor_label = (event.get("investor_label") or "your investor").strip()
 
     if founder_bot and not founder_bot.startswith("@"):
@@ -936,7 +942,7 @@ def group_setup_reply_markup(event: dict[str, Any]) -> dict[str, Any] | None:
     bind_payload = f"/bind {code}" if code else "/bind INV-XXXXX"
 
     def bot_url(handle: str) -> str | None:
-        handle = (handle or "").strip()
+        handle = _clean_bot_handle(handle)
         if not handle or handle.startswith("("):
             return None
         handle = handle[1:] if handle.startswith("@") else handle
@@ -948,8 +954,8 @@ def group_setup_reply_markup(event: dict[str, Any]) -> dict[str, Any] | None:
     investor_url = bot_url(event.get("investor_bot_handle") or "")
     handles = " ".join(
         h for h in (
-            event.get("founder_bot_handle") or "",
-            event.get("investor_bot_handle") or "",
+            _clean_bot_handle(event.get("founder_bot_handle")),
+            _clean_bot_handle(event.get("investor_bot_handle")),
         )
         if h
     )

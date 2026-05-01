@@ -8,6 +8,15 @@ from pathlib import Path
 from sshsign_session import SshsignSession, SshsignSessionError
 
 
+_PLACEHOLDER_BOT_HANDLES = {"", "yourbot", "@yourbot"}
+
+
+def configured_bot_handle() -> str:
+    """Return the configured Telegram bot handle, ignoring install examples."""
+    handle = (os.environ.get("TELEGRAM_BOT_USERNAME") or "").strip()
+    return "" if handle.lower() in _PLACEHOLDER_BOT_HANDLES else handle
+
+
 def sshsign_session_id(negotiation_id: str) -> str:
     """Return the sshsign session_id used by upstream signing calls."""
     if not negotiation_id:
@@ -46,7 +55,7 @@ def register_signing_session(
         if constraints.get(field):
             metadata_public[field] = constraints[field]
     if user_role == "founder":
-        bot_handle = (os.environ.get("TELEGRAM_BOT_USERNAME") or "").strip()
+        bot_handle = configured_bot_handle()
         if bot_handle:
             metadata_public["founder_bot_handle"] = bot_handle
 
@@ -80,7 +89,7 @@ def register_signing_session(
 
     session_id = sess.get("session_id") or sshsign_session_id(mint_output["negotiation_id"])
     if session_id:
-        bot_handle = (os.environ.get("TELEGRAM_BOT_USERNAME") or "").strip()
+        bot_handle = configured_bot_handle()
         if bot_handle:
             try:
                 client.update_session_member_text(
@@ -150,7 +159,7 @@ def join_signing_session(
         sys.stderr.write(f"join-session failed: {e}\n")
         return None
 
-    bot_handle = (os.environ.get("TELEGRAM_BOT_USERNAME") or "").strip()
+    bot_handle = configured_bot_handle()
     joined_session_id = (join_result or {}).get("session_id")
     if joined_session_id:
         if bot_handle:

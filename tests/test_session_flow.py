@@ -148,6 +148,30 @@ def test_register_signing_session_publishes_metadata(tmp_path, monkeypatch):
     ]
 
 
+def test_register_signing_session_ignores_placeholder_bot_handle(tmp_path, monkeypatch):
+    monkeypatch.setenv("USER_DID", "did:apoa:founder")
+    monkeypatch.setenv("TELEGRAM_BOT_USERNAME", "YourBot")
+    neg_dir = _neg_dir(tmp_path, "founder")
+    client = MagicMock()
+    client.create_session.return_value = {
+        "session_code": "INV-7K3X9",
+        "created_at": "created",
+        "expires_at": "expires",
+        "status": "open",
+    }
+
+    register_signing_session(
+        {"negotiation_id": "neg_1"},
+        _constraints(),
+        "founder",
+        neg_dir,
+        session_client=client,
+    )
+
+    assert "founder_bot_handle" not in client.create_session.call_args.kwargs["metadata_public"]
+    client.update_session_member_text.assert_not_called()
+
+
 def test_register_signing_session_missing_pubkey_returns_none(tmp_path):
     client = MagicMock()
     assert register_signing_session(
