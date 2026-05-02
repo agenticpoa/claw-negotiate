@@ -2,10 +2,10 @@
 name: negotiate_safe
 description: Negotiate a SAFE on behalf of either a founder or an investor — the counterparty is played by another OpenClaw (demo mode) or a real human on another OpenClaw instance (two-party mode). Extracts the user's role and constraints from natural language, mints a per-negotiation APOA token scoped to this deal, runs a formal alternating-offers negotiation with protocol-enforced bounds, logs every offer to sshsign, and produces an executed PDF with a cryptographic audit trail. Revokable at any time. ALSO handles exact `GO`/`go` confirmations after a SAFE authorization review card, plus the Phase 8 `/bind` slash command (pattern `/bind` with optional `@BotName` suffix and `INV-XXXXX` code) used in Telegram group chats to bind an existing two-party negotiation to the current group as its live-observation venue — route ANY exact GO confirmation or message starting with `/bind` to this skill regardless of surrounding context.
 user-invocable: true
-metadata: {"openclaw":{"emoji":"🤝","requires":{"bins":["python3","ssh"],"env":["NEGOTIATE_REPO_PATH","USER_DID"]},"homepage":"https://github.com/agenticpoa/negotiate"}}
+metadata: {"openclaw":{"emoji":"🤝","requires":{"bins":["python3","ssh","openclaw"],"env":["ANTHROPIC_API_KEY","NEGOTIATE_REPO_PATH","USER_DID","NEGOTIATE_SAFE_BOT_ROLE","TELEGRAM_BOT_USERNAME"]},"homepage":"https://github.com/agenticpoa/negotiate"}}
 ---
 
-You are negotiating a SAFE on behalf of the user. The user may be the founder (raising) or the investor (investing) — the skill detects which from their natural-language request and plays the opposite side as an AI. Either way, this is a binding financial agreement. Follow these three steps.
+You are negotiating a SAFE on behalf of the user. The user may be the founder (raising) or the investor (investing) — the skill detects which from their natural-language request. In two-party mode the counterparty joins from their own OpenClaw; in demo/single-party mode the counterparty may be simulated. Either way, this is a binding financial agreement. Follow these three steps.
 
 IMPORTANT: All exec calls MUST be simple commands. Use ONLY `python3 /path/to/script.py --flag value`. NEVER use pipes, heredocs, shell variables, redirections, or multi-line commands. Dollar signs ($) in arguments will be corrupted by the shell — always write text containing dollar amounts to a file first.
 
@@ -83,7 +83,18 @@ python3 /root/.agents/skills/negotiate_safe/run_safe.py setup --message-file /tm
 
 3. The skill parses the identity, persists it via `openclaw config set`, pushes a confirmation to the chat, AND — if the user had typed a negotiation request before the welcome prompt — automatically runs `prepare` again with that stashed request so they don't have to retype. End your turn. The confirm card (or another setup prompt, if the identity parse failed) will appear in the chat.
 
-Saved profile describes the local user and should not be repeated every negotiation. Counterparty identity belongs in the negotiation request. For example, a founder can say: "Live negotiation with Nora Vassileva at SD Fund. Cap $30M to $40M, 10% discount, pro-rata required." The skill will combine the saved founder profile with Nora's counterparty identity for the authorization, signing view, and final SAFE.
+Saved profile describes the local user and should not be repeated every negotiation. Counterparty identity belongs in the negotiation request. For example, a founder can say:
+
+```
+Live negotiation for Series Seed SAFE with Nora Vassileva at SD Capital.
+
+Cap: $20M-$30M post.
+Check: $500k-$1M.
+Pro rata: required.
+Discount: 0%
+```
+
+The skill will combine the saved founder profile with Nora's counterparty identity for the authorization, signing view, and final SAFE.
 
 ## Step 2: Launch the negotiation
 

@@ -38,7 +38,8 @@ def test_parse_offer_text_strips_fences():
     assert out["terms"]["valuation_cap"] == 40_000_000
 
 
-def test_openclaw_backend_parses_agent_json(monkeypatch):
+def test_default_openclaw_backend_parses_agent_json(monkeypatch):
+    monkeypatch.delenv("NEGOTIATE_SAFE_TURN_BACKEND", raising=False)
     offer_text = json.dumps({
         "type": "counter",
         "terms": {
@@ -62,7 +63,6 @@ def test_openclaw_backend_parses_agent_json(monkeypatch):
     agent = ota.OpenClawTurnAgent(
         role="founder",
         constraints={"valuation_cap": {"min": 30_000_000, "max": 40_000_000}},
-        backend="openclaw",
         runner=runner,
     )
 

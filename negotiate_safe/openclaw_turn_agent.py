@@ -206,7 +206,7 @@ class OpenClawTurnAgent:
     model: str = ""
 
     async def make_offer(self, history: list[dict], feedback: list[str] | None = None) -> dict:
-        backend = (self.backend or os.environ.get("NEGOTIATE_SAFE_TURN_BACKEND") or "anthropic").lower()
+        backend = (self.backend or os.environ.get("NEGOTIATE_SAFE_TURN_BACKEND") or "openclaw").lower()
         prompt = build_turn_prompt(
             role=self.role,
             constraints=self.constraints,

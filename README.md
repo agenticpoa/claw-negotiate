@@ -1,0 +1,148 @@
+# claw-negotiate
+
+OpenClaw skill for demonstrating APOA-constrained AI agents through a SAFE negotiation.
+
+For the demo, a founder and an investor each use their own OpenClaw. Each user authorizes private bounds, the two OpenClaws negotiate in a Telegram group, signing stays private in DMs, and the executed SAFE includes an sshsign audit trail.
+
+APOA is the point of the demo: the agents can negotiate creatively, but they cannot make or accept offers outside the authority their users explicitly granted.
+
+## What This Shows
+
+- Bounded AI-agent delegation through APOA authorizations.
+- Two independent OpenClaw agents negotiating on behalf of two humans.
+- Private user bounds with public group-visible rounds.
+- Human approval before signature.
+- Executed SAFE PDF with signatures and audit trail.
+
+The demo is open source. You can inspect the flow, install the skill, and run your own bounded-agent negotiation.
+
+## Install
+
+Copy the contents of `negotiate_safe/` into the OpenClaw skill directory on each OpenClaw host:
+
+```text
+/root/.agents/skills/negotiate_safe/
+```
+
+The deployable file list is tracked in `negotiate_safe/skill_manifest.json`.
+
+```bash
+python3 /root/.agents/skills/negotiate_safe/run_safe.py manifest
+```
+
+This repo also includes optional Telegram typing hook support in `hooks/telegram-typing/`.
+
+## Prerequisites
+
+- OpenClaw installed and paired with Telegram.
+- Python 3 available as `python3`.
+- SSH access to sshsign, usually `sshsign.dev`.
+- A checkout of the upstream `agenticpoa/negotiate` engine.
+- Anthropic API access for natural-language parsing.
+- OpenClaw skill env configured with:
+  - `ANTHROPIC_API_KEY`
+  - `NEGOTIATE_REPO_PATH`
+  - `USER_DID`
+  - `NEGOTIATE_SAFE_BOT_ROLE`
+  - `TELEGRAM_BOT_USERNAME`
+
+Negotiation turns default to the local OpenClaw agent. Set `NEGOTIATE_SAFE_TURN_BACKEND=anthropic` only if you intentionally want Anthropic to generate negotiation moves instead.
+
+## Configure
+
+Run this on each OpenClaw host after copying the skill.
+
+Founder-side OpenClaw:
+
+```bash
+python3 /root/.agents/skills/negotiate_safe/run_safe.py operator-setup \
+  --role founder \
+  --bot-username @YourFounderBot \
+  --sshsign-host sshsign.dev \
+  --negotiate-repo-path /path/to/negotiate \
+  --scan-interval 5s
+```
+
+Investor-side OpenClaw:
+
+```bash
+python3 /root/.agents/skills/negotiate_safe/run_safe.py operator-setup \
+  --role investor \
+  --bot-username @YourInvestorBot \
+  --sshsign-host sshsign.dev \
+  --negotiate-repo-path /path/to/negotiate \
+  --scan-interval 5s
+```
+
+Then run:
+
+```bash
+python3 scripts/smoke_install.py --skill-dir /root/.agents/skills/negotiate_safe
+python3 /root/.agents/skills/negotiate_safe/run_safe.py doctor
+```
+
+`smoke_install.py` checks the manifest and local files. `doctor` checks required env, upstream compatibility, sshsign reachability, OpenClaw message/cron primitives, and workflow leases.
+
+## Try It
+
+Founder DM:
+
+```text
+Live negotiation for Series Seed SAFE with Nora Vassileva at SD Capital.
+
+Cap: $20M-$30M post.
+Check: $500k-$1M.
+Pro rata: required.
+Discount: 0%
+```
+
+Reply `GO` after the authorization card looks right. The founder OpenClaw will mint an `INV-XXXXX` code and provide an investor invite template.
+
+Investor DM:
+
+```text
+Joining INV-XXXXX via @FounderBot, I am Nora Vassileva at SD Capital.
+
+Cap: $10M-$24M post.
+Check: $250k-$600k.
+Pro rata: required.
+Discount: 0%
+```
+
+Reply `GO` after the investor authorization card looks right.
+
+Telegram group:
+
+```text
+/bind INV-XXXXX
+```
+
+The group receives live negotiation rounds. Signing links are sent only by DM to each signer. If a counterparty offer is outside the local user's authorization, that user gets a private APOA blocked card; the group does not see private bounds.
+
+## Demo Script
+
+For a live walkthrough:
+
+```bash
+python3 scripts/demo_checklist.py
+```
+
+For only the pasteable prompts:
+
+```bash
+python3 scripts/demo_checklist.py --quick
+```
+
+The recording narration lives in `docs/recording_script.md`.
+
+Historical implementation plans and deeper architecture notes live under `docs/`, including `docs/sshsign_leases_plan.md`.
+
+## Development
+
+Run the full suite:
+
+```bash
+python3 -m pytest -q --tb=line
+```
+
+The integration tests are disabled by default. Set `RUN_INTEGRATION=1` when the required live dependencies are available.

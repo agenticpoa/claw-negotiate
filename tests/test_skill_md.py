@@ -49,11 +49,13 @@ class TestFrontmatter:
         m = re.search(r"^metadata:\s*(\{.*\})\s*$", frontmatter, re.M)
         meta = json.loads(m.group(1))
         env = set(meta["openclaw"]["requires"]["env"])
-        # Core secrets + the installed user's APOA DID. Party-identity env
-        # vars (FOUNDER_NAME, INVESTOR_NAME, COMPANY_NAME, etc) come from
-        # upstream's .env.example convention; they're optional because the
-        # user can also supply them in the NL, so they're not in `requires`.
-        assert {"NEGOTIATE_REPO_PATH", "USER_DID"} <= env
+        assert {
+            "ANTHROPIC_API_KEY",
+            "NEGOTIATE_REPO_PATH",
+            "USER_DID",
+            "NEGOTIATE_SAFE_BOT_ROLE",
+            "TELEGRAM_BOT_USERNAME",
+        } <= env
 
     def test_requires_lists_bins(self, frontmatter):
         m = re.search(r"^metadata:\s*(\{.*\})\s*$", frontmatter, re.M)
@@ -61,6 +63,7 @@ class TestFrontmatter:
         bins = set(meta["openclaw"]["requires"]["bins"])
         assert "python3" in bins
         assert "ssh" in bins
+        assert "openclaw" in bins
 
 
 class TestSteps:

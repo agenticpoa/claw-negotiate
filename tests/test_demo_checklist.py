@@ -23,9 +23,9 @@ def test_demo_checklist_contains_core_proof_points():
         "/bind",
         "Round 0",
         "Nora Vassileva",
-        "SD Fund",
+        "SD Capital",
         "Avocado",
-        "If It Stalls",
+        "APOA blocked",
     ]
     for term in required:
         assert term in text
@@ -38,10 +38,8 @@ def test_demo_checklist_has_expected_sections():
         "## Founder Starts",
         "## Investor Joins",
         "## Group Bind",
-        "## Constraint Proof",
-        "## Signing",
-        "## Executed SAFE",
-        "## Audit",
+        "## APOA Proof Points",
+        "## Recording Reminders",
     ]:
         assert heading in text
 
@@ -56,7 +54,7 @@ def test_demo_checklist_script_prints_markdown():
     )
     assert result.returncode == 0
     assert result.stdout.startswith("# APOA SAFE Negotiation Demo Checklist")
-    assert "Proof point" in result.stdout
+    assert "APOA Proof Points" in result.stdout
 
 
 def test_demo_checklist_script_quick_mode_prints_pasteable_steps():
@@ -69,5 +67,5 @@ def test_demo_checklist_script_quick_mode_prints_pasteable_steps():
     )
     assert result.returncode == 0
     assert result.stdout.startswith("# APOA SAFE Demo Quick Script")
-    assert "Live negotiation with Nora Vassileva at SD Fund" in result.stdout
+    assert "Live negotiation for Series Seed SAFE with Nora Vassileva at SD Capital" in result.stdout
     assert "/bind INV-XXXXX" in result.stdout

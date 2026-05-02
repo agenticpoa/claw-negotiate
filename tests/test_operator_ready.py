@@ -70,6 +70,7 @@ class TestDoctor:
     def test_reports_missing_env(self, tmp_path):
         checks = op.doctor_checks(env={}, runner=MagicMock(return_value=_cp()))
         by_name = {c.name: c for c in checks}
+        assert by_name["ANTHROPIC_API_KEY"].ok is False
         assert by_name["USER_DID"].ok is False
         assert by_name["NEGOTIATE_SAFE_BOT_ROLE"].ok is False
         assert by_name["workflow leases"].ok is False

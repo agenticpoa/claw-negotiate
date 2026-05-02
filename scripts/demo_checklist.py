@@ -27,7 +27,12 @@ Update my profile - I'm Juan Figuera, CEO of Avocado
 Start:
 
 ```text
-Live negotiation with Nora Vassileva at SD Fund. Cap $30M to $40M, 10% discount, pro-rata required.
+Live negotiation for Series Seed SAFE with Nora Vassileva at SD Capital.
+
+Cap: $20M-$30M post.
+Check: $500k-$1M.
+Pro rata: required.
+Discount: 0%
 ```
 
 Reply after confirm:
@@ -45,13 +50,18 @@ My profile
 If needed:
 
 ```text
-Update my profile - I'm Nora Vassileva, partner at SD Fund
+Update my profile - I'm Nora Vassileva, partner at SD Capital
 ```
 
 Join:
 
 ```text
-Joining INV-XXXXX via @AgenticPOA_bot, I am Nora Vassileva at SD Fund, cap up to $35M, 10% discount, pro-rata required
+Joining INV-XXXXX via @AgenticPOA_bot, I am Nora Vassileva at SD Capital.
+
+Cap: $10M-$24M post.
+Check: $250k-$600k.
+Pro rata: required.
+Discount: 0%
 ```
 
 Reply after confirm:
@@ -70,6 +80,7 @@ Watch for:
 
 - Round 0 in group
 - alternating founder/investor cards, no duplicates
+- private APOA blocked card when a counterparty offer is outside local bounds
 - private signing links in DMs only
 - executed PDF in group after both signatures
 """
