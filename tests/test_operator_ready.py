@@ -113,6 +113,52 @@ class TestDoctor:
         assert by_name["NEGOTIATE_SAFE_BOT_ROLE"].ok is False
         assert by_name["workflow leases"].ok is False
 
+    def test_reads_openclaw_skill_env_when_env_not_in_process(self, tmp_path, monkeypatch):
+        repo = tmp_path / "negotiate"
+        repo.mkdir()
+        (repo / "create_tokens.py").write_text("")
+        (repo / "negotiate.py").write_text(
+            "from dataclasses import dataclass\n"
+            "@dataclass\n"
+            "class NegotiationConfig:\n"
+            "    role: str = ''\n"
+            "    signer_role: str = ''\n"
+        )
+        cfg = tmp_path / "openclaw.json"
+        cfg.write_text(json.dumps({
+            "skills": {
+                "entries": {
+                    "negotiate_safe": {
+                        "env": {
+                            "ANTHROPIC_API_KEY": "test",
+                            "USER_DID": "did:apoa:test",
+                            "TELEGRAM_BOT_USERNAME": "Bot",
+                            "NEGOTIATE_SAFE_BOT_ROLE": "investor",
+                            "NEGOTIATE_REPO_PATH": str(repo),
+                        },
+                    },
+                },
+            },
+        }))
+        monkeypatch.setattr(op, "OPENCLAW_CONFIG_PATH", cfg)
+        for key in [
+            "ANTHROPIC_API_KEY",
+            "USER_DID",
+            "TELEGRAM_BOT_USERNAME",
+            "NEGOTIATE_SAFE_BOT_ROLE",
+            "NEGOTIATE_REPO_PATH",
+        ]:
+            monkeypatch.delenv(key, raising=False)
+
+        checks = op.doctor_checks(runner=MagicMock(return_value=_cp()))
+
+        by_name = {c.name: c for c in checks}
+        assert by_name["ANTHROPIC_API_KEY"].ok is True
+        assert by_name["USER_DID"].ok is True
+        assert by_name["TELEGRAM_BOT_USERNAME"].ok is True
+        assert by_name["NEGOTIATE_SAFE_BOT_ROLE"].ok is True
+        assert by_name["NEGOTIATE_REPO_PATH"].ok is True
+
     def test_feature_probes_upstream_config(self, tmp_path):
         repo = tmp_path / "negotiate"
         repo.mkdir()

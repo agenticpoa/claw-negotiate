@@ -35,7 +35,23 @@ OPENCLAW_CONFIG_PATH = Path("/root/.openclaw/openclaw.json")
 
 
 def _env(env: Mapping[str, str] | None) -> Mapping[str, str]:
-    return env if env is not None else os.environ
+    if env is not None:
+        return env
+    merged: dict[str, str] = {}
+    try:
+        cfg = json.loads(OPENCLAW_CONFIG_PATH.read_text(encoding="utf-8"))
+        skill_env = (
+            cfg.get("skills", {})
+            .get("entries", {})
+            .get("negotiate_safe", {})
+            .get("env", {})
+        )
+        if isinstance(skill_env, dict):
+            merged.update({str(k): str(v) for k, v in skill_env.items() if v is not None})
+    except (OSError, json.JSONDecodeError, AttributeError):
+        pass
+    merged.update(os.environ)
+    return merged
 
 
 def load_skill_manifest(path: str | Path = MANIFEST_PATH) -> dict:
@@ -234,11 +250,13 @@ def doctor_checks(
         "openclaw cron list",
         ["openclaw", "cron", "list"],
         runner=runner,
+        timeout=30,
     ))
     checks.append(_check_command(
         "openclaw message send",
         ["openclaw", "message", "send", "--help"],
         runner=runner,
+        timeout=30,
     ))
     checks.append(_check_lease_command(host, runner=runner))
     return checks
