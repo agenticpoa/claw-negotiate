@@ -3,11 +3,6 @@
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
-
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-CHECKLIST = REPO_ROOT / "docs" / "demo_checklist.md"
 
 
 QUICK = """# APOA SAFE Demo Quick Script
@@ -86,6 +81,79 @@ Watch for:
 """
 
 
+FULL = """# APOA SAFE Negotiation Demo Checklist
+
+## Preflight
+
+- Founder and investor OpenClaws are paired with Telegram.
+- `python3 scripts/smoke_install.py --skill-dir negotiate_safe --skip-openclaw` passes locally.
+- Each side has a saved profile.
+- The demo should show APOA enforcing private bounds, not just two agents chatting.
+
+## Founder Starts
+
+Founder bot DM:
+
+```text
+Live negotiation for Series Seed SAFE with Nora Vassileva at SD Capital.
+
+Cap: $20M-$30M post.
+Check: $500k-$1M.
+Pro rata: required.
+Discount: 0%
+```
+
+Review the authorization card. Point out that these are private user bounds. Reply:
+
+```text
+GO
+```
+
+## Investor Joins
+
+Investor bot DM:
+
+```text
+Joining INV-XXXXX via @AgenticPOA_bot, I am Nora Vassileva at SD Capital.
+
+Cap: $10M-$24M post.
+Check: $250k-$600k.
+Pro rata: required.
+Discount: 0%
+```
+
+Review the investor authorization card and reply:
+
+```text
+GO
+```
+
+## Group Bind
+
+Create the negotiation room and paste:
+
+```text
+/bind INV-XXXXX
+```
+
+Confirm the group receives Round 0 and then alternating founder/investor offers without duplicates.
+
+## APOA Proof Points
+
+- Each OpenClaw negotiates creatively inside its user's authority.
+- Private bounds are not disclosed in the group chat.
+- If a counterparty proposes an out-of-bounds term, the user sees an APOA blocked card privately.
+- Private signing links are sent by DM, and each human reviews before signing.
+- The executed SAFE includes signatures and an sshsign audit trail.
+
+## Recording Reminders
+
+- Say that the demo is open source.
+- Keep the story centered on: "I asked my OpenClaw to negotiate my SAFE for me."
+- Highlight bounded delegation, human approval, and auditability.
+"""
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -97,7 +165,7 @@ def main() -> int:
     if args.quick:
         print(QUICK, end="" if QUICK.endswith("\n") else "\n")
     else:
-        print(CHECKLIST.read_text(encoding="utf-8"), end="")
+        print(FULL, end="" if FULL.endswith("\n") else "\n")
     return 0
 
 

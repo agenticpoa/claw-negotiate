@@ -56,18 +56,17 @@ def test_readme_points_to_manifest_and_doctor():
     assert "demo_checklist.py" in readme
     assert "run_safe.py doctor" in readme
     assert "operator-setup" in readme
-    assert "sshsign_leases_plan.md" in readme
+    assert "docs/" not in readme
 
 
-def test_sshsign_lease_plan_documents_server_side_work():
-    text = (REPO_ROOT / "docs" / "sshsign_leases_plan.md").read_text()
-    for term in [
-        "signing_session_leases",
-        "acquire-lease",
-        "refresh-lease",
-        "release-lease",
-        "internal/sessions/repo.go",
-        "internal/server/sessions_handlers.go",
-        "compare",
-    ]:
-        assert term in text
+def test_public_markdown_allowlist():
+    markdown_files = sorted(
+        p.relative_to(REPO_ROOT).as_posix()
+        for p in REPO_ROOT.rglob("*.md")
+        if ".git" not in p.parts and ".pytest_cache" not in p.parts
+    )
+    assert markdown_files == [
+        "README.md",
+        "hooks/telegram-typing/HOOK.md",
+        "negotiate_safe/SKILL.md",
+    ]

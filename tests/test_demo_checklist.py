@@ -6,42 +6,7 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).parent.parent
-CHECKLIST = REPO_ROOT / "docs" / "demo_checklist.md"
 SCRIPT = REPO_ROOT / "scripts" / "demo_checklist.py"
-
-
-def test_demo_checklist_contains_core_proof_points():
-    text = CHECKLIST.read_text()
-    required = [
-        "APOA",
-        "bounded",
-        "audit",
-        "human",
-        "signing links",
-        "executed SAFE",
-        "INV-XXXXX",
-        "/bind",
-        "Round 0",
-        "Nora Vassileva",
-        "SD Capital",
-        "Avocado",
-        "APOA blocked",
-    ]
-    for term in required:
-        assert term in text
-
-
-def test_demo_checklist_has_expected_sections():
-    text = CHECKLIST.read_text()
-    for heading in [
-        "## Preflight",
-        "## Founder Starts",
-        "## Investor Joins",
-        "## Group Bind",
-        "## APOA Proof Points",
-        "## Recording Reminders",
-    ]:
-        assert heading in text
 
 
 def test_demo_checklist_script_prints_markdown():
@@ -55,6 +20,30 @@ def test_demo_checklist_script_prints_markdown():
     assert result.returncode == 0
     assert result.stdout.startswith("# APOA SAFE Negotiation Demo Checklist")
     assert "APOA Proof Points" in result.stdout
+    for term in [
+        "APOA",
+        "private user bounds",
+        "audit trail",
+        "human",
+        "signing links",
+        "executed SAFE",
+        "INV-XXXXX",
+        "/bind",
+        "Round 0",
+        "Nora Vassileva",
+        "SD Capital",
+        "APOA blocked",
+    ]:
+        assert term in result.stdout
+    for heading in [
+        "## Preflight",
+        "## Founder Starts",
+        "## Investor Joins",
+        "## Group Bind",
+        "## APOA Proof Points",
+        "## Recording Reminders",
+    ]:
+        assert heading in result.stdout
 
 
 def test_demo_checklist_script_quick_mode_prints_pasteable_steps():
