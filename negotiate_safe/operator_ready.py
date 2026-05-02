@@ -31,6 +31,7 @@ class Check:
 ENV_PATH_PREFIX = "skills.entries.negotiate_safe.env."
 SKILL_DIR = Path(__file__).resolve().parent
 MANIFEST_PATH = SKILL_DIR / "skill_manifest.json"
+OPENCLAW_CONFIG_PATH = Path("/root/.openclaw/openclaw.json")
 
 
 def _env(env: Mapping[str, str] | None) -> Mapping[str, str]:
@@ -281,6 +282,21 @@ def build_operator_updates(
     return updates
 
 
+def _config_has_env_value(key: str, value: str, path: Path | None = None) -> bool:
+    path = path or OPENCLAW_CONFIG_PATH
+    try:
+        cfg = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    env = (
+        cfg.get("skills", {})
+        .get("entries", {})
+        .get("negotiate_safe", {})
+        .get("env", {})
+    )
+    return isinstance(env, dict) and str(env.get(key) or "") == value
+
+
 def persist_operator_updates(
     updates: dict[str, str],
     runner: Runner = subprocess.run,
@@ -298,6 +314,6 @@ def persist_operator_updates(
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             failures.append(key)
             continue
-        if result.returncode != 0:
+        if result.returncode != 0 and not _config_has_env_value(key, value):
             failures.append(key)
     return failures

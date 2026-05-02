@@ -65,6 +65,24 @@ class TestPersistOperatorUpdates:
         failures = op.persist_operator_updates({"SSHSIGN_HOST": "x"}, runner=runner)
         assert failures == ["SSHSIGN_HOST"]
 
+    def test_accepts_written_value_despite_nonzero(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "openclaw.json"
+        cfg.write_text(json.dumps({
+            "skills": {
+                "entries": {
+                    "negotiate_safe": {
+                        "env": {"SSHSIGN_HOST": "sshsign.dev"},
+                    },
+                },
+            },
+        }))
+        monkeypatch.setattr(op, "OPENCLAW_CONFIG_PATH", cfg)
+        runner = MagicMock(return_value=_cp(returncode=1, stderr="workspace edit failed"))
+
+        failures = op.persist_operator_updates({"SSHSIGN_HOST": "sshsign.dev"}, runner=runner)
+
+        assert failures == []
+
 
 class TestDoctor:
     def test_reports_missing_env(self, tmp_path):
