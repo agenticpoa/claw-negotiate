@@ -159,6 +159,18 @@ class TestDoctor:
         assert by_name["NEGOTIATE_SAFE_BOT_ROLE"].ok is True
         assert by_name["NEGOTIATE_REPO_PATH"].ok is True
 
+    def test_command_timeout_with_usage_output_is_available(self):
+        def runner(*args, **kwargs):
+            raise subprocess.TimeoutExpired(
+                cmd=args[0],
+                timeout=kwargs.get("timeout"),
+                output="Usage: openclaw message send [options]\nSend a message\n",
+            )
+
+        check = op._check_command("openclaw message send", ["openclaw", "message", "send", "--help"], runner)
+
+        assert check.ok is True
+
     def test_feature_probes_upstream_config(self, tmp_path):
         repo = tmp_path / "negotiate"
         repo.mkdir()

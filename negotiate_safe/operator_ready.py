@@ -167,7 +167,12 @@ def _check_command(
         result = runner(argv, capture_output=True, text=True, timeout=timeout)
     except FileNotFoundError:
         return Check(name=name, ok=False, detail=f"{argv[0]} not found", fix=f"Install {argv[0]}.")
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
+        stdout = exc.stdout.decode(errors="ignore") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        stderr = exc.stderr.decode(errors="ignore") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        body = (stdout or stderr or "").strip()
+        if "Usage:" in body:
+            return Check(name=name, ok=True, detail=body[:160])
         return Check(name=name, ok=False, detail="timeout", fix="Check network/service availability.")
     except OSError as exc:
         return Check(name=name, ok=False, detail=str(exc), fix="Check local command availability.")
