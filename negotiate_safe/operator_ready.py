@@ -309,9 +309,13 @@ def persist_operator_updates(
                 ["openclaw", "config", "set", path, value],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=30,
             )
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        except subprocess.TimeoutExpired:
+            if not _config_has_env_value(key, value):
+                failures.append(key)
+            continue
+        except (FileNotFoundError, OSError):
             failures.append(key)
             continue
         if result.returncode != 0 and not _config_has_env_value(key, value):

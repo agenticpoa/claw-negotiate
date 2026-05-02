@@ -83,6 +83,26 @@ class TestPersistOperatorUpdates:
 
         assert failures == []
 
+    def test_accepts_written_value_after_timeout(self, tmp_path, monkeypatch):
+        cfg = tmp_path / "openclaw.json"
+        cfg.write_text(json.dumps({
+            "skills": {
+                "entries": {
+                    "negotiate_safe": {
+                        "env": {"SSHSIGN_HOST": "sshsign.dev"},
+                    },
+                },
+            },
+        }))
+        monkeypatch.setattr(op, "OPENCLAW_CONFIG_PATH", cfg)
+
+        def runner(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd=args[0], timeout=kwargs.get("timeout"))
+
+        failures = op.persist_operator_updates({"SSHSIGN_HOST": "sshsign.dev"}, runner=runner)
+
+        assert failures == []
+
 
 class TestDoctor:
     def test_reports_missing_env(self, tmp_path):

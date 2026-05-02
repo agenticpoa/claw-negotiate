@@ -84,3 +84,18 @@ def test_persist_env_updates_accepts_written_value_despite_nonzero(tmp_path, mon
     failures = identity.persist_env_updates({"INVESTOR_NAME": "Nora"}, runner=runner)
 
     assert failures == []
+
+
+def test_persist_env_updates_accepts_written_value_after_timeout(tmp_path, monkeypatch):
+    cfg = tmp_path / "openclaw.json"
+    cfg.write_text(
+        '{"skills":{"entries":{"negotiate_safe":{"env":{"INVESTOR_NAME":"Nora"}}}}}'
+    )
+    monkeypatch.setattr(identity, "OPENCLAW_CONFIG_PATH", cfg)
+
+    def runner(*args, **kwargs):
+        raise subprocess.TimeoutExpired("openclaw", kwargs.get("timeout"))
+
+    failures = identity.persist_env_updates({"INVESTOR_NAME": "Nora"}, runner=runner)
+
+    assert failures == []
