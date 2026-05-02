@@ -57,6 +57,24 @@ def _isolated_state_dir(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_chat_context(monkeypatch):
+    """Keep unit tests independent from the host OpenClaw install.
+
+    Demo droplets often have real Telegram sessions and bot tokens in
+    /root/.openclaw. Unit tests should only see a chat id or bot token when
+    the test explicitly supplies one.
+    """
+    import run_safe as rs
+
+    monkeypatch.setattr(
+        rs,
+        "resolve_chat_id",
+        lambda flag_value=None: str(flag_value).strip() if flag_value else None,
+    )
+    monkeypatch.setattr(rs, "get_bot_token", lambda *a, **kw: None)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_sshsign_session(monkeypatch):
     """Several code paths instantiate SshsignSession directly (rather
     than accepting an injected session_client) and call get_session

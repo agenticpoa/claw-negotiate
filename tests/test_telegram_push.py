@@ -11,6 +11,11 @@ import pytest
 import telegram_push as tp
 
 
+@pytest.fixture(autouse=True)
+def _no_real_bot_token(monkeypatch):
+    monkeypatch.setattr(tp, "get_bot_token", lambda *a, **kw: None)
+
+
 # ---- resolve_chat_id ----
 
 

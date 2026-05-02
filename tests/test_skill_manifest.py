@@ -63,7 +63,7 @@ def test_public_markdown_allowlist():
     markdown_files = sorted(
         p.relative_to(REPO_ROOT).as_posix()
         for p in REPO_ROOT.rglob("*.md")
-        if ".git" not in p.parts and ".pytest_cache" not in p.parts
+        if not {".git", ".pytest_cache", ".venv"}.intersection(p.parts)
     )
     assert markdown_files == [
         "README.md",
