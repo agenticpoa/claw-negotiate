@@ -291,24 +291,46 @@ def _png_to_pdf_rgb(png_b64: str) -> tuple[int, int, bytes] | None:
         rows.append(row)
         previous = row
 
-    rgb = bytearray()
+    pixels: list[tuple[int, int, int]] = []
     for row in rows:
         for x in range(width):
             i = x * channels
             if color_type == 0:
                 gray = row[i]
-                rgb.extend((gray, gray, gray))
+                pixels.append((gray, gray, gray))
             elif color_type == 2:
-                rgb.extend(row[i : i + 3])
+                pixels.append((row[i], row[i + 1], row[i + 2]))
             else:
                 r, g, b, a = row[i], row[i + 1], row[i + 2], row[i + 3]
                 inv = 255 - a
-                rgb.extend((
+                pixels.append((
                     (r * a + 255 * inv) // 255,
                     (g * a + 255 * inv) // 255,
                     (b * a + 255 * inv) // 255,
                 ))
-    return width, height, zlib.compress(bytes(rgb), level=9)
+
+    marked = [
+        (idx % width, idx // width)
+        for idx, (r, g, b) in enumerate(pixels)
+        if min(r, g, b) < 245
+    ]
+    if marked:
+        pad = 10
+        min_x = max(0, min(x for x, _y in marked) - pad)
+        max_x = min(width - 1, max(x for x, _y in marked) + pad)
+        min_y = max(0, min(y for _x, y in marked) - pad)
+        max_y = min(height - 1, max(y for _x, y in marked) + pad)
+    else:
+        min_x, min_y, max_x, max_y = 0, 0, width - 1, height - 1
+
+    cropped_width = max_x - min_x + 1
+    cropped_height = max_y - min_y + 1
+    rgb = bytearray()
+    for y in range(min_y, max_y + 1):
+        start = y * width
+        for x in range(min_x, max_x + 1):
+            rgb.extend(pixels[start + x])
+    return cropped_width, cropped_height, zlib.compress(bytes(rgb), level=9)
 
 
 class _SimplePDF:
@@ -511,116 +533,188 @@ def finalize_executed_pdf(
 
     pdf = _SimplePDF()
 
-    def page_header(title: str, subtitle: str = "") -> None:
-        pdf.text(54, 744, title, size=24, bold=True)
+    def center_title(title: str, subtitle: str = "") -> None:
+        x = max(54, 306 - len(title) * 5.6)
+        pdf.text(x, 720, title, size=24)
         if subtitle:
-            pdf.text(54, 724, subtitle, size=10)
-        pdf.rule(54, 708, 504)
+            pdf.text(max(54, 306 - len(subtitle) * 2.8), 692, subtitle, size=11)
+        pdf.command("0.000 0.600 0.560 RG 224.0 674.0 m 388.0 674.0 l S 0 G")
 
-    def label_value(y: float, label: str, value: str, *, x: float = 78, w: float = 456) -> float:
-        pdf.text(x, y, label, size=9, bold=True)
-        for line in _wrap(value, 70):
-            pdf.text(x + 148, y, line, size=9)
+    def footer(text: str) -> None:
+        pdf.text(max(54, 306 - len(text) * 2.2), 54, text, size=8)
+
+    def paragraph(y: float, text: str, *, width: int = 102, size: int = 10, italic: bool = False) -> float:
+        for line in _wrap(text, width):
+            pdf.text(65, y, line, size=size, font="F1")
             y -= 13
         return y
+
+    def section(y: float, title: str, body: str) -> float:
+        pdf.text(65, y, title, size=12, bold=True)
+        pdf.rule(65, y - 8, 482, gray=0.86)
+        y -= 24
+        return paragraph(y, body, width=104)
+
+    def kv_box(y: float, rows: list[tuple[str, str]], *, x: float = 65, w: float = 482, stripe: bool = True) -> float:
+        h = 25 + len(rows) * 19
+        pdf.rect(x, y - h, w, h, gray=0.965)
+        if stripe:
+            pdf.command(f"0.000 0.600 0.560 rg {x:.1f} {y - h:.1f} 7.0 {h:.1f} re f 0 g")
+        yy = y - 22
+        for label, value in rows:
+            pdf.text(x + 26, yy, label, size=9)
+            pdf.text(x + 184, yy, value, size=9, bold=True)
+            yy -= 19
+        return y - h - 24
+
+    def event_dt(event: dict) -> datetime | None:
+        raw = event.get("created_at")
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        except ValueError:
+            return None
 
     investor_line = parties["investor"]["name"]
     if parties["investor"]["firm"]:
         investor_line += f" at {parties['investor']['firm']}"
 
-    page_header("SAFE Agreement", f"Negotiation {negotiation_id} · Executed {terms['date']}")
-    pdf.rect(54, 548, 504, 138, gray=0.965)
-    y = 660
-    y = label_value(y, "Company", parties["founder"]["company"])
-    y = label_value(y, "Founder", f"{parties['founder']['name']}, {parties['founder']['title']}".rstrip(", "))
-    y = label_value(y, "Investor", investor_line)
-    y = label_value(y, "Execution date", terms["date"])
-
-    pdf.text(54, 506, "Final Terms", size=16, bold=True)
-    pdf.rect(54, 342, 504, 142, gray=0.975)
-    y = 456
-    y = label_value(y, "Purchase amount", _money(terms.get("investment_amount")))
-    y = label_value(y, "Valuation cap", _money(terms.get("valuation_cap")))
-    y = label_value(y, "Discount", _percent(terms.get("discount_rate")))
-    y = label_value(y, "Pro-rata rights", _yes_no(terms.get("pro_rata")))
-    y = label_value(y, "MFN", _yes_no(terms.get("mfn")))
-
-    pdf.text(54, 294, "Certificate of Execution", size=16, bold=True)
-    certificate = (
-        "This certificate attests that the preceding SAFE agreement has been "
-        "approved by all listed parties and cryptographically signed via sshsign."
+    center_title("SAFE", "Simple Agreement for Future Equity")
+    opening = (
+        f"THIS CERTIFIES THAT in exchange for the payment by {investor_line} "
+        f"(the \"Investor\") of {_money(terms.get('investment_amount'))} (the "
+        f"\"Purchase Amount\") on or about {terms['date']}, {parties['founder']['company']} "
+        f"(the \"Company\"), hereby issues to the Investor the right to certain shares "
+        "of the Company's Capital Stock, subject to the terms described below."
     )
-    y = 272
-    for line in _wrap(certificate, 82):
-        pdf.text(54, y, line, size=10)
-        y -= 14
-    pdf.rect(54, 112, 504, 104, gray=0.965)
-    y = 190
-    y = label_value(y, "Document SHA-256", doc_hash, x=72)
-    y = label_value(y, "Negotiation ID", negotiation_id, x=72)
-    if elapsed is not None:
-        y = label_value(y, "Duration", f"{elapsed:.1f} seconds", x=72)
-    label_value(y, "Signatories", str(len(signers)), x=72)
+    y = paragraph(642, opening, width=108)
+    y = kv_box(y - 10, [
+        ("KEY TERMS", ""),
+        ("Valuation Cap", _money(terms.get("valuation_cap"))),
+        ("Discount Rate", _percent(terms.get("discount_rate"))),
+        ("Pro-Rata Rights", "Included" if terms.get("pro_rata") else "Not Included"),
+        ("Most Favored Nation", "Included" if terms.get("mfn") else "Not Included"),
+        ("Purchase Amount", _money(terms.get("investment_amount"))),
+        ("Date", terms["date"]),
+    ])
+    y = section(y, "Section 1: Events", "1(a) Equity Financing. If there is an Equity Financing before the termination of this Safe, this Safe will automatically convert into the number of shares of Safe Preferred Stock equal to the Purchase Amount divided by the Safe Price or the Discount Price, whichever calculation results in a greater number of shares. 1(b) Liquidity Event. If there is a Liquidity Event before the termination of this Safe, this Safe will automatically be entitled to receive a portion of Proceeds. 1(c) Dissolution Event. If there is a Dissolution Event before the termination of this Safe, the Investor will be entitled to receive the Purchase Amount immediately prior to the consummation of the Dissolution Event.")
+    section(y, "Section 2: Definitions", f"\"Safe Price\" means the price per share equal to the Post-Money Valuation Cap divided by the Company Capitalization. \"Discount Price\" means the price per share of the Standard Preferred Stock sold in the Equity Financing multiplied by the Discount Rate. \"Post-Money Valuation Cap\" means {_money(terms.get('valuation_cap'))}.")
 
     pdf.new_page()
-    page_header("Signatures", "Handwritten signatures are sealed in sshsign evidence envelopes.")
-    y = 650
-    for signer in signers:
-        if y < 260:
-            pdf.new_page()
-            page_header("Signatures")
-            y = 650
-        pdf.rect(54, y - 174, 504, 184, gray=0.975)
-        pdf.stroke_rect(54, y - 174, 504, 184)
-        pdf.text(72, y, f"{signer['role']}: {signer['name']}", size=13, bold=True)
-        org_line = signer["organization"]
-        if signer["title"]:
-            org_line = f"{signer['title']} · {org_line}".strip(" ·")
-        pdf.text(72, y - 18, org_line, size=10)
-        image_drawn = pdf.add_image(signer.get("signature_image", ""), x=342, y=y - 126, w=178, h=66)
-        if not image_drawn:
-            pdf.text(362, y - 96, "[signature image unavailable]", size=9)
-        pdf.rule(334, y - 136, 198)
-        pdf.text(374, y - 150, "Drawn signature", size=8)
-        meta_y = y - 50
-        meta_y = label_value(meta_y, "Pending ID", signer["pending_id"], x=72)
-        meta_y = label_value(meta_y, "Key ID", signer["key_id"], x=72)
-        if signer["captured_at"]:
-            meta_y = label_value(meta_y, "Signed at", signer["captured_at"], x=72)
-        if signer["envelope_hash"]:
-            meta_y = label_value(meta_y, "Envelope SHA-256", signer["envelope_hash"], x=72)
-        if signer["image_hash"]:
-            label_value(meta_y, "Image SHA-256", signer["image_hash"], x=72)
-        y -= 210
+    y = 720
+    y = section(y, "Section 3: Company Representations", "The Company is a corporation duly organized, validly existing, and in good standing under the laws of its state of incorporation, and has the power and authority to own, lease, and operate its properties and carry on its business as now conducted. The execution, delivery, and performance by the Company of this Safe is within the power of the Company and has been duly authorized by all necessary actions on the part of the Company.")
+    y = section(y - 12, "Section 4: Investor Representations", "The Investor has full legal capacity, power, and authority to execute and deliver this Safe and to perform its obligations hereunder. The Investor is an accredited investor as such term is defined in Rule 501 of Regulation D under the Securities Act.")
+    y = section(y - 12, "Section 5: Miscellaneous", "Any provision of this Safe may be amended, waived, or modified by written consent of the Company and the Investor. Any notice required or permitted by this Safe will be deemed sufficient when delivered personally or sent by email to the relevant address listed on the signature page. This Safe shall be governed by and construed under the laws of the State of Delaware, United States, without regard to conflict of laws provisions.")
+    section(y - 12, "Section 6: Pro-Rata Rights", "The Investor shall have a pro-rata right to participate in subsequent Equity Financing rounds on the same terms and conditions as other investors in such round, up to an amount sufficient to maintain the Investor's percentage ownership of the Company." if terms.get("pro_rata") else "The Investor shall not receive contractual pro-rata participation rights under this Safe.")
 
     pdf.new_page()
-    page_header("Negotiation Audit Trail", "Every offer was recorded to sshsign before display.")
-    y = 670
-    for event in events:
-        if y < 96:
-            pdf.new_page()
-            page_header("Negotiation Audit Trail")
-            y = 670
+    center_title("Signature Page")
+    founder_signer = next((s for s in signers if s["role"].lower() == "founder"), signers[0])
+    investor_signer = next((s for s in signers if s["role"].lower() == "investor"), signers[-1])
+    pdf.text(65, 630, "COMPANY", size=9)
+    pdf.text(65, 606, parties["founder"]["company"], size=12, bold=True)
+    pdf.add_image(founder_signer.get("signature_image", ""), x=95, y=510, w=160, h=80)
+    pdf.text(65, 420, f"{parties['founder']['name']}, {parties['founder']['title']}".rstrip(", "), size=9)
+    pdf.text(65, 402, terms["date"], size=8)
+    pdf.text(65, 350, "INVESTOR", size=9)
+    pdf.text(65, 326, parties["investor"]["firm"] or parties["investor"]["name"], size=12, bold=True)
+    pdf.add_image(investor_signer.get("signature_image", ""), x=95, y=230, w=160, h=80)
+    pdf.text(65, 140, parties["investor"]["name"], size=9)
+    pdf.text(65, 122, terms["date"], size=8)
+    footer("Generated by APOA Negotiate  |  Signatures verified via sshsign")
+
+    pdf.new_page()
+    center_title("Negotiation Audit Trail")
+    y = paragraph(642, "Complete record of the negotiation between the parties. Each offer was validated against the proposing agent's APOA authorization constraints and logged to an immutable Merkle tree via sshsign/immudb.", width=108, size=9)
+    first_dt = next((event_dt(e) for e in events if event_dt(e)), None)
+    last_dt = next((event_dt(e) for e in reversed(events) if event_dt(e)), None)
+    y = kv_box(y - 10, [
+        ("Negotiation ID", negotiation_id),
+        ("Total Offers", str(len(events))),
+        ("Duration", f"{elapsed:.1f} seconds" if elapsed is not None else ""),
+        ("Started", first_dt.strftime("%Y-%m-%d %H:%M:%S UTC") if first_dt else ""),
+        ("Completed", last_dt.strftime("%Y-%m-%d %H:%M:%S UTC") if last_dt else ""),
+    ])
+    pdf.text(65, y, "Offer Summary", size=12, bold=True)
+    pdf.rule(65, y - 8, 482, gray=0.86)
+    y -= 30
+    headers = [("Round", 65), ("Party", 100), ("Type", 160), ("Cap", 250), ("Disc.", 306), ("Pro-Rata", 348), ("TX", 420), ("Time", 486)]
+    for label, x in headers:
+        pdf.text(x, y, label, size=7)
+    y -= 13
+    for event in events[:9]:
         terms_text = event.get("terms") or {}
-        title = (
-            f"Offer {int(event.get('round', 0)) + 1}: "
-            f"{str(event.get('party', '')).capitalize()} · {event.get('type')}"
-        )
-        pdf.text(54, y, title, size=11, bold=True)
-        y -= 16
-        summary = (
-            f"Cap {_money(terms_text.get('valuation_cap'))}; "
-            f"check {_money(terms_text.get('investment_amount'))}; "
-            f"discount {_percent(terms_text.get('discount_rate'))}; "
-            f"pro-rata {_yes_no(terms_text.get('pro_rata'))}; "
-            f"MFN {_yes_no(terms_text.get('mfn'))}"
-        )
-        for line in _wrap(summary, 92):
-            pdf.text(72, y, line, size=9)
-            y -= 13
-        if event.get("audit_tx"):
-            pdf.text(72, y, f"Audit tx: {event['audit_tx']}", size=8, font="F3")
-            y -= 13
-        y -= 8
+        dt = event_dt(event)
+        values = [
+            (str(event.get("round", "")), 65),
+            (str(event.get("party", "")), 100),
+            (str(event.get("type", "")), 160),
+            (_money(terms_text.get("valuation_cap")), 250),
+            (_percent(terms_text.get("discount_rate")), 306),
+            ("Yes" if terms_text.get("pro_rata") else "No", 348),
+            (str(event.get("audit_tx") or ""), 420),
+            (dt.strftime("%H:%M:%S") if dt else "", 486),
+        ]
+        for value, x in values:
+            pdf.text(x, y, value, size=7, bold=value in {"accept"})
+        y -= 13
+    y -= 18
+    pdf.text(65, y, "Negotiation Transcript", size=12, bold=True)
+    pdf.rule(65, y - 8, 482, gray=0.86)
+    y -= 28
+    for event in events:
+        if y < 90:
+            pdf.new_page()
+            y = 730
+        dt = event_dt(event)
+        pdf.text(65, y, f"Round {event.get('round', '')} -- {str(event.get('party', '')).capitalize()}", size=9)
+        if dt:
+            pdf.text(430, y, dt.strftime("%Y-%m-%d %H:%M:%S UTC"), size=7)
+        y -= 12
+        pdf.text(65, y, str(event.get("type", "")), size=7, bold=True)
+        y -= 13
+        message = event.get("message") or ""
+        if message:
+            for line in _wrap(f"\"{message}\"", 112):
+                pdf.text(65, y, line, size=8)
+                y -= 11
+        y -= 10
+
+    pdf.new_page()
+    center_title("Certificate of Execution")
+    y = paragraph(642, "This certificate attests that the preceding SAFE agreement has been cryptographically signed by all parties and executed via sshsign.", width=108, size=9)
+    y = kv_box(y - 10, [
+        ("Document SHA-256", doc_hash[:32]),
+        ("", doc_hash[32:]),
+        ("Negotiation ID", negotiation_id),
+        ("Signatories", str(len(signers))),
+    ])
+    for signer in signers:
+        if y < 180:
+            pdf.new_page()
+            y = 720
+        pdf.text(65, y, signer["role"], size=12, bold=True)
+        pdf.rule(65, y - 8, 482, gray=0.86)
+        y -= 28
+        pdf.text(65, y, "Signing Key", size=9)
+        pdf.text(195, y, signer["key_id"], size=9)
+        y -= 18
+        pdf.text(65, y, "Pending ID", size=9)
+        pdf.text(195, y, signer["pending_id"], size=9)
+        y -= 28
+        pdf.text(65, y, "SSH Signature", size=8)
+        y -= 12
+        block_h = 76
+        pdf.rect(65, y - block_h, 482, block_h, gray=0.965)
+        pdf.command(f"0.000 0.600 0.560 rg 65.0 {y - block_h:.1f} 7.0 {block_h:.1f} re f 0 g")
+        yy = y - 17
+        for line in str(signer.get("signature") or "").splitlines()[:6]:
+            pdf.text(90, yy, line[:82], size=5, font="F3")
+            yy -= 10
+        y -= block_h + 22
+        pdf.text(65, y, "Handwritten signature appears on the Signature Page", size=7)
+        y -= 34
+    footer("Verify this document at sshsign.dev  |  Generated by APOA Negotiate")
     pdf.write(pdf_path)
     return pdf_path if pdf_path.exists() else None
