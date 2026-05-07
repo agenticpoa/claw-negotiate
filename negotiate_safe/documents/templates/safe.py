@@ -12,7 +12,7 @@ from fpdf import FPDF
 from .base import DocumentTemplate
 
 FONT_DIR = Path(__file__).parent.parent / "fonts"
-FONT_B64_DIR = Path(__file__).parent.parent / "fonts_b64"
+FONT_TEXT_DIR = Path(__file__).parent.parent / "fonts_text"
 MATERIALIZED_FONT_DIR = Path(tempfile.gettempdir()) / "claw_negotiate_inter_fonts"
 FONT_FILES = (
     "Inter-Regular.ttf",
@@ -35,7 +35,7 @@ TABLE_BG = (248, 248, 250)  # Subtle alternating row background
 def _font_dir() -> Path:
     if (FONT_DIR / "Inter-Regular.ttf").exists():
         return FONT_DIR
-    if not (FONT_B64_DIR / "Inter-Regular.ttf.b64").exists():
+    if not (FONT_TEXT_DIR / "Inter-Regular.ttf.txt").exists():
         return FONT_DIR
 
     MATERIALIZED_FONT_DIR.mkdir(parents=True, exist_ok=True)
@@ -43,7 +43,7 @@ def _font_dir() -> Path:
         target = MATERIALIZED_FONT_DIR / name
         if target.exists():
             continue
-        source = FONT_B64_DIR / f"{name}.b64"
+        source = FONT_TEXT_DIR / f"{name}.txt"
         if source.exists():
             target.write_bytes(base64.b64decode(source.read_text(encoding="ascii")))
     return MATERIALIZED_FONT_DIR
