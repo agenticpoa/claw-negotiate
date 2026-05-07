@@ -458,6 +458,79 @@ def _document_hash(negotiation_id: str, terms: dict, parties: dict, events: list
     return hashlib.sha256(raw).hexdigest()
 
 
+def _template_discount(value: object) -> float:
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return amount / 100.0 if amount > 1 else amount
+
+
+def _template_history(events: list[dict]) -> list[dict]:
+    rows: list[dict] = []
+    for event in events:
+        terms = dict(event.get("terms") or {})
+        if "discount_rate" in terms:
+            terms["discount_rate"] = _template_discount(terms.get("discount_rate"))
+        row = {
+            "round": event.get("round", 0),
+            "from": event.get("party", ""),
+            "type": event.get("type", ""),
+            "terms": terms,
+            "message": event.get("message", ""),
+            "immudb_tx": event.get("audit_tx", ""),
+            "timestamp": event.get("created_at", ""),
+        }
+        rows.append(row)
+    return rows
+
+
+def _render_with_apoa_template(
+    *,
+    pdf_path: Path,
+    terms: dict,
+    parties: dict,
+    signers: list[dict],
+    doc_hash: str,
+    events: list[dict],
+    negotiation_id: str,
+    elapsed: float | None,
+) -> bool:
+    try:
+        from negotiate_safe.documents.templates.safe import SAFETemplate
+    except Exception:
+        try:
+            from documents.templates.safe import SAFETemplate
+        except Exception:
+            return False
+
+    template_terms = dict(terms)
+    template_terms["discount_rate"] = _template_discount(template_terms.get("discount_rate"))
+    template_signers = []
+    for signer in signers:
+        template_signer = dict(signer)
+        template_signer["role"] = str(template_signer.get("role", "")).lower()
+        template_signers.append(template_signer)
+
+    try:
+        template = SAFETemplate(template_terms, parties)
+        ok, _error = template.validate_terms()
+        if not ok:
+            return False
+        pdf_path.parent.mkdir(parents=True, exist_ok=True)
+        template.append_execution_page(
+            str(pdf_path),
+            signers=template_signers,
+            doc_hash=doc_hash,
+            negotiation_history=_template_history(events),
+            negotiation_id=negotiation_id,
+            elapsed_seconds=elapsed,
+        )
+    except Exception:
+        return False
+    return pdf_path.exists()
+
+
 def finalize_executed_pdf(
     output_dir: Path,
     pending_id: str,
@@ -530,6 +603,17 @@ def finalize_executed_pdf(
     config_anchor = mint.get("founder_config_path") or mint.get("investor_config_path") or ""
     neg_dir = Path(config_anchor).parent if config_anchor else output_dir
     pdf_path = neg_dir / "output" / f"{negotiation_id}_executed.pdf"
+    if _render_with_apoa_template(
+        pdf_path=pdf_path,
+        terms=terms,
+        parties=parties,
+        signers=signers,
+        doc_hash=doc_hash,
+        events=events,
+        negotiation_id=negotiation_id,
+        elapsed=elapsed,
+    ):
+        return pdf_path
 
     pdf = _SimplePDF()
 
