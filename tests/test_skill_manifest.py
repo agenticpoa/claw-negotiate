@@ -34,6 +34,15 @@ def test_manifest_includes_all_skill_python_files():
     assert actual <= listed
 
 
+def test_manifest_includes_pdf_template_assets():
+    data = _manifest()
+    listed = set(data["files"])
+    assert "documents/templates/safe.py" in listed
+    assert "documents/templates/base.py" in listed
+    assert "documents/fonts/Inter-Regular.ttf" in listed
+    assert "documents/fonts/Inter-Bold.ttf" in listed
+
+
 def test_manifest_requirements_match_skill_frontmatter():
     data = _manifest()
     skill = (SKILL_DIR / "SKILL.md").read_text()

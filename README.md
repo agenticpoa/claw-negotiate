@@ -51,6 +51,7 @@ Then enter the skill folder:
 
 ```bash
 cd ~/.openclaw/skills/claw-negotiate
+python3 -m pip install -r requirements.txt
 ```
 
 That's the install. The repo root is a valid OpenClaw skill root because it contains `SKILL.md`.
