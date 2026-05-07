@@ -41,6 +41,8 @@ def test_manifest_includes_pdf_template_assets():
     assert "documents/templates/base.py" in listed
     assert "documents/fonts/Inter-Regular.ttf" in listed
     assert "documents/fonts/Inter-Bold.ttf" in listed
+    assert "documents/fonts_b64/Inter-Regular.ttf.b64" in listed
+    assert "documents/fonts_b64/Inter-Bold.ttf.b64" in listed
 
 
 def test_manifest_requirements_match_skill_frontmatter():

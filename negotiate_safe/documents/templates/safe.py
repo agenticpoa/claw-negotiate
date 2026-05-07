@@ -12,6 +12,15 @@ from fpdf import FPDF
 from .base import DocumentTemplate
 
 FONT_DIR = Path(__file__).parent.parent / "fonts"
+FONT_B64_DIR = Path(__file__).parent.parent / "fonts_b64"
+MATERIALIZED_FONT_DIR = Path(tempfile.gettempdir()) / "claw_negotiate_inter_fonts"
+FONT_FILES = (
+    "Inter-Regular.ttf",
+    "Inter-Bold.ttf",
+    "Inter-Italic.ttf",
+    "Inter-Light.ttf",
+    "Inter-Medium.ttf",
+)
 
 # Color palette
 TEAL = (0, 150, 143)       # Primary accent
@@ -23,16 +32,34 @@ WHITE = (255, 255, 255)
 TABLE_BG = (248, 248, 250)  # Subtle alternating row background
 
 
+def _font_dir() -> Path:
+    if (FONT_DIR / "Inter-Regular.ttf").exists():
+        return FONT_DIR
+    if not (FONT_B64_DIR / "Inter-Regular.ttf.b64").exists():
+        return FONT_DIR
+
+    MATERIALIZED_FONT_DIR.mkdir(parents=True, exist_ok=True)
+    for name in FONT_FILES:
+        target = MATERIALIZED_FONT_DIR / name
+        if target.exists():
+            continue
+        source = FONT_B64_DIR / f"{name}.b64"
+        if source.exists():
+            target.write_bytes(base64.b64decode(source.read_text(encoding="ascii")))
+    return MATERIALIZED_FONT_DIR
+
+
 def _setup_fonts(pdf: FPDF) -> None:
     """Register Inter font family if available, fall back to Helvetica."""
-    if (FONT_DIR / "Inter-Regular.ttf").exists():
-        pdf.add_font("Inter", "", str(FONT_DIR / "Inter-Regular.ttf"))
-        pdf.add_font("Inter", "B", str(FONT_DIR / "Inter-Bold.ttf"))
-        pdf.add_font("Inter", "I", str(FONT_DIR / "Inter-Italic.ttf"))
-        if (FONT_DIR / "Inter-Light.ttf").exists():
-            pdf.add_font("InterLight", "", str(FONT_DIR / "Inter-Light.ttf"))
-        if (FONT_DIR / "Inter-Medium.ttf").exists():
-            pdf.add_font("InterMedium", "", str(FONT_DIR / "Inter-Medium.ttf"))
+    font_dir = _font_dir()
+    if (font_dir / "Inter-Regular.ttf").exists():
+        pdf.add_font("Inter", "", str(font_dir / "Inter-Regular.ttf"))
+        pdf.add_font("Inter", "B", str(font_dir / "Inter-Bold.ttf"))
+        pdf.add_font("Inter", "I", str(font_dir / "Inter-Italic.ttf"))
+        if (font_dir / "Inter-Light.ttf").exists():
+            pdf.add_font("InterLight", "", str(font_dir / "Inter-Light.ttf"))
+        if (font_dir / "Inter-Medium.ttf").exists():
+            pdf.add_font("InterMedium", "", str(font_dir / "Inter-Medium.ttf"))
 
 
 def _font(pdf: FPDF, weight: str = "", size: float = 10) -> None:
