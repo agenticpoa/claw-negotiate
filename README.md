@@ -2,6 +2,8 @@
 
 ![claw-negotiate banner](https://raw.githubusercontent.com/agenticpoa/claw-negotiate/main/assets/banner.jpg)
 
+[![Watch the claw-negotiate demo](https://img.youtube.com/vi/T2Y2Tr__g_k/maxresdefault.jpg)](https://www.youtube.com/watch?v=T2Y2Tr__g_k)
+
 OpenClaw skill for demonstrating APOA-constrained AI agents through a SAFE negotiation.
 
 For the demo, a founder and an investor each use their own OpenClaw. Each user authorizes private bounds, the two OpenClaws negotiate in a Telegram group, signing stays private in DMs, and the executed SAFE includes an sshsign audit trail.
