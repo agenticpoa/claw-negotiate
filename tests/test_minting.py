@@ -1,10 +1,8 @@
-from pathlib import Path
-
 from negotiate_safe.minting import (
-    build_create_tokens_cmd,
     build_service_name,
     normalize_user_role,
     resolve_investment_amount,
+    resolve_investment_amount_bounds,
     resolve_mint_identity,
     role_plan,
 )
@@ -104,29 +102,6 @@ def test_build_service_name_slugifies_company():
     assert build_service_name("Acme Labs, Inc.", "neg_1") == "safe:acme-labs--inc:neg_1"
 
 
-def test_build_create_tokens_cmd_binds_founder_and_ai_env_flags(tmp_path):
-    cmd, user_role = build_create_tokens_cmd(
-        repo=tmp_path,
-        negotiation_id="neg_1",
-        constraints=_constraints(),
-        neg_dir=tmp_path / "negotiations" / "neg_1",
-        expires_str="2026-04-27T00:00:00Z",
-        service="safe:acme:neg_1",
-        env={"USER_DID": "did:apoa:u1", "INVESTOR_CAP_MIN": "30000000"},
-        python_executable="/py",
-    )
-    assert user_role == "founder"
-    assert cmd[:2] == ["/py", str(Path(tmp_path) / "create_tokens.py")]
-    assert cmd[cmd.index("--principal-id") + 1] == "did:apoa:u1"
-    assert cmd[cmd.index("--investment-amount") + 1] == "500000.0"
-    assert cmd[cmd.index("--founder-cap-min") + 1] == "10000000"
-    assert cmd[cmd.index("--founder-investment-amount-min") + 1] == "500000.0"
-    assert cmd[cmd.index("--founder-investment-amount-max") + 1] == "500000.0"
-    assert cmd[cmd.index("--founder-discount-min") + 1] == "0.15"
-    assert cmd[cmd.index("--founder-discount-max") + 1] == "0.15"
-    assert cmd[cmd.index("--investor-cap-min") + 1] == "30000000"
-
-
 def test_resolve_investment_amount_uses_check_range_floor():
     assert resolve_investment_amount(_constraints(
         investment_amount=None,
@@ -135,39 +110,11 @@ def test_resolve_investment_amount_uses_check_range_floor():
     )) == 250_000.0
 
 
-def test_build_create_tokens_cmd_binds_check_size_range(tmp_path):
-    cmd, _ = build_create_tokens_cmd(
-        repo=tmp_path,
-        negotiation_id="neg_1",
-        constraints=_constraints(
+def test_resolve_investment_amount_bounds_uses_check_range():
+    assert resolve_investment_amount_bounds(
+        _constraints(
             investment_amount=None,
             investment_amount_min=250_000.0,
             investment_amount_max=750_000.0,
-        ),
-        neg_dir=tmp_path / "negotiations" / "neg_1",
-        expires_str="2026-04-27T00:00:00Z",
-        service="safe:acme:neg_1",
-        env={},
-        python_executable="/py",
-    )
-    assert cmd[cmd.index("--investment-amount") + 1] == "250000.0"
-    assert cmd[cmd.index("--founder-investment-amount-min") + 1] == "250000.0"
-    assert cmd[cmd.index("--founder-investment-amount-max") + 1] == "750000.0"
-
-
-def test_build_create_tokens_cmd_join_mode_skips_ai_env_flags(tmp_path):
-    cmd, user_role = build_create_tokens_cmd(
-        repo=tmp_path,
-        negotiation_id="neg_1",
-        constraints=_constraints(role="investor"),
-        neg_dir=tmp_path / "negotiations" / "neg_1",
-        expires_str="2026-04-27T00:00:00Z",
-        service="safe:acme:neg_1",
-        shared_session=True,
-        env={"FOUNDER_CAP_MIN": "30000000"},
-        python_executable="/py",
-    )
-    assert user_role == "investor"
-    assert cmd[cmd.index("--role") + 1] == "investor"
-    assert "--founder-cap-min" not in cmd
-    assert cmd[cmd.index("--investor-cap-min") + 1] == "10000000"
+        )
+    ) == (250_000.0, 750_000.0)

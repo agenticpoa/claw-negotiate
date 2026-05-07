@@ -13,6 +13,8 @@ prompt gets clean output with less token spend.
 from __future__ import annotations
 
 import json
+import re
+import os
 import sys
 from typing import Any
 
@@ -54,7 +56,74 @@ Output: {"role": "investor", "name": "Jordan Lee", "title": null, "company": nul
 """
 
 
+def _normalize_identity(parsed: dict[str, Any]) -> dict[str, Any]:
+    if not parsed.get("role"):
+        parsed["role"] = "founder"
+    parsed["role"] = str(parsed["role"]).lower()
+    if parsed["role"] not in ("founder", "investor"):
+        parsed["role"] = "founder"
+
+    for field in ("name", "title", "company", "firm"):
+        parsed.setdefault(field, None)
+
+    return parsed
+
+
+def _extract_identity_deterministic(message: str) -> dict[str, Any]:
+    """Parse the common profile setup copy without an external LLM."""
+    text = " ".join(message.strip().split())
+    lower = text.lower()
+
+    is_investor = bool(re.search(
+        r"\b(partner|investor|managing director|principal|associate)\b|\b(?:at|from)\s+[^,.]*(fund|capital|ventures|vc)\b",
+        lower,
+    ))
+
+    name = title = company = firm = None
+
+    founder_m = re.search(
+        r"(?:i\s*(?:am|'m)\s+)?(?P<name>.+?),\s*(?P<title>ceo|cto|cfo|cofounder|co-founder|founder|president)\s+(?:of|at)\s+(?P<company>.+)$",
+        text,
+        re.IGNORECASE,
+    )
+    investor_m = re.search(
+        r"(?:i\s*(?:am|'m)\s+)?(?P<name>.+?),\s*(?P<title>partner|managing director|principal|associate|investor)\s+(?:at|from)\s+(?P<firm>.+)$",
+        text,
+        re.IGNORECASE,
+    )
+    simple_investor_m = re.search(
+        r"(?:i\s*(?:am|'m)\s+)?(?P<name>.+?)\s+(?:at|from)\s+(?P<firm>.+)$",
+        text,
+        re.IGNORECASE,
+    )
+
+    if investor_m:
+        is_investor = True
+        name = investor_m.group("name").strip(" ,")
+        title = investor_m.group("title").strip()
+        firm = investor_m.group("firm").strip(" .")
+    elif founder_m:
+        is_investor = False
+        name = founder_m.group("name").strip(" ,")
+        title = founder_m.group("title").strip()
+        company = founder_m.group("company").strip(" .")
+    elif simple_investor_m and is_investor:
+        name = simple_investor_m.group("name").strip(" ,")
+        firm = simple_investor_m.group("firm").strip(" .")
+
+    return _normalize_identity({
+        "role": "investor" if is_investor else "founder",
+        "name": name,
+        "title": title,
+        "company": company,
+        "firm": firm,
+    })
+
+
 def extract_identity(message: str) -> dict[str, Any]:
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return _extract_identity_deterministic(message)
+
     try:
         from anthropic import Anthropic
     except ImportError as e:
@@ -79,17 +148,7 @@ def extract_identity(message: str) -> dict[str, Any]:
     except json.JSONDecodeError as e:
         raise ValueError(f"Claude returned non-JSON: {text!r}") from e
 
-    # Defensive normalization — same pattern as parse_constraints.
-    if not parsed.get("role"):
-        parsed["role"] = "founder"
-    parsed["role"] = str(parsed["role"]).lower()
-    if parsed["role"] not in ("founder", "investor"):
-        parsed["role"] = "founder"
-
-    for field in ("name", "title", "company", "firm"):
-        parsed.setdefault(field, None)
-
-    return parsed
+    return _normalize_identity(parsed)
 
 
 def main() -> int:

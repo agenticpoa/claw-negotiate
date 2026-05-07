@@ -1,9 +1,8 @@
 """Tests for format_event.py.
 
 Covers each formatter, the format_event dispatcher, shared helpers, and the CLI
-surface. Event shapes mirror what upstream agenticpoa/negotiate emits via
-`--json-events`; wrapper-emitted events (confirm, authorized, signed) use the
-shapes our scripts produce.
+surface. Event shapes mirror what the local turn helper emits; skill-emitted
+events (confirm, authorized, signed) use the shapes our scripts produce.
 
 Output uses Telegram HTML formatting (see format_event.py module docstring).
 """

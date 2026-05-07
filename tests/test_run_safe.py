@@ -937,8 +937,8 @@ class TestCli:
                  "run_safe.py", "operator-setup",
                  "--role", "founder",
                  "--bot-username", "@FounderBot",
+                 "--user-did", "did:apoa:test",
                  "--sshsign-host", "sshsign.dev",
-                 "--negotiate-repo-path", "/opt/negotiate",
                  "--scan-interval", "5s",
              ]):
             rc = rs.main()
@@ -946,250 +946,31 @@ class TestCli:
         out = capsys.readouterr().out
         assert "NEGOTIATE_SAFE_BOT_ROLE=founder" in out
         assert "TELEGRAM_BOT_USERNAME=FounderBot" in out
+        assert "USER_DID=did:apoa:test" in out
 
+    def test_operator_setup_env_file(self, tmp_path, capsys):
+        env_file = tmp_path / ".env"
+        env_file.write_text(
+            "\n".join([
+                "NEGOTIATE_SAFE_BOT_ROLE=investor",
+                "TELEGRAM_BOT_USERNAME=@InvestorBot",
+                "USER_DID=did:apoa:investor",
+                "SSHSIGN_HOST=sshsign.dev",
+                "CLAW_NEGOTIATE_SCAN_INTERVAL=5s",
+            ])
+        )
+        with patch.object(rs, "persist_operator_updates", return_value=[]), \
+             patch.object(sys, "argv", [
+                 "run_safe.py", "operator-setup",
+                 "--env-file", str(env_file),
+             ]):
+            rc = rs.main()
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "NEGOTIATE_SAFE_BOT_ROLE=investor" in out
+        assert "TELEGRAM_BOT_USERNAME=InvestorBot" in out
+        assert "USER_DID=did:apoa:investor" in out
 
-class TestRunMintRoleFlipping:
-    def _config(self, role, constraints_overrides=None):
-        c = {
-            "role": role,
-            "valuation_cap_min": 10_000_000,
-            "valuation_cap_max": 20_000_000,
-            "discount_min": 0.15,
-            "pro_rata": "required",
-            "mfn": "preferred",
-            "company_name": "TestCo",
-            "investor_name": "TestVC",
-            "investment_amount": 500_000.0,
-        }
-        if constraints_overrides:
-            c.update(constraints_overrides)
-        return {
-            "constraints": c,
-            "founder_name": "Founder",
-            "founder_title": "CEO",
-            "message": "m",
-        }
-
-    def _run_and_capture_cmd(self, tmp_path, config, monkeypatch):
-        """Invoke run_mint, swallow the subprocess, return the cmd list
-        that would have been passed to create_tokens.py."""
-        monkeypatch.setenv("NEGOTIATE_REPO_PATH", str(tmp_path))
-        # Stub create_tokens.py existence check
-        (tmp_path / "create_tokens.py").write_text("# stub")
-
-        captured = {}
-
-        def fake_run(cmd, cwd=None, capture_output=None, text=None, **kwargs):
-            captured["cmd"] = cmd
-            return MagicMock(returncode=0, stdout="", stderr="")
-
-        with patch.object(rs.subprocess, "run", side_effect=fake_run):
-            rs.run_mint(str(tmp_path), config)
-        return captured.get("cmd", [])
-
-    def test_founder_role_binds_user_constraints_to_founder_flags(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("INVESTOR_CAP_MIN", "30000000")
-        monkeypatch.setenv("INVESTOR_CAP_MAX", "80000000")
-
-        config = self._config("founder")
-        cmd = self._run_and_capture_cmd(tmp_path, config, monkeypatch)
-
-        # User (founder) constraints go to --founder-*
-        assert "--founder-cap-min" in cmd
-        assert cmd[cmd.index("--founder-cap-min") + 1] == "10000000"
-        assert "--founder-cap-max" in cmd
-        assert cmd[cmd.index("--founder-cap-max") + 1] == "20000000"
-        assert "--founder-pro-rata-required" in cmd
-        assert cmd[cmd.index("--founder-pro-rata-required") + 1] == "true"
-        # AI (investor) gets env defaults via --investor-*
-        assert "--investor-cap-min" in cmd
-        assert cmd[cmd.index("--investor-cap-min") + 1] == "30000000"
-
-    def test_investor_role_binds_user_constraints_to_investor_flags(self, tmp_path, monkeypatch):
-        """When user plays investor, user constraints go to --investor-*,
-        AI (founder side) gets FOUNDER_* env defaults via --founder-*."""
-        # Clear INVESTOR_* so they don't leak into the investor side
-        for k in ("INVESTOR_CAP_MIN", "INVESTOR_CAP_MAX", "INVESTOR_DISCOUNT_MIN",
-                  "INVESTOR_DISCOUNT_MAX", "INVESTOR_PRO_RATA_REQUIRED", "INVESTOR_MFN_REQUIRED"):
-            monkeypatch.delenv(k, raising=False)
-        monkeypatch.setenv("FOUNDER_CAP_MIN", "15000000")
-        monkeypatch.setenv("FOUNDER_CAP_MAX", "40000000")
-
-        config = self._config("investor")
-        cmd = self._run_and_capture_cmd(tmp_path, config, monkeypatch)
-
-        assert "--investor-cap-min" in cmd
-        assert cmd[cmd.index("--investor-cap-min") + 1] == "10000000"
-        assert "--investor-cap-max" in cmd
-        assert cmd[cmd.index("--investor-cap-max") + 1] == "20000000"
-        assert "--investor-pro-rata-required" in cmd
-        assert cmd[cmd.index("--investor-pro-rata-required") + 1] == "true"
-        # AI founder gets env defaults
-        assert "--founder-cap-min" in cmd
-        assert cmd[cmd.index("--founder-cap-min") + 1] == "15000000"
-
-    def test_missing_role_defaults_to_founder(self, tmp_path, monkeypatch):
-        config = self._config("founder")
-        del config["constraints"]["role"]
-        cmd = self._run_and_capture_cmd(tmp_path, config, monkeypatch)
-        assert "--founder-cap-min" in cmd
-        assert cmd[cmd.index("--founder-cap-min") + 1] == "10000000"
-
-    def test_unknown_role_defaults_to_founder(self, tmp_path, monkeypatch):
-        config = self._config("shareholder")  # bogus
-        cmd = self._run_and_capture_cmd(tmp_path, config, monkeypatch)
-        assert "--founder-cap-min" in cmd
-        assert cmd[cmd.index("--founder-cap-min") + 1] == "10000000"
-
-    def test_null_identity_fields_do_not_crash(self, tmp_path, monkeypatch):
-        """Parses often leave some identity fields null (user didn't mention
-        their own fund, or the counterparty's rep). The mint subprocess must
-        still run — None values coerce to sane defaults, not leak into args."""
-        for var in ("FOUNDER_NAME", "INVESTOR_NAME", "INVESTOR_FIRM", "COMPANY_NAME"):
-            monkeypatch.delenv(var, raising=False)
-        config = self._config("investor", {"investor_name": None, "company_name": None,
-                                            "investor_firm": None, "investment_amount": None})
-        cmd = self._run_and_capture_cmd(tmp_path, config, monkeypatch)
-        assert all(a is not None for a in cmd), f"None in cmd: {cmd}"
-        assert cmd[cmd.index("--investor-name") + 1] == "Investor"
-        assert cmd[cmd.index("--investor-firm") + 1] == "Investor Firm"
-        assert cmd[cmd.index("--company-name") + 1] == "Company"
-
-    def test_founder_identity_from_nl_flows_through(self, tmp_path, monkeypatch):
-        config = self._config("founder", {
-            "founder_name": "Jane Doe",
-            "founder_title": "CTO",
-            "company_name": "Acme",
-            "investor_name": "Mark Stone",
-            "investor_firm": "Bay Capital",
-        })
-        cmd = self._run_and_capture_cmd(tmp_path, config, monkeypatch)
-        assert cmd[cmd.index("--founder-name") + 1] == "Jane Doe"
-        assert cmd[cmd.index("--founder-title") + 1] == "CTO"
-        assert cmd[cmd.index("--investor-name") + 1] == "Mark Stone"
-        assert cmd[cmd.index("--investor-firm") + 1] == "Bay Capital"
-
-    def test_investor_identity_from_nl_flows_through(self, tmp_path, monkeypatch):
-        config = self._config("investor", {
-            "founder_name": "Dr. Rivera",
-            "founder_title": "CEO",
-            "company_name": "QuantumLabs",
-            "investor_name": "Alex Chen",
-            "investor_firm": "Blue Fund",
-        })
-        cmd = self._run_and_capture_cmd(tmp_path, config, monkeypatch)
-        assert cmd[cmd.index("--founder-name") + 1] == "Dr. Rivera"
-        assert cmd[cmd.index("--investor-name") + 1] == "Alex Chen"
-        assert cmd[cmd.index("--investor-firm") + 1] == "Blue Fund"
-
-    def test_env_identity_defaults_follow_upstream_convention(self, tmp_path, monkeypatch):
-        """FOUNDER_*/INVESTOR_*/COMPANY_NAME env vars describe the parties
-        regardless of who the user is (per upstream agenticpoa convention).
-        NL overrides are already tested separately; this covers the env
-        fallback path."""
-        monkeypatch.setenv("FOUNDER_NAME", "Alice Chen")
-        monkeypatch.setenv("FOUNDER_TITLE", "CEO")
-        monkeypatch.setenv("INVESTOR_NAME", "Jordan Lee")
-        monkeypatch.setenv("INVESTOR_FIRM", "Bay Capital")
-        monkeypatch.setenv("COMPANY_NAME", "Acme Labs")
-
-        config = self._config("founder", {
-            "founder_name": None, "founder_title": None, "company_name": None,
-            "investor_name": None, "investor_firm": None,
-        })
-        cmd = self._run_and_capture_cmd(tmp_path, config, monkeypatch)
-        assert cmd[cmd.index("--founder-name") + 1] == "Alice Chen"
-        assert cmd[cmd.index("--founder-title") + 1] == "CEO"
-        assert cmd[cmd.index("--investor-name") + 1] == "Jordan Lee"
-        assert cmd[cmd.index("--investor-firm") + 1] == "Bay Capital"
-        assert cmd[cmd.index("--company-name") + 1] == "Acme Labs"
-
-    def test_env_defaults_apply_regardless_of_user_role(self, tmp_path, monkeypatch):
-        """Same env vars work when user is investor — this is the demo-mode
-        property that both sides of the deal are configured once."""
-        monkeypatch.setenv("FOUNDER_NAME", "Alice Chen")
-        monkeypatch.setenv("INVESTOR_NAME", "Jordan Lee")
-        monkeypatch.setenv("INVESTOR_FIRM", "Bay Capital")
-        monkeypatch.setenv("COMPANY_NAME", "Acme Labs")
-
-        config = self._config("investor", {
-            "founder_name": None, "investor_name": None, "investor_firm": None,
-            "company_name": None,
-        })
-        cmd = self._run_and_capture_cmd(tmp_path, config, monkeypatch)
-        assert cmd[cmd.index("--founder-name") + 1] == "Alice Chen"
-        assert cmd[cmd.index("--investor-name") + 1] == "Jordan Lee"
-        assert cmd[cmd.index("--investor-firm") + 1] == "Bay Capital"
-        assert cmd[cmd.index("--company-name") + 1] == "Acme Labs"
-
-    def test_literal_fallback_when_no_env_no_nl(self, tmp_path, monkeypatch):
-        """In demo mode, counterparty gets a descriptive 'Demo Investor' /
-        'Demo Capital' preset rather than the generic 'Investor' fallback.
-        Only the user's OWN side (founder here) falls through to the
-        bare literal."""
-        for var in ("FOUNDER_NAME", "FOUNDER_TITLE", "INVESTOR_NAME",
-                    "INVESTOR_FIRM", "COMPANY_NAME"):
-            monkeypatch.delenv(var, raising=False)
-        config = self._config("founder", {
-            "founder_name": None, "founder_title": None, "company_name": None,
-            "investor_name": None, "investor_firm": None,
-        })
-        cmd = self._run_and_capture_cmd(tmp_path, config, monkeypatch)
-        # User side (founder): generic literal since user is playing this role
-        assert cmd[cmd.index("--founder-name") + 1] == "Founder"
-        # Counterparty side (investor): demo preset kicks in
-        assert cmd[cmd.index("--investor-name") + 1] == "Demo Investor"
-        assert cmd[cmd.index("--investor-firm") + 1] == "Demo Capital"
-
-    def test_two_party_mode_skips_demo_presets(self, tmp_path, monkeypatch):
-        """In two_party mode there IS no AI counterparty — don't inject
-        the 'Demo Investor' preset on the other side. Use generic labels
-        as the last-resort fallback."""
-        for var in ("FOUNDER_NAME", "FOUNDER_TITLE", "INVESTOR_NAME",
-                    "INVESTOR_FIRM", "COMPANY_NAME"):
-            monkeypatch.delenv(var, raising=False)
-        config = self._config("founder", {
-            "founder_name": None, "investor_name": None, "investor_firm": None,
-            "company_name": None, "mode": "two_party",
-        })
-        cmd = self._run_and_capture_cmd(tmp_path, config, monkeypatch)
-        assert cmd[cmd.index("--investor-name") + 1] == "Investor"
-        assert cmd[cmd.index("--investor-firm") + 1] == "Investor Firm"
-
-    def test_demo_investor_preset_for_investor_user(self, tmp_path, monkeypatch):
-        """When user plays investor in demo, the FOUNDER side gets the
-        demo preset (their side is the AI)."""
-        for var in ("FOUNDER_NAME", "FOUNDER_TITLE", "INVESTOR_NAME",
-                    "INVESTOR_FIRM", "COMPANY_NAME"):
-            monkeypatch.delenv(var, raising=False)
-        config = self._config("investor", {
-            "founder_name": None, "founder_title": None, "investor_name": None,
-            "investor_firm": None, "company_name": None,
-        })
-        cmd = self._run_and_capture_cmd(tmp_path, config, monkeypatch)
-        assert cmd[cmd.index("--founder-name") + 1] == "Demo Founder"
-        # User side (investor): generic literal since user is playing this role
-        assert cmd[cmd.index("--investor-name") + 1] == "Investor"
-
-    def test_user_did_env_used_as_principal(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("USER_DID", "did:apoa:newuser")
-        config = self._config("founder")
-        cmd = self._run_and_capture_cmd(tmp_path, config, monkeypatch)
-        assert cmd[cmd.index("--principal-id") + 1] == "did:apoa:newuser"
-
-    def test_principal_falls_back_to_default_when_unset(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("USER_DID", raising=False)
-        config = self._config("founder")
-        cmd = self._run_and_capture_cmd(tmp_path, config, monkeypatch)
-        assert cmd[cmd.index("--principal-id") + 1] == "did:apoa:default"
-
-    def test_role_persisted_in_mint_json(self, tmp_path, monkeypatch):
-        """`user_role` written to mint.json so downstream knows which side
-        the user is on (useful for streaming/confirm card context)."""
-        config = self._config("investor")
-        self._run_and_capture_cmd(tmp_path, config, monkeypatch)
-        mint = json.loads((tmp_path / "mint.json").read_text())
-        assert mint["user_role"] == "investor"
 
 
 class TestRegisterSigningSession:
@@ -2984,135 +2765,6 @@ class TestPrepareJoinBranch:
         config = json.loads((tmp_path / "config.json").read_text())
         assert "session" not in config
 
-
-class TestRunMintJoinBranch:
-    """Investor mint flow: shared_session in config → reuse session_id,
-    skip AI-side env, call _join_signing_session instead of register."""
-
-    def _config_for_join(self, tmp_path) -> dict:
-        return {
-            "constraints": {
-                "role": "investor",
-                "mode": "two_party",
-                "valuation_cap_min": 10_000_000,
-                "valuation_cap_max": 40_000_000,
-                "discount_min": 0.12,
-                "pro_rata": "required",
-                "mfn": "preferred",
-                "company_name": "Acme",
-                "investor_name": "Alex",
-                "investor_firm": "Blue Fund",
-                "investment_amount": 500_000.0,
-            },
-            "session": {
-                "session_id": "neg_shared_xyz",
-                "session_code": "INV-7K3X9",
-                "status": "open",
-                "counterparty_apoa_pubkey_pem": "FOUNDER_PEM",
-            },
-            "founder_name": "",
-            "founder_title": "CEO",
-            "message": "Join INV-7K3X9",
-        }
-
-    def test_reuses_shared_session_id_and_passes_role_flag(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("NEGOTIATE_REPO_PATH", str(tmp_path))
-        (tmp_path / "create_tokens.py").write_text("# stub")
-
-        captured = {}
-
-        def fake_run(cmd, cwd=None, capture_output=None, text=None, **kwargs):
-            # Only the create_tokens.py invocation matters for this
-            # test; ignore the openclaw cron list/install calls that
-            # ensure_cron makes after a successful mint.
-            if any("create_tokens" in str(c) for c in cmd):
-                captured["cmd"] = cmd
-            return MagicMock(returncode=0, stdout="", stderr="")
-
-        with patch.object(rs.subprocess, "run", side_effect=fake_run), \
-             patch.object(rs, "_join_signing_session",
-                          return_value={"session_code": "INV-7K3X9",
-                                        "session_status": "joined",
-                                        "counterparty_pubkey_path": "/tmp/f.pem"}):
-            rc = rs.run_mint(str(tmp_path), self._config_for_join(tmp_path))
-
-        assert rc == 0
-        cmd = captured["cmd"]
-        # negotiation_id == shared session_id
-        assert cmd[cmd.index("--negotiation-id") + 1] == "neg_shared_xyz"
-        # --role is passed so create_tokens skips the counterparty side
-        assert "--role" in cmd
-        assert cmd[cmd.index("--role") + 1] == "investor"
-
-    def test_does_not_pass_ai_env_when_joining(self, tmp_path, monkeypatch):
-        """In two-party join, there is no AI side — env overrides for
-        the counterparty must not be appended to the mint command."""
-        monkeypatch.setenv("NEGOTIATE_REPO_PATH", str(tmp_path))
-        monkeypatch.setenv("FOUNDER_CAP_MIN", "50000000")  # should be ignored
-        monkeypatch.setenv("FOUNDER_CAP_MAX", "99000000")
-        (tmp_path / "create_tokens.py").write_text("# stub")
-
-        captured = {}
-
-        def fake_run(cmd, cwd=None, capture_output=None, text=None, **kwargs):
-            if any("create_tokens" in str(c) for c in cmd):
-                captured["cmd"] = cmd
-            return MagicMock(returncode=0, stdout="", stderr="")
-
-        with patch.object(rs.subprocess, "run", side_effect=fake_run), \
-             patch.object(rs, "_join_signing_session",
-                          return_value={"session_code": "INV-X",
-                                        "session_status": "joined"}):
-            rs.run_mint(str(tmp_path), self._config_for_join(tmp_path))
-
-        cmd = captured["cmd"]
-        # No --founder-cap-min from FOUNDER_CAP_MIN env leak
-        assert "--founder-cap-min" not in cmd
-        assert "--founder-cap-max" not in cmd
-
-    def test_calls_join_not_register(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("NEGOTIATE_REPO_PATH", str(tmp_path))
-        (tmp_path / "create_tokens.py").write_text("# stub")
-
-        with patch.object(rs.subprocess, "run",
-                          return_value=MagicMock(returncode=0, stdout="", stderr="")), \
-             patch.object(rs, "_join_signing_session",
-                          return_value={"session_code": "INV-X",
-                                        "session_status": "joined"}) as mock_join, \
-             patch.object(rs, "_register_signing_session") as mock_register:
-            rs.run_mint(str(tmp_path), self._config_for_join(tmp_path))
-
-        mock_join.assert_called_once()
-        mock_register.assert_not_called()
-
-    def test_join_failure_returns_nonzero(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("NEGOTIATE_REPO_PATH", str(tmp_path))
-        (tmp_path / "create_tokens.py").write_text("# stub")
-
-        with patch.object(rs.subprocess, "run",
-                          return_value=MagicMock(returncode=0, stdout="", stderr="")), \
-             patch.object(rs, "_join_signing_session", return_value=None):
-            rc = rs.run_mint(str(tmp_path), self._config_for_join(tmp_path))
-
-        assert rc == 3
-
-    def test_mint_json_written_with_join_fields(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("NEGOTIATE_REPO_PATH", str(tmp_path))
-        (tmp_path / "create_tokens.py").write_text("# stub")
-
-        with patch.object(rs.subprocess, "run",
-                          return_value=MagicMock(returncode=0, stdout="", stderr="")), \
-             patch.object(rs, "_join_signing_session",
-                          return_value={"session_code": "INV-7K3X9",
-                                        "session_status": "joined",
-                                        "counterparty_pubkey_path": "/tmp/f.pem"}):
-            rs.run_mint(str(tmp_path), self._config_for_join(tmp_path))
-
-        mint = json.loads((tmp_path / "mint.json").read_text())
-        assert mint["mode"] == "two_party"
-        assert mint["user_role"] == "investor"
-        assert mint["session_code"] == "INV-7K3X9"
-        assert mint["counterparty_pubkey_path"] == "/tmp/f.pem"
 
 
 class TestNegotiateInvestorBranch:

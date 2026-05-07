@@ -24,7 +24,8 @@ from session_flow import sshsign_session_id
 from sshsign_session import LeaseHeldError, SshsignSession, SshsignSessionError
 from telegram_push import send_signing_url_to_dm, send_telegram
 from trace_log import write_trace
-from upstream import finalize_executed_pdf, ssh_history, synthesize_offer_event
+from executed_pdf import finalize_executed_pdf
+from upstream import ssh_history, synthesize_offer_event
 
 
 TURN_HELPER = Path(__file__).with_name("_turn_once.py")
@@ -345,7 +346,7 @@ def _both_party_pending_ids(output_dir: Path, negotiation_id: str) -> dict[str, 
 def _run_turn_helper(
     *,
     output_dir: Path,
-    negotiate_repo: str,
+    negotiate_repo: str = "",
     sshsign_host: str,
     runner=subprocess.run,
     heartbeat_sender=None,
@@ -653,12 +654,8 @@ def reconcile_state(
                 write_trace(output_dir, "orchestrator.sign_lease_error", negotiation_id=negotiation_id, role=role, error=str(e))
                 return ReconcileResult("sign_lease_error", projected=projected)
             try:
-                negotiate_repo = mint.get("negotiate_repo_path") or os.environ.get("NEGOTIATE_REPO_PATH", "")
-                if not negotiate_repo:
-                    return ReconcileResult("missing_negotiate_repo", projected=projected)
                 rc, events = _run_turn_helper(
                     output_dir=output_dir,
-                    negotiate_repo=negotiate_repo,
                     sshsign_host=sshsign_host,
                     runner=turn_runner,
                     heartbeat_sender=sender,
@@ -853,12 +850,8 @@ def reconcile_state(
 
     signing_event = None
     try:
-        negotiate_repo = mint.get("negotiate_repo_path") or os.environ.get("NEGOTIATE_REPO_PATH", "")
-        if not negotiate_repo:
-            return ReconcileResult("missing_negotiate_repo", projected=projected)
         rc, events = _run_turn_helper(
             output_dir=output_dir,
-            negotiate_repo=negotiate_repo,
             sshsign_host=sshsign_host,
             runner=turn_runner,
             heartbeat_sender=sender,

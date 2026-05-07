@@ -16,18 +16,30 @@ from pathlib import Path
 
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_SKILL_DIR = REPO_ROOT / "negotiate_safe"
+DEFAULT_SKILL_DIR = REPO_ROOT
 
 
-def _load_manifest(skill_dir: Path) -> dict:
-    manifest_path = skill_dir / "skill_manifest.json"
+def _runtime_dir(skill_dir: Path) -> Path:
+    """Return the directory containing run_safe.py and skill_manifest.json.
+
+    Public installs can clone this repo as the skill root, where SKILL.md lives
+    at the top level and runtime files live under negotiate_safe/. Legacy/demo
+    installs may point directly at negotiate_safe/.
+    """
+    if (skill_dir / "skill_manifest.json").exists():
+        return skill_dir
+    return skill_dir / "negotiate_safe"
+
+
+def _load_manifest(runtime_dir: Path) -> dict:
+    manifest_path = runtime_dir / "skill_manifest.json"
     return json.loads(manifest_path.read_text(encoding="utf-8"))
 
 
-def _check_files(skill_dir: Path, manifest: dict) -> list[str]:
+def _check_files(runtime_dir: Path, manifest: dict) -> list[str]:
     errors: list[str] = []
     for rel in manifest.get("files", []):
-        if not (skill_dir / rel).exists():
+        if not (runtime_dir / rel).exists():
             errors.append(f"missing file: {rel}")
     return errors
 
@@ -42,9 +54,9 @@ def _check_bins(manifest: dict, *, skip_openclaw: bool = False) -> list[str]:
     return errors
 
 
-def _run_manifest(skill_dir: Path) -> tuple[int, str]:
+def _run_manifest(runtime_dir: Path) -> tuple[int, str]:
     result = subprocess.run(
-        [sys.executable, str(skill_dir / "run_safe.py"), "manifest"],
+        [sys.executable, str(runtime_dir / "run_safe.py"), "manifest"],
         capture_output=True,
         text=True,
         timeout=20,
@@ -52,9 +64,9 @@ def _run_manifest(skill_dir: Path) -> tuple[int, str]:
     return result.returncode, result.stdout or result.stderr
 
 
-def _run_doctor(skill_dir: Path) -> tuple[int, str]:
+def _run_doctor(runtime_dir: Path) -> tuple[int, str]:
     result = subprocess.run(
-        [sys.executable, str(skill_dir / "run_safe.py"), "doctor"],
+        [sys.executable, str(runtime_dir / "run_safe.py"), "doctor"],
         capture_output=True,
         text=True,
         timeout=60,
@@ -63,11 +75,11 @@ def _run_doctor(skill_dir: Path) -> tuple[int, str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Smoke-check negotiate_safe install")
+    parser = argparse.ArgumentParser(description="Smoke-check claw-negotiate install")
     parser.add_argument(
         "--skill-dir",
         default=str(DEFAULT_SKILL_DIR),
-        help="Path to installed negotiate_safe directory.",
+        help="Path to installed skill root or negotiate_safe runtime directory.",
     )
     parser.add_argument(
         "--skip-openclaw",
@@ -87,15 +99,18 @@ def main(argv: list[str] | None = None) -> int:
     if not skill_dir.exists():
         errors.append(f"skill dir missing: {skill_dir}")
     else:
+        runtime_dir = _runtime_dir(skill_dir)
+        if not (skill_dir / "SKILL.md").exists() and not (runtime_dir / "SKILL.md").exists():
+            errors.append("missing SKILL.md")
         try:
-            manifest = _load_manifest(skill_dir)
+            manifest = _load_manifest(runtime_dir)
         except (OSError, json.JSONDecodeError) as exc:
             errors.append(f"manifest invalid: {exc}")
             manifest = {}
         if manifest:
-            errors.extend(_check_files(skill_dir, manifest))
+            errors.extend(_check_files(runtime_dir, manifest))
             errors.extend(_check_bins(manifest, skip_openclaw=args.skip_openclaw))
-            rc, output = _run_manifest(skill_dir)
+            rc, output = _run_manifest(runtime_dir)
             if rc != 0:
                 errors.append(f"manifest command failed: {output.strip()}")
             else:
@@ -108,7 +123,8 @@ def main(argv: list[str] | None = None) -> int:
                         errors.append("manifest command name mismatch")
 
     if args.run_doctor and not errors:
-        rc, output = _run_doctor(skill_dir)
+        runtime_dir = _runtime_dir(skill_dir)
+        rc, output = _run_doctor(runtime_dir)
         sys.stdout.write(output)
         if rc != 0:
             errors.append("doctor reported install/config failures")

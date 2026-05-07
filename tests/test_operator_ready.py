@@ -25,14 +25,12 @@ class TestBuildOperatorUpdates:
             role="Founder",
             bot_username="@FounderBot",
             sshsign_host="sshsign.dev",
-            negotiate_repo_path="/opt/negotiate",
             scan_interval="5s",
         )
         assert updates == {
             "NEGOTIATE_SAFE_BOT_ROLE": "founder",
             "TELEGRAM_BOT_USERNAME": "FounderBot",
             "SSHSIGN_HOST": "sshsign.dev",
-            "NEGOTIATE_REPO_PATH": "/opt/negotiate",
             "CLAW_NEGOTIATE_SCAN_INTERVAL": "5s",
         }
 
@@ -108,33 +106,20 @@ class TestDoctor:
     def test_reports_missing_env(self, tmp_path):
         checks = op.doctor_checks(env={}, runner=MagicMock(return_value=_cp()))
         by_name = {c.name: c for c in checks}
-        assert by_name["ANTHROPIC_API_KEY"].ok is False
         assert by_name["USER_DID"].ok is False
         assert by_name["NEGOTIATE_SAFE_BOT_ROLE"].ok is False
         assert by_name["workflow leases"].ok is False
 
     def test_reads_openclaw_skill_env_when_env_not_in_process(self, tmp_path, monkeypatch):
-        repo = tmp_path / "negotiate"
-        repo.mkdir()
-        (repo / "create_tokens.py").write_text("")
-        (repo / "negotiate.py").write_text(
-            "from dataclasses import dataclass\n"
-            "@dataclass\n"
-            "class NegotiationConfig:\n"
-            "    role: str = ''\n"
-            "    signer_role: str = ''\n"
-        )
         cfg = tmp_path / "openclaw.json"
         cfg.write_text(json.dumps({
             "skills": {
                 "entries": {
                     "negotiate_safe": {
                         "env": {
-                            "ANTHROPIC_API_KEY": "test",
                             "USER_DID": "did:apoa:test",
                             "TELEGRAM_BOT_USERNAME": "Bot",
                             "NEGOTIATE_SAFE_BOT_ROLE": "investor",
-                            "NEGOTIATE_REPO_PATH": str(repo),
                         },
                     },
                 },
@@ -142,22 +127,18 @@ class TestDoctor:
         }))
         monkeypatch.setattr(op, "OPENCLAW_CONFIG_PATH", cfg)
         for key in [
-            "ANTHROPIC_API_KEY",
             "USER_DID",
             "TELEGRAM_BOT_USERNAME",
             "NEGOTIATE_SAFE_BOT_ROLE",
-            "NEGOTIATE_REPO_PATH",
         ]:
             monkeypatch.delenv(key, raising=False)
 
         checks = op.doctor_checks(runner=MagicMock(return_value=_cp()))
 
         by_name = {c.name: c for c in checks}
-        assert by_name["ANTHROPIC_API_KEY"].ok is True
         assert by_name["USER_DID"].ok is True
         assert by_name["TELEGRAM_BOT_USERNAME"].ok is True
         assert by_name["NEGOTIATE_SAFE_BOT_ROLE"].ok is True
-        assert by_name["NEGOTIATE_REPO_PATH"].ok is True
 
     def test_command_timeout_with_usage_output_is_available(self):
         def runner(*args, **kwargs):
@@ -171,18 +152,7 @@ class TestDoctor:
 
         assert check.ok is True
 
-    def test_feature_probes_upstream_config(self, tmp_path):
-        repo = tmp_path / "negotiate"
-        repo.mkdir()
-        (repo / "create_tokens.py").write_text("")
-        (repo / "negotiate.py").write_text(
-            "from dataclasses import dataclass\n"
-            "@dataclass\n"
-            "class NegotiationConfig:\n"
-            "    role: str = ''\n"
-            "    signer_role: str = ''\n"
-        )
-
+    def test_feature_probes_sshsign_and_openclaw_primitives(self):
         def runner(argv, **kwargs):
             if argv[0] == "ssh":
                 return _cp(stdout=json.dumps({"error": "session not found"}))
@@ -193,13 +163,10 @@ class TestDoctor:
                 "USER_DID": "did:apoa:test",
                 "TELEGRAM_BOT_USERNAME": "Bot",
                 "NEGOTIATE_SAFE_BOT_ROLE": "founder",
-                "NEGOTIATE_REPO_PATH": str(repo),
             },
             runner=runner,
         )
         by_name = {c.name: c for c in checks}
-        assert by_name["upstream NegotiationConfig.role"].ok is True
-        assert by_name["upstream NegotiationConfig.signer_role"].ok is True
         assert by_name["sshsign get-session"].ok is True
         assert by_name["workflow leases"].ok is True
 

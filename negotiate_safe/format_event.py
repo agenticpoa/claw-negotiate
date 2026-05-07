@@ -6,12 +6,11 @@ bold text renders cleanly without visible Markdown asterisks. Any user- or
 model-supplied text that might contain `<`, `>`, or `&` is escaped via
 `_escape_html` before being inserted into an HTML-formatted card.
 
-Event schema reflects what upstream agenticpoa/negotiate emits via
-`--json-events` plus two events our wrappers emit themselves:
+Event schema reflects what the local turn helper emits:
 
-  offer / counter / accept   (upstream emit_json_event)
-  outcome                    (upstream emit_outcome_event)
-  signing                    (upstream, when awaiting cosign approval)
+  offer / counter / accept   (negotiation turns)
+  outcome                    (local demo mode)
+  signing                    (when awaiting cosign approval)
   confirm                    (our prepare step)
   authorized                 (our mint step)
   signed                     (synthesized by us after envelope=approved)

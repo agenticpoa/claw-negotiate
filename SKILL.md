@@ -17,38 +17,38 @@ Before running the negotiation steps, check the user's message against these sho
 
 **A. Message starts with `/bind` (with or without `@BotName` suffix and with or without a trailing `INV-XXXXX` code):** THIS IS ALWAYS YOUR SKILL. Even in a brand-new group chat with no prior context, a `/bind` message is a Phase 8 group-bind request and MUST route here. Run:
 ```
-python3 /root/.agents/skills/negotiate_safe/run_safe.py bind --message "<the full /bind message text exactly as received>" --chat-id <chat.id from the inbound envelope> --from-id <from.id from the inbound envelope>
+python3 {baseDir}/negotiate_safe/run_safe.py bind --message "<the full /bind message text exactly as received>" --chat-id <chat.id from the inbound envelope> --from-id <from.id from the inbound envelope>
 ```
 End your turn. Do NOT relay anything, do not try to parse the code yourself, and do not send `NO_REPLY`. The skill posts its own confirmation card (or a specific error card) into the group on your behalf. Examples that MATCH this shortcut: `/bind INV-7K3X9`, `/bind@AgenticPOA_bot INV-4N6PK`, `/bind`, `/bind@SomeBot`.
 
 **A.5. Inbound is a system event whose body starts with `negotiate_safe_scan`:** THIS IS ALWAYS YOUR SKILL. This fires from the droplet's own OpenClaw cron job (installed at mint time for P7-5 durable founder-wait). It tells the skill to check every waiting two-party negotiation and resume any whose investor has just joined. Run:
 ```
-python3 /root/.agents/skills/negotiate_safe/run_safe.py scan
+python3 {baseDir}/negotiate_safe/run_safe.py scan
 ```
 End your turn. `scan` is idempotent, handles its own Telegram output (orienting card in the bound group, streaming, status updates), and exits 0 even if there's nothing to resume. Do not re-check, do not relay, do not emit any message yourself — especially nothing that starts with `/`, which would bounce back through this very dispatcher.
 
 **A.7. Message starts with `/cancel` (with or without `@BotName` suffix), OR is exactly the word `cancel` / `Cancel` / `stop` / `abort` (case-insensitive, single-word):** THIS IS ALWAYS YOUR SKILL. Same emphatic dispatch pattern as `/bind` above. Run:
 ```
-python3 /root/.agents/skills/negotiate_safe/run_safe.py cancel --output-dir /tmp/safe_negotiate --chat-id <chat.id from the inbound envelope>
+python3 {baseDir}/negotiate_safe/run_safe.py cancel --output-dir /tmp/safe_negotiate --chat-id <chat.id from the inbound envelope>
 ```
 End your turn. Do NOT relay anything, do not acknowledge in your own words, and do not send `NO_REPLY` (the skill posts its own confirmation card on your behalf — if you also reply the user sees a duplicate). Examples that MATCH this shortcut: `/cancel`, `/cancel@AgenticPOA_bot`, `cancel`, `Cancel`, `stop`, `abort`. The model has historically tried to substitute prose like "Understood, canceled." or "Got it, canceled." in place of dispatching — DO NOT do that. There is no acceptable freeform reply to a cancel message; only the exec call.
 
 **A.9. Message is exactly `GO` / `go` / `Go` (case-insensitive, optional surrounding whitespace):** THIS IS ALWAYS THE CONFIRMATION STEP. Do not run `prepare` again. Do not ask for profile again. Run:
 ```
-python3 /root/.agents/skills/negotiate_safe/run_safe.py negotiate --output-dir /tmp/safe_negotiate --chat-id <chat.id from the inbound envelope>
+python3 {baseDir}/negotiate_safe/run_safe.py negotiate --output-dir /tmp/safe_negotiate --chat-id <chat.id from the inbound envelope>
 ```
 Set `timeout` to 1200. End your turn by returning the literal string `NO_REPLY` and nothing else. The skill posts the authorization, invitation/join confirmation, signing links, and executed PDF itself. This shortcut exists because treating `GO` as a fresh negotiation request causes stalls, duplicate cards, and missing counterparty signature requests.
 
 **B. "Show me my profile" / "What's my profile" / "Who am I" / "My profile":**
 ```
-python3 /root/.agents/skills/negotiate_safe/run_safe.py profile
+python3 {baseDir}/negotiate_safe/run_safe.py profile
 ```
 End your turn. The skill pushes the profile card to chat.
 
 **C. "Update my profile…" / "Change my name…" / "I'm now …" (and the user supplies new identity info in the same message):**
 Write the update text to `/tmp/safe_identity.txt`, then:
 ```
-python3 /root/.agents/skills/negotiate_safe/run_safe.py setup --message-file /tmp/safe_identity.txt
+python3 {baseDir}/negotiate_safe/run_safe.py setup --message-file /tmp/safe_identity.txt
 ```
 End your turn. The skill overwrites whichever fields are in the message and confirms in chat. A founder profile should include the founder's name and company, e.g. "I'm Juan Figuera, CEO of APOA Inc". An investor profile should include the investor's name and firm/fund, e.g. "I'm Nora Vassileva, partner at SD Fund".
 
@@ -60,7 +60,7 @@ End your turn. The skill overwrites whichever fields are in the message and conf
 2. Run:
 
 ```
-python3 /root/.agents/skills/negotiate_safe/run_safe.py prepare --message-file /tmp/safe_request.txt --output-dir /tmp/safe_negotiate
+python3 {baseDir}/negotiate_safe/run_safe.py prepare --message-file /tmp/safe_request.txt --output-dir /tmp/safe_negotiate
 ```
 
 3. The skill pushes a "⏳ Reading your negotiation terms…" interstitial and then a formatted confirm card directly to the user's chat. **Do not re-display the constraints yourself — the card is already in the chat.** Simply end your turn.
@@ -78,7 +78,7 @@ If the user just replied to a "👋 Welcome!" prompt (they said something like "
 2. Run:
 
 ```
-python3 /root/.agents/skills/negotiate_safe/run_safe.py setup --message-file /tmp/safe_identity.txt
+python3 {baseDir}/negotiate_safe/run_safe.py setup --message-file /tmp/safe_identity.txt
 ```
 
 3. The skill parses the identity, persists it via `openclaw config set`, pushes a confirmation to the chat, AND — if the user had typed a negotiation request before the welcome prompt — automatically runs `prepare` again with that stashed request so they don't have to retype. End your turn. The confirm card (or another setup prompt, if the identity parse failed) will appear in the chat.
@@ -101,7 +101,7 @@ The skill will combine the saved founder profile with Nora's counterparty identi
 Once the user confirms, launch:
 
 ```
-python3 /root/.agents/skills/negotiate_safe/run_safe.py negotiate --output-dir /tmp/safe_negotiate
+python3 {baseDir}/negotiate_safe/run_safe.py negotiate --output-dir /tmp/safe_negotiate
 ```
 
 Set `timeout` to 1200. The command will auto-background after ~10 seconds. That is expected. If the investor joins after the foreground turn is reaped, a droplet-installed cron job fires the `negotiate_safe_scan` system event about every 5 seconds and re-enters via rule A.5 above — no action from you.
@@ -123,8 +123,8 @@ Your output at this step MUST be the literal string `NO_REPLY` and nothing else.
 
 ## Troubleshooting
 
-- **Operator install check:** run `python3 /root/.agents/skills/negotiate_safe/run_safe.py doctor` on the OpenClaw host. It validates required env vars, sshsign reachability, and OpenClaw message/cron primitives before a live negotiation.
-- **Operator setup:** run `python3 /root/.agents/skills/negotiate_safe/run_safe.py operator-setup --env-file /path/to/.env` to persist deployment-level skill config via `openclaw config set`.
+- **Operator install check:** run `python3 {baseDir}/negotiate_safe/run_safe.py doctor` on the OpenClaw host. It validates required env vars, sshsign reachability, and OpenClaw message/cron primitives before a live negotiation.
+- **Operator setup:** run `python3 {baseDir}/negotiate_safe/run_safe.py operator-setup --env-file {baseDir}/.env` to persist deployment-level skill config via `openclaw config set`.
 - **Vague constraints:** ask the user to clarify. Do not guess.
 - **Parsing issue:** ask the user to use the structured SAFE term format shown in the README.
 - **Mid-negotiation cancel:** the user can revoke the APOA token. Start a fresh negotiation.

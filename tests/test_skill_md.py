@@ -12,7 +12,9 @@ import pytest
 
 import format_event as tf
 
-SKILL_MD = Path(__file__).parent.parent / "negotiate_safe" / "SKILL.md"
+REPO_ROOT = Path(__file__).parent.parent
+SKILL_MD = REPO_ROOT / "negotiate_safe" / "SKILL.md"
+ROOT_SKILL_MD = REPO_ROOT / "SKILL.md"
 
 
 @pytest.fixture(scope="module")
@@ -50,8 +52,6 @@ class TestFrontmatter:
         meta = json.loads(m.group(1))
         env = set(meta["openclaw"]["requires"]["env"])
         assert {
-            "ANTHROPIC_API_KEY",
-            "NEGOTIATE_REPO_PATH",
             "USER_DID",
             "NEGOTIATE_SAFE_BOT_ROLE",
             "TELEGRAM_BOT_USERNAME",
@@ -123,3 +123,9 @@ class TestCrossFileConsistency:
         }
         assert critical <= set(tf.FORMATTERS.keys()), \
             "format_event.py is missing a formatter the skill assumes"
+
+    def test_repo_root_skill_is_installable(self):
+        content = ROOT_SKILL_MD.read_text()
+        assert "name: negotiate_safe" in content
+        assert "{baseDir}/negotiate_safe/run_safe.py prepare" in content
+        assert "{baseDir}/negotiate_safe/run_safe.py negotiate" in content

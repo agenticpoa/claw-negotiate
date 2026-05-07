@@ -45,7 +45,7 @@ from links import (
     build_invite_url as _build_invite_url,
     extract_bind_code as _extract_bind_code,
 )
-from minting import build_create_tokens_cmd, build_service_name, identity_value
+from minting import build_service_name, identity_value, write_local_mint_files
 from format_event import format_event, group_setup_reply_markup
 from session_flow import (
     register_signing_session as _register_signing_session,
@@ -77,6 +77,7 @@ from operator_ready import (
     build_operator_updates,
     doctor_checks,
     format_doctor,
+    load_env_file,
     load_skill_manifest,
     persist_operator_updates,
 )
@@ -104,9 +105,9 @@ from reconcile import (
     reconcile_session,
 )
 from trace_log import write_trace
+from executed_pdf import finalize_executed_pdf as _finalize_executed_pdf
 from upstream import (
     augment_signing_url as _augment_signing_url,
-    finalize_executed_pdf as _finalize_executed_pdf,
     ssh_history as _ssh_history,
     synthesize_offer_event as _synthesize_offer_event,
 )
@@ -251,9 +252,8 @@ STREAM_HELPER = SKILL_DIR / "_stream_negotiate.py"
 def _sshsign_session_id(negotiation_id: str) -> str:
     """Return the session_id we use when talking to sshsign session APIs.
 
-    Upstream agenticpoa/negotiate derives its session_id as
-    ``f"session_{negotiation_id}"`` inside auto_setup, and passes THAT
-    value as --session-id on sign calls. For sshsign's cross-party
+    The skill derives its signing session id as ``f"session_{negotiation_id}"``
+    and passes that value as --session-id on sign calls. For sshsign's cross-party
     get-envelope ACL (which matches pending_signatures.signing_session_id
     against the signing_sessions row's session_id) to let members read
     each other's pendings, we have to use the SAME prefixed form when
@@ -268,8 +268,7 @@ def _sshsign_session_id(negotiation_id: str) -> str:
 
 def _negotiation_id_from_sshsign_session_id(sshsign_session_id: str) -> str:
     """Inverse of _sshsign_session_id. sshsign's get-session returns the
-    prefixed form (e.g. 'session_neg_X'); upstream agenticpoa/negotiate
-    and our on-disk layout both key off the RAW negotiation_id
+    prefixed form (e.g. 'session_neg_X'); our on-disk layout keys off the raw negotiation_id
     ('neg_X'). Called by the joiner to recover the raw id after fetching
     a session by code. Tolerates an already-unprefixed input so it's
     safe to apply twice.
@@ -969,18 +968,7 @@ def run_mint(output_dir: str, config: dict, telegram_user_id: int | None = None)
     the sshsign session's metadata_member so the Phase 8 /bind handler can
     verify that the caller of /bind matches the session creator.
     """
-    repo = os.environ.get("NEGOTIATE_REPO_PATH", "")
     write_trace(output_dir, "mint.start", phase="mint", role=(config.get("constraints") or {}).get("role"), mode=(config.get("constraints") or {}).get("mode"))
-    if not repo:
-        sys.stderr.write("NEGOTIATE_REPO_PATH not set.\n")
-        write_trace(output_dir, "mint.failed", phase="mint", reason="missing_repo")
-        return 2
-
-    repo = Path(repo).resolve()
-    if not (repo / "create_tokens.py").exists():
-        sys.stderr.write(f"create_tokens.py not found under {repo}\n")
-        write_trace(output_dir, "mint.failed", phase="mint", reason="missing_create_tokens", repo=str(repo))
-        return 2
 
     constraints = config["constraints"]
     out = Path(output_dir)
@@ -991,53 +979,43 @@ def run_mint(output_dir: str, config: dict, telegram_user_id: int | None = None)
     shared_session = config.get("session")
     if shared_session and shared_session.get("session_id"):
         # Sshsign's get-session returns the prefixed form; strip it so
-        # upstream, create_tokens.py, and our on-disk layout all use
-        # the same raw negotiation_id as the founder's side.
+        # local token/config files use the same raw negotiation_id as the founder.
         negotiation_id = _negotiation_id_from_sshsign_session_id(
             shared_session["session_id"]
         )
     else:
         negotiation_id = f"neg_{uuid.uuid4().hex[:12]}"
-    neg_dir = repo / "negotiations" / negotiation_id
+    neg_dir = out / "negotiations" / negotiation_id
     neg_dir.mkdir(parents=True, exist_ok=True)
 
-    expires_at = datetime.now(timezone.utc) + timedelta(
+    expires_dt = datetime.now(timezone.utc) + timedelta(
         seconds=int(os.environ.get("NEGOTIATION_TTL", "3600"))
     )
-    expires_str = expires_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+    expires_str = expires_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
 
     service = build_service_name(
         str(constraints.get("company_name") or os.environ.get("COMPANY_NAME") or "Company"),
         negotiation_id,
     )
-    cmd, user_role = build_create_tokens_cmd(
-        repo=repo,
-        negotiation_id=negotiation_id,
-        constraints=constraints,
-        neg_dir=neg_dir,
-        expires_str=expires_str,
-        service=service,
-        shared_session=bool(shared_session),
-    )
-
-    result = subprocess.run(cmd, cwd=repo, capture_output=True, text=True)
-    if result.returncode != 0:
-        sys.stderr.write(f"Mint failed:\n{result.stdout}\n{result.stderr}\n")
-        write_trace(output_dir, "mint.failed", phase="mint", reason="create_tokens", returncode=result.returncode)
-        return result.returncode
-
-    mint_output = {
-        "negotiation_id": negotiation_id,
-        "founder_config_path": str(neg_dir / "founder.json"),
-        "investor_config_path": str(neg_dir / "investor.json"),
-        "founder_token_path": str(neg_dir / "tokens" / "founder.jwt"),
-        "investor_token_path": str(neg_dir / "tokens" / "investor.jwt"),
-        "expires_at": expires_str,
-        "service": service,
+    try:
+        mint_output, user_role = write_local_mint_files(
+            negotiation_id=negotiation_id,
+            constraints=constraints,
+            neg_dir=neg_dir,
+            expires_at_epoch=int(expires_dt.timestamp()),
+            expires_str=expires_str,
+            service=service,
+            shared_session=bool(shared_session),
+            sshsign_host=os.environ.get("SSHSIGN_HOST", "sshsign.dev"),
+        )
+    except Exception as exc:  # noqa: BLE001 - surface setup/signing backend errors
+        sys.stderr.write(f"Mint failed: {exc}\n")
+        write_trace(output_dir, "mint.failed", phase="mint", reason="local_mint", error=str(exc))
+        return 3
+    mint_output.update({
         "user_role": user_role,
         "mode": (constraints.get("mode") or "demo").lower(),
-        "negotiate_repo_path": str(repo),
-    }
+    })
 
     # Two-party mode: register (creator) or join (joiner) the signing
     # session with sshsign. Creator flow (no shared_session in config)
@@ -1050,7 +1028,7 @@ def run_mint(output_dir: str, config: dict, telegram_user_id: int | None = None)
                 shared_session=shared_session,
                 user_role=user_role,
                 neg_dir=neg_dir,
-                repo=repo,
+                repo=SKILL_DIR,
                 telegram_user_id=telegram_user_id,
             )
             if joined is None:
@@ -1769,7 +1747,7 @@ def _creator_await_sign_and_finalize(
     """
     # P8-3: build the both-signed gate. The creator is the one who
     # ships the finalized PDF, so they need to wait for the joiner's
-    # sig before running upstream's run_finalize. The joiner waits for
+    # sig before generating the executed file. The joiner waits for
     # complete-session (which creator calls below) in its own flow;
     # no gate needed on that side.
     def _wait_for_both_signed() -> bool:
@@ -1977,7 +1955,7 @@ def _joiner_await_sign_and_finalize(
     waits for the creator to finalize (status=completed) before running
     their own finalize — that way both sides' signatures are present.
 
-    Why wait: `run_finalize` pulls signatures from sshsign. If the
+    Why wait: finalization pulls signatures from sshsign. If the
     investor finalizes before the founder has signed, the output PDF
     only has the investor's signature. Waiting for status=completed
     signals the founder is done and we can safely reproduce the PDF.
@@ -2133,9 +2111,8 @@ def run_negotiate(output_dir: str, chat_id_flag: str | None = None) -> int:
         pass
 
     # Push an interstitial so the user knows we're alive during the slow
-    # mint step. run_mint does: generate APOA key pair → mint founder+
-    # investor tokens via create_tokens.py → register signing session via
-    # sshsign (two-party). That's several subprocess calls totaling
+    # mint step. run_mint does: mint founder/investor authorizations,
+    # create signing keys, and register the sshsign session. That's several calls totaling
     # 15-30s; without this the chat sits silent between "🚀 Starting
     # negotiation" and the authorization card.
     chat_id = resolve_chat_id(chat_id_flag)
@@ -4463,23 +4440,31 @@ def run_smoke(output_dir: str = "/tmp/safe_negotiate", session_client=None) -> i
 
 
 def run_operator_setup(
-    role: str,
+    role: str = "",
     bot_username: str = "",
     sshsign_host: str = "",
-    negotiate_repo_path: str = "",
     scan_interval: str = "",
+    user_did: str = "",
+    env_file: str = "",
     persister=None,
 ) -> int:
     """Persist operator-level skill env vars via OpenClaw config."""
     try:
+        file_updates = load_env_file(env_file) if env_file else {}
+        role = role or file_updates.get("NEGOTIATE_SAFE_BOT_ROLE", "")
+        bot_username = bot_username or file_updates.get("TELEGRAM_BOT_USERNAME", "")
+        sshsign_host = sshsign_host or file_updates.get("SSHSIGN_HOST", "")
+        scan_interval = scan_interval or file_updates.get("CLAW_NEGOTIATE_SCAN_INTERVAL", "")
+        user_did = user_did or file_updates.get("USER_DID", "")
         updates = build_operator_updates(
             role=role,
             bot_username=bot_username,
             sshsign_host=sshsign_host,
-            negotiate_repo_path=negotiate_repo_path,
             scan_interval=scan_interval,
         )
-    except ValueError as exc:
+        if user_did.strip():
+            updates["USER_DID"] = user_did.strip()
+    except (OSError, ValueError) as exc:
         sys.stderr.write(str(exc) + "\n")
         return 2
     persist_fn = persister or persist_operator_updates
@@ -4566,11 +4551,13 @@ def main() -> int:
         "operator-setup",
         help="Persist operator-level skill configuration (role, bot handle, services).",
     )
-    operator_setup.add_argument("--role", required=True, choices=["founder", "investor"])
+    operator_setup.add_argument("--env-file", default="", help="Read setup values from a KEY=VALUE file.")
+    operator_setup.add_argument("--role", default="", choices=["", "founder", "investor"])
     operator_setup.add_argument("--bot-username", default="")
     operator_setup.add_argument("--sshsign-host", default="")
-    operator_setup.add_argument("--negotiate-repo-path", default="")
+    operator_setup.add_argument("--negotiate-repo-path", default="", help=argparse.SUPPRESS)
     operator_setup.add_argument("--scan-interval", default="")
+    operator_setup.add_argument("--user-did", default="")
 
     cancel = sub.add_parser(
         "cancel",
@@ -4667,8 +4654,9 @@ def main() -> int:
             role=args.role,
             bot_username=args.bot_username,
             sshsign_host=args.sshsign_host,
-            negotiate_repo_path=args.negotiate_repo_path,
             scan_interval=args.scan_interval,
+            user_did=args.user_did,
+            env_file=args.env_file,
         )
     elif args.command == "cancel":
         return run_cancel(args.output_dir, chat_id_flag=args.chat_id or None)

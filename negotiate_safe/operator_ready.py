@@ -1,17 +1,14 @@
 """Operator install/setup helpers for negotiate_safe.
 
 These commands are for people installing the skill on their own OpenClaw
-instance. They fail before a live negotiation when required config, upstream
-APIs, or sshsign/OpenClaw primitives are missing.
+instance. They fail before a live negotiation when required config,
+sshsign, or OpenClaw primitives are missing.
 """
 from __future__ import annotations
 
-import dataclasses
-import importlib.util
 import json
 import os
 import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Mapping
@@ -59,6 +56,25 @@ def load_skill_manifest(path: str | Path = MANIFEST_PATH) -> dict:
     return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
+def load_env_file(path: str | Path) -> dict[str, str]:
+    """Parse a simple KEY=VALUE env file for operator setup."""
+    updates: dict[str, str] = {}
+    p = Path(path).expanduser()
+    for lineno, raw in enumerate(p.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            raise ValueError(f"{p}:{lineno}: expected KEY=VALUE")
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if not key:
+            raise ValueError(f"{p}:{lineno}: empty key")
+        updates[key] = value
+    return updates
+
+
 def _check_env_present(env: Mapping[str, str], key: str, fix: str = "") -> Check:
     value = (env.get(key) or "").strip()
     return Check(
@@ -81,79 +97,6 @@ def _check_role(env: Mapping[str, str]) -> Check:
             "NEGOTIATE_SAFE_BOT_ROLE founder"
         ),
     )
-
-
-def _check_upstream(repo_raw: str) -> list[Check]:
-    if not repo_raw:
-        return [Check(
-            name="NEGOTIATE_REPO_PATH",
-            ok=False,
-            detail="missing",
-            fix=(
-                f"openclaw config set {ENV_PATH_PREFIX}"
-                "NEGOTIATE_REPO_PATH /path/to/negotiate"
-            ),
-        )]
-    repo = Path(repo_raw).expanduser()
-    checks: list[Check] = []
-    checks.append(Check(
-        name="NEGOTIATE_REPO_PATH",
-        ok=repo.exists(),
-        detail=str(repo),
-        fix="Set NEGOTIATE_REPO_PATH to a checkout of agenticpoa/negotiate.",
-    ))
-    for filename in ("create_tokens.py", "negotiate.py"):
-        p = repo / filename
-        checks.append(Check(
-            name=f"upstream {filename}",
-            ok=p.exists(),
-            detail=str(p),
-            fix=f"Update NEGOTIATE_REPO_PATH; missing {filename}.",
-        ))
-    negotiate_py = repo / "negotiate.py"
-    if not negotiate_py.exists():
-        return checks
-
-    try:
-        spec = importlib.util.spec_from_file_location("negotiate_doctor", negotiate_py)
-        if spec is None or spec.loader is None:
-            raise RuntimeError("cannot build import spec")
-        module = importlib.util.module_from_spec(spec)
-        repo_str = str(repo)
-        inserted = False
-        old_module = sys.modules.get(spec.name)
-        sys.modules[spec.name] = module
-        if repo_str not in sys.path:
-            sys.path.insert(0, repo_str)
-            inserted = True
-        try:
-            spec.loader.exec_module(module)
-        finally:
-            if inserted:
-                try:
-                    sys.path.remove(repo_str)
-                except ValueError:
-                    pass
-            if old_module is None:
-                sys.modules.pop(spec.name, None)
-            else:
-                sys.modules[spec.name] = old_module
-        fields = {f.name for f in dataclasses.fields(module.NegotiationConfig)}
-        for field in ("role", "signer_role"):
-            checks.append(Check(
-                name=f"upstream NegotiationConfig.{field}",
-                ok=field in fields,
-                detail="present" if field in fields else "missing",
-                fix="Update the upstream negotiate repo.",
-            ))
-    except Exception as exc:  # noqa: BLE001 - doctor should report, not crash
-        checks.append(Check(
-            name="upstream import",
-            ok=False,
-            detail=str(exc),
-            fix="Install upstream negotiate dependencies or update NEGOTIATE_REPO_PATH.",
-        ))
-    return checks
 
 
 def _check_command(
@@ -236,13 +179,10 @@ def doctor_checks(
 ) -> list[Check]:
     e = _env(env)
     checks = [
-        _check_env_present(e, "ANTHROPIC_API_KEY"),
         _check_env_present(e, "USER_DID"),
         _check_env_present(e, "TELEGRAM_BOT_USERNAME"),
         _check_role(e),
     ]
-    checks.extend(_check_upstream((e.get("NEGOTIATE_REPO_PATH") or "").strip()))
-
     host = (e.get("SSHSIGN_HOST") or "sshsign.dev").strip()
     checks.append(_check_command(
         "sshsign get-session",
@@ -283,7 +223,6 @@ def build_operator_updates(
     role: str,
     bot_username: str = "",
     sshsign_host: str = "",
-    negotiate_repo_path: str = "",
     scan_interval: str = "",
 ) -> dict[str, str]:
     role_norm = role.strip().lower()
@@ -298,8 +237,6 @@ def build_operator_updates(
         updates["TELEGRAM_BOT_USERNAME"] = handle
     if sshsign_host:
         updates["SSHSIGN_HOST"] = sshsign_host.strip()
-    if negotiate_repo_path:
-        updates["NEGOTIATE_REPO_PATH"] = negotiate_repo_path.strip()
     if scan_interval:
         updates["CLAW_NEGOTIATE_SCAN_INTERVAL"] = scan_interval.strip()
     return updates

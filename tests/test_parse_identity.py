@@ -14,6 +14,11 @@ import pytest
 import parse_identity as pi
 
 
+@pytest.fixture(autouse=True)
+def _default_anthropic_key(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+
+
 def _mock_client(response_text: str):
     from unittest.mock import MagicMock
     c = MagicMock()
@@ -75,3 +80,22 @@ class TestExtractIdentity:
         with patch("anthropic.Anthropic", return_value=_mock_client("nope")):
             with pytest.raises(ValueError, match="non-JSON"):
                 pi.extract_identity("anything")
+
+    def test_deterministic_founder_without_anthropic_key(self, monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        r = pi.extract_identity("I'm Juan Figuera, CEO of Avocado")
+        assert r == {
+            "role": "founder",
+            "name": "Juan Figuera",
+            "title": "CEO",
+            "company": "Avocado",
+            "firm": None,
+        }
+
+    def test_deterministic_investor_without_anthropic_key(self, monkeypatch):
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        r = pi.extract_identity("I'm Nora Vassileva, partner at SD Capital")
+        assert r["role"] == "investor"
+        assert r["name"] == "Nora Vassileva"
+        assert r["title"] == "partner"
+        assert r["firm"] == "SD Capital"

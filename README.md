@@ -4,7 +4,7 @@ OpenClaw skill for demonstrating APOA-constrained AI agents through a SAFE negot
 
 For the demo, a founder and an investor each use their own OpenClaw. Each user authorizes private bounds, the two OpenClaws negotiate in a Telegram group, signing stays private in DMs, and the executed SAFE includes an sshsign audit trail.
 
-APOA is the point of the demo: the agents can negotiate creatively, but they cannot make or accept offers outside the authority their users explicitly granted.
+The agents can negotiate creatively, but APOA keeps them inside the authority their users explicitly granted.
 
 ## What This Shows
 
@@ -16,72 +16,109 @@ APOA is the point of the demo: the agents can negotiate creatively, but they can
 
 The demo is open source. You can inspect the flow, install the skill, and run your own bounded-agent negotiation.
 
-## Install
+## Prerequisites
 
-Copy the contents of `negotiate_safe/` into the OpenClaw skill directory on each OpenClaw host:
+- OpenClaw installed, paired with Telegram, and configured with a model.
+- Python 3 available as `python3`.
+- SSH access to sshsign, usually `sshsign.dev`.
 
-```text
-/root/.agents/skills/negotiate_safe/
-```
+Negotiation turns use the local OpenClaw agent and whatever model your OpenClaw is already configured to use.
 
-The deployable file list is tracked in `negotiate_safe/skill_manifest.json`.
+Telegram pairing is normal OpenClaw setup, not claw-negotiate setup. If your OpenClaw can already receive and answer Telegram DMs, this skill builds on that.
+
+## Quick Install
+
+Once the skill is published on ClawHub, install it with OpenClaw's native skill installer:
 
 ```bash
-python3 /root/.agents/skills/negotiate_safe/run_safe.py manifest
+openclaw skills install claw-negotiate
+```
+
+Or with the ClawHub CLI:
+
+```bash
+npx clawhub@latest install claw-negotiate
+```
+
+Or install directly from GitHub:
+
+```bash
+git clone https://github.com/agenticpoa/claw-negotiate.git \
+  ~/.openclaw/skills/claw-negotiate
+```
+
+Then enter the skill folder:
+
+```bash
+cd ~/.openclaw/skills/claw-negotiate
+```
+
+That's the install. The repo root is a valid OpenClaw skill root because it contains `SKILL.md`.
+
+For agent-local installs, you can use the same clone command with `~/.agents/skills/claw-negotiate` instead.
+
+If you prefer copying only the deployable runtime files into a legacy `negotiate_safe/` skill folder, use:
+
+```bash
+python3 scripts/install_skill.py
 ```
 
 This repo also includes optional Telegram typing hook support in `hooks/telegram-typing/`.
 
-## Prerequisites
+## Skill Setup
 
-- OpenClaw installed and paired with Telegram.
-- Python 3 available as `python3`.
-- SSH access to sshsign, usually `sshsign.dev`.
-- A checkout of the upstream `agenticpoa/negotiate` engine.
-- Anthropic API access for natural-language parsing.
-- OpenClaw skill env configured with:
-  - `ANTHROPIC_API_KEY`
-  - `NEGOTIATE_REPO_PATH`
-  - `USER_DID`
-  - `NEGOTIATE_SAFE_BOT_ROLE`
-  - `TELEGRAM_BOT_USERNAME`
+Run this once on each OpenClaw host after installing the skill.
 
-Negotiation turns default to the local OpenClaw agent. Set `NEGOTIATE_SAFE_TURN_BACKEND=anthropic` only if you intentionally want Anthropic to generate negotiation moves instead.
-
-## Configure
-
-Run this on each OpenClaw host after copying the skill.
-
-Founder-side OpenClaw:
+Copy the example config:
 
 ```bash
-python3 /root/.agents/skills/negotiate_safe/run_safe.py operator-setup \
+cp .env.example .env
+```
+
+Edit `.env`:
+
+```bash
+nano .env
+```
+
+Use `NEGOTIATE_SAFE_BOT_ROLE=founder` on the founder OpenClaw and `NEGOTIATE_SAFE_BOT_ROLE=investor` on the investor OpenClaw.
+
+Then apply the config and run doctor:
+
+```bash
+python3 negotiate_safe/run_safe.py operator-setup --env-file .env
+python3 scripts/smoke_install.py --skill-dir .
+python3 negotiate_safe/run_safe.py doctor
+```
+
+You can also pass values directly:
+
+```bash
+python3 negotiate_safe/run_safe.py operator-setup \
   --role founder \
   --bot-username @YourFounderBot \
-  --sshsign-host sshsign.dev \
-  --negotiate-repo-path /path/to/negotiate \
-  --scan-interval 5s
+  --user-did did:example:you \
+  --sshsign-host sshsign.dev
 ```
 
-Investor-side OpenClaw:
+`smoke_install.py` checks `negotiate_safe/skill_manifest.json` and local files. `doctor` checks required env, sshsign reachability, OpenClaw message/cron primitives, and workflow leases.
 
-```bash
-python3 /root/.agents/skills/negotiate_safe/run_safe.py operator-setup \
-  --role investor \
-  --bot-username @YourInvestorBot \
-  --sshsign-host sshsign.dev \
-  --negotiate-repo-path /path/to/negotiate \
-  --scan-interval 5s
-```
+## What Setup Configures
 
-Then run:
+`operator-setup` persists only claw-negotiate-specific OpenClaw skill config:
 
-```bash
-python3 scripts/smoke_install.py --skill-dir /root/.agents/skills/negotiate_safe
-python3 /root/.agents/skills/negotiate_safe/run_safe.py doctor
-```
+- `NEGOTIATE_SAFE_BOT_ROLE`
+- `TELEGRAM_BOT_USERNAME`
+- `SSHSIGN_HOST`
+- `CLAW_NEGOTIATE_SCAN_INTERVAL`
 
-`smoke_install.py` checks the manifest and local files. `doctor` checks required env, upstream compatibility, sshsign reachability, OpenClaw message/cron primitives, and workflow leases.
+It does not pair Telegram or change your OpenClaw model. Those remain normal OpenClaw operator choices.
+
+You also need these values available in OpenClaw skill env before `doctor` will pass:
+
+- `USER_DID`
+- `NEGOTIATE_SAFE_BOT_ROLE`
+- `TELEGRAM_BOT_USERNAME`
 
 ## Try It
 
@@ -142,7 +179,7 @@ Run the full suite:
 ```bash
 python3 -m venv .venv
 .venv/bin/python -m pip install -r requirements-dev.txt
-NEGOTIATE_REPO_PATH=/path/to/negotiate .venv/bin/python -m pytest -q --tb=line
+.venv/bin/python -m pytest -q --tb=line
 ```
 
 The integration tests are disabled by default. Set `RUN_INTEGRATION=1` when the required live dependencies are available.

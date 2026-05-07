@@ -67,6 +67,7 @@ def test_public_markdown_allowlist():
     )
     assert markdown_files == [
         "README.md",
+        "SKILL.md",
         "hooks/telegram-typing/HOOK.md",
         "negotiate_safe/SKILL.md",
     ]
