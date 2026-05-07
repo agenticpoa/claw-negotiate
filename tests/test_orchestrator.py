@@ -451,8 +451,7 @@ def test_reconcile_founder_finalizes_after_both_signatures(tmp_path, monkeypatch
     client = _client()
     sender = MagicMock()
     state = _state(tmp_path, "founder")
-    mint = json.loads((Path(state["output_dir"]) / "mint.json").read_text())
-    pending_dir = Path(mint["founder_config_path"]).parent / "output"
+    pending_dir = Path(state["output_dir"])
     (pending_dir / "neg_1_founder_pending.txt").write_text("pnd_founder")
     history = [
         {"round": 0, "from": "founder", "type": "offer", "metadata": "{}"},
@@ -497,8 +496,7 @@ def test_reconcile_does_not_finalize_with_only_founder_signature(tmp_path, monke
     client = _client()
     sender = MagicMock()
     state = _state(tmp_path, "founder")
-    mint = json.loads((Path(state["output_dir"]) / "mint.json").read_text())
-    pending_dir = Path(mint["founder_config_path"]).parent / "output"
+    pending_dir = Path(state["output_dir"])
     (pending_dir / "neg_1_founder_pending.txt").write_text("pnd_founder")
     history = [
         {"round": 0, "from": "founder", "type": "offer", "metadata": "{}"},
@@ -534,8 +532,7 @@ def test_reconcile_stops_finalization_when_finalize_lease_is_stale(tmp_path, mon
     client.check_lease.side_effect = LeaseExpiredError("lease_expired")
     sender = MagicMock()
     state = _state(tmp_path, "founder")
-    mint = json.loads((Path(state["output_dir"]) / "mint.json").read_text())
-    pending_dir = Path(mint["founder_config_path"]).parent / "output"
+    pending_dir = Path(state["output_dir"])
     (pending_dir / "neg_1_founder_pending.txt").write_text("pnd_founder")
     history = [
         {"round": 0, "from": "founder", "type": "offer", "metadata": "{}"},
@@ -571,8 +568,7 @@ def test_reconcile_maps_unknown_second_signer_to_counterparty(tmp_path, monkeypa
     client = _client()
     sender = MagicMock()
     state = _state(tmp_path, "founder")
-    mint = json.loads((Path(state["output_dir"]) / "mint.json").read_text())
-    pending_dir = Path(mint["founder_config_path"]).parent / "output"
+    pending_dir = Path(state["output_dir"])
     (pending_dir / "neg_1_founder_pending.txt").write_text("pnd_founder")
     history = [
         {"round": 0, "from": "founder", "type": "offer", "metadata": "{}"},

@@ -253,8 +253,7 @@ def _pending_path(output_dir: Path, negotiation_id: str, role: str) -> Path:
 
 
 def _negotiation_output_dir(mint: dict, fallback: Path) -> Path:
-    anchor = mint.get("founder_config_path") or mint.get("investor_config_path") or ""
-    return Path(anchor).parent / "output" if anchor else fallback
+    return fallback
 
 
 def _role_for_key_id(mint: dict, key_id: str) -> str:
