@@ -32,7 +32,7 @@ class SigningUrlTargetError(ValueError):
     """Raised when send_signing_url_to_dm is called with a non-DM target.
 
     A signing URL is a bearer handle: anyone with the link can walk through
-    the browser approval flow for that user. It MUST only be delivered to
+    the browser approval flow for that user. It is delivered to
     the signer's private DM. A group chat_id in Telegram is negative; a DM
     chat_id equals the recipient's numeric user_id and is positive. The
     primitive enforces this at the call boundary — runtime proof that no
@@ -371,7 +371,7 @@ def send_signing_url_to_dm(
 ) -> SendResult:
     """Send a signing URL message to a user's DM.
 
-    This is the ONLY supported code path for delivering a sshsign.dev
+    This is the supported code path for delivering a sshsign.dev
     approval link. The parameter name is `dm_chat_id` — not a generic
     `target` or `chat_id` — because the API contract is "send to this
     user's private DM, never to a group". The runtime check asserts

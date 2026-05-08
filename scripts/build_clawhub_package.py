@@ -48,7 +48,7 @@ Run the matching command with `{baseDir}`:
 - profile update or first-run identity setup: write the message to `/tmp/safe_identity.txt`, then run `python3 {baseDir}/negotiate_safe/run_safe.py setup --message-file /tmp/safe_identity.txt`
 - new negotiation request or correction: write the message to `/tmp/safe_request.txt`, then run `python3 {baseDir}/negotiate_safe/run_safe.py prepare --message-file /tmp/safe_request.txt --output-dir /tmp/safe_negotiate`
 
-For `negotiate`, use a long timeout. The runtime posts Telegram cards, signing links, status updates, and the executed PDF itself, so no additional user-facing summary is needed after the command starts.
+For `negotiate`, use a long timeout. The runtime posts Telegram cards, signing links, status updates, and the executed PDF itself, so let the runtime handle follow-up Telegram updates after the command starts.
 
 Operational notes:
 - User bounds are stored in the per-negotiation APOA authorization and enforced by the runtime before offers are displayed.

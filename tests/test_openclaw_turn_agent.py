@@ -25,8 +25,8 @@ def test_build_turn_prompt_frames_local_openclaw_agent():
     assert "$250,000 to $750,000" in prompt
     assert "Every move should have commercial substance" in prompt
     assert '"investment_amount": <integer dollars or null>' in prompt
-    assert "Do not force extra rounds just for show" in prompt
-    assert "Return ONLY a JSON object" in prompt
+    assert "Avoid unnecessary extra rounds" in prompt
+    assert "Respond with a JSON object" in prompt
 
 
 def test_parse_offer_text_strips_fences():

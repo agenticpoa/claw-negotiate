@@ -802,9 +802,9 @@ def run_prepare(
     if chat_id:
         sender(chat_id, message="\u23f3 Reading your negotiation terms\u2026")  # ⏳
 
-    # Keep the typing indicator alive during the Anthropic call and the rest
-    # of prepare. Stopped in `finally` so the confirm card isn't competing
-    # with a lingering "typing" status.
+    # Keep the typing indicator alive during parsing and the rest of prepare.
+    # Stopped in `finally` so the confirm card isn't competing with a
+    # lingering "typing" status.
     typing = TypingLoop(chat_id=chat_id or "", bot_token=get_bot_token())
     typing.start()
 

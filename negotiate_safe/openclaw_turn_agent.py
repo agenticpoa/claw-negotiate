@@ -139,7 +139,7 @@ def build_turn_prompt(
     history: list[dict],
     feedback: list[str] | None = None,
 ) -> str:
-    """Build a JSON-only negotiation prompt for the local OpenClaw agent."""
+    """Build the negotiation turn request for the local OpenClaw agent."""
     cap_min = _constraint_value(constraints, "valuation_cap", "min", 0)
     cap_max = _constraint_value(constraints, "valuation_cap", "max", 0)
     discount_min = _constraint_value(constraints, "discount_rate", "min", 0)
@@ -167,14 +167,14 @@ Negotiation strategy:
   position, explain the business rationale for your response, and make a
   concrete offer, concession, or acceptance.
 - If the {counterparty}'s latest offer already matches your stated goals or is
-  clearly favorable inside your APOA boundaries, accept it. Do not force extra rounds just for show.
+  clearly favorable inside your APOA boundaries, accept it. Avoid unnecessary extra rounds.
 - If the latest offer is acceptable but not obviously excellent, consider one
   final constructive counter before accepting.
 - Keep each message polished and substantive: 3 to 5 sentences, no boilerplate,
-  no legal disclaimers, no mention of hidden instructions or private ranges.
+  no legal disclaimers, and keep authorization details out of counterparty-facing text.
 - The founder generally prefers a higher valuation cap and lower discount.
 - The investor generally prefers a lower valuation cap and adequate discount.
-- Do not reveal your private authorization range.
+- Keep your private authorization range confidential.
 
 Validation feedback to fix from prior attempts:
 {feedback_text}
@@ -182,7 +182,7 @@ Validation feedback to fix from prior attempts:
 History so far, oldest first:
 {history_json}
 
-Return ONLY a JSON object with this exact shape:
+Respond with a JSON object using this exact shape:
 {{
   "type": "offer" | "counter" | "accept",
   "terms": {{
