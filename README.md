@@ -190,3 +190,21 @@ python3 -m venv .venv
 ```
 
 The integration tests are disabled by default. Set `RUN_INTEGRATION=1` when the required live dependencies are available.
+
+## Credits
+
+- SAFE template based on [Y Combinator's standard post-money SAFE](https://www.ycombinator.com/documents)
+- Inspired by Praful Mathur's [SAFE-CLI-Signer](https://github.com/praful-mathur/SAFE-CLI-Signer)
+- Protocol based on Rubinstein (1982) and Fatima, Kraus, Wooldridge (2014)
+
+## Related
+
+- [APOA](https://github.com/agenticpoa) - Agentic Power of Attorney spec + SDKs
+- [sshsign](https://github.com/agenticpoa/sshsign) - SSH signing infrastructure
+- [agenticpoa/negotiate](https://github.com/agenticpoa/negotiate) - standalone SAFE negotiation engine
+- [Project Deal](https://www.anthropic.com/features/project-deal) - Anthropic's negotiation benchmark
+- [The Art of the Automated Negotiation](https://hai.stanford.edu/news/the-art-of-the-automated-negotiation) - Stanford HAI study on AI negotiation
+
+## License
+
+MIT
