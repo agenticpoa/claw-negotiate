@@ -39,7 +39,6 @@ def test_parse_offer_text_strips_fences():
 
 
 def test_default_openclaw_backend_parses_agent_json(monkeypatch):
-    monkeypatch.delenv("NEGOTIATE_SAFE_TURN_BACKEND", raising=False)
     offer_text = json.dumps({
         "type": "counter",
         "terms": {

@@ -206,33 +206,13 @@ class OpenClawTurnAgent:
     model: str = ""
 
     async def make_offer(self, history: list[dict], feedback: list[str] | None = None) -> dict:
-        backend = (self.backend or os.environ.get("NEGOTIATE_SAFE_TURN_BACKEND") or "openclaw").lower()
         prompt = build_turn_prompt(
             role=self.role,
             constraints=self.constraints,
             history=history,
             feedback=feedback,
         )
-        if backend in ("openclaw", "openclaw-agent", "agent"):
-            return await self._make_offer_openclaw(prompt)
-        return await self._make_offer_anthropic(prompt)
-
-    async def _make_offer_anthropic(self, prompt: str) -> dict:
-        try:
-            from anthropic import AsyncAnthropic
-        except ImportError as e:
-            raise RuntimeError("anthropic SDK not installed for turn generation") from e
-        client = AsyncAnthropic()
-        response = await client.messages.create(
-            model=self.model or os.environ.get("NEGOTIATE_SAFE_TURN_MODEL", "claude-sonnet-4-6"),
-            max_tokens=1024,
-            system=(
-                "You are a deal-negotiation subagent inside an OpenClaw skill. "
-                "Return only valid JSON. Never use tools. Never include prose outside JSON."
-            ),
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return parse_offer_text(response.content[0].text)
+        return await self._make_offer_openclaw(prompt)
 
     async def _make_offer_openclaw(self, prompt: str) -> dict:
         session_id = f"negotiate-turn-{self.role}-{uuid.uuid4().hex[:8]}"

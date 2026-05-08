@@ -1,88 +1,34 @@
-"""Tests for parse_identity.
-
-Covers the defensive normalization (role always valid; all fields present).
-The Anthropic call is mocked.
-"""
+"""Tests for parse_identity."""
 from __future__ import annotations
-
-import json
-from types import SimpleNamespace
-from unittest.mock import patch
-
-import pytest
 
 import parse_identity as pi
 
 
-@pytest.fixture(autouse=True)
-def _default_anthropic_key(monkeypatch):
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-
-
-def _mock_client(response_text: str):
-    from unittest.mock import MagicMock
-    c = MagicMock()
-    c.messages.create.return_value = SimpleNamespace(
-        content=[SimpleNamespace(text=response_text)]
-    )
-    return c
-
-
 class TestExtractIdentity:
     def test_founder_happy_path(self):
-        body = json.dumps({
-            "role": "founder", "name": "Juan", "title": "CEO",
-            "company": "APOA", "firm": None,
-        })
-        with patch("anthropic.Anthropic", return_value=_mock_client(body)):
-            r = pi.extract_identity("I'm Juan, CEO of APOA")
+        r = pi.extract_identity("I'm Juan, CEO of APOA")
         assert r == {"role": "founder", "name": "Juan", "title": "CEO",
                      "company": "APOA", "firm": None}
 
     def test_investor_happy_path(self):
-        body = json.dumps({
-            "role": "investor", "name": "Mark", "title": "Partner",
-            "company": None, "firm": "Blue Fund",
-        })
-        with patch("anthropic.Anthropic", return_value=_mock_client(body)):
-            r = pi.extract_identity("Mark, partner at Blue Fund")
+        r = pi.extract_identity("Mark, partner at Blue Fund")
         assert r["role"] == "investor"
         assert r["firm"] == "Blue Fund"
 
     def test_missing_role_defaults_to_founder(self):
-        body = json.dumps({"name": "Juan", "title": None, "company": "APOA", "firm": None})
-        with patch("anthropic.Anthropic", return_value=_mock_client(body)):
-            r = pi.extract_identity("anything")
+        r = pi._normalize_identity({"name": "Juan", "title": None, "company": "APOA", "firm": None})
         assert r["role"] == "founder"
 
     def test_unknown_role_coerces_to_founder(self):
-        body = json.dumps({"role": "observer", "name": "X"})
-        with patch("anthropic.Anthropic", return_value=_mock_client(body)):
-            r = pi.extract_identity("anything")
+        r = pi._normalize_identity({"role": "observer", "name": "X"})
         assert r["role"] == "founder"
 
     def test_fills_missing_fields_with_none(self):
-        body = json.dumps({"role": "founder", "name": "X"})
-        with patch("anthropic.Anthropic", return_value=_mock_client(body)):
-            r = pi.extract_identity("anything")
+        r = pi._normalize_identity({"role": "founder", "name": "X"})
         for f in ("name", "title", "company", "firm"):
             assert f in r
 
-    def test_strips_code_fences(self):
-        body = json.dumps({"role": "founder", "name": "X", "title": None,
-                           "company": None, "firm": None})
-        fenced = f"```json\n{body}\n```"
-        with patch("anthropic.Anthropic", return_value=_mock_client(fenced)):
-            r = pi.extract_identity("anything")
-        assert r["name"] == "X"
-
-    def test_invalid_json_raises(self):
-        with patch("anthropic.Anthropic", return_value=_mock_client("nope")):
-            with pytest.raises(ValueError, match="non-JSON"):
-                pi.extract_identity("anything")
-
-    def test_deterministic_founder_without_anthropic_key(self, monkeypatch):
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    def test_deterministic_founder(self):
         r = pi.extract_identity("I'm Juan Figuera, CEO of Avocado")
         assert r == {
             "role": "founder",
@@ -92,8 +38,7 @@ class TestExtractIdentity:
             "firm": None,
         }
 
-    def test_deterministic_investor_without_anthropic_key(self, monkeypatch):
-        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    def test_deterministic_investor(self):
         r = pi.extract_identity("I'm Nora Vassileva, partner at SD Capital")
         assert r["role"] == "investor"
         assert r["name"] == "Nora Vassileva"
