@@ -32,6 +32,10 @@ Negotiation turns use the local OpenClaw agent and whatever model your OpenClaw 
 
 Telegram pairing is normal OpenClaw setup, not claw-negotiate setup. If your OpenClaw can already receive and answer Telegram DMs, this skill builds on that.
 
+## Security Note
+
+ClawHub may warn that this skill uses dynamic execution or external access. That is expected for this workflow: claw-negotiate shells out to `python3`, `openclaw`, and `ssh`; calls sshsign for audit/signing; and uses the Telegram bot token already configured in OpenClaw to send cards, signing links, and the executed SAFE. It does not install a daemon, mutate your OpenClaw model, or pair Telegram for you.
+
 ## Quick Install
 
 Once the skill is published on ClawHub, install it with OpenClaw's native skill installer:
@@ -190,6 +194,14 @@ python3 -m venv .venv
 ```
 
 The integration tests are disabled by default. Set `RUN_INTEGRATION=1` when the required live dependencies are available.
+
+Build the lean ClawHub package:
+
+```bash
+python3 scripts/build_clawhub_package.py
+```
+
+The package is written to `dist/claw-negotiate-clawhub/` and excludes tests, optional hooks, docs, and media assets from the registry bundle.
 
 ## Credits
 
