@@ -42,17 +42,18 @@ Use this skill for SAFE negotiation requests, exact `GO` confirmations after a r
 Run the matching command with `{baseDir}`:
 
 - `/bind ...`: `python3 {baseDir}/negotiate_safe/run_safe.py bind --message "<message text>" --chat-id <chat.id> --from-id <from.id>`
-- `/cancel`, `cancel`, `stop`, or `abort`: `python3 {baseDir}/negotiate_safe/run_safe.py cancel --output-dir /tmp/safe_negotiate --chat-id <chat.id>`
-- exact `GO`: `python3 {baseDir}/negotiate_safe/run_safe.py negotiate --output-dir /tmp/safe_negotiate --chat-id <chat.id>`
+- `/cancel`, `cancel`, `stop`, or `abort`: `python3 {baseDir}/negotiate_safe/run_safe.py cancel --output-dir /tmp/claw-negotiate/<chat.id> --chat-id <chat.id>`
+- exact `GO`: `python3 {baseDir}/negotiate_safe/run_safe.py negotiate --output-dir /tmp/claw-negotiate/<chat.id> --chat-id <chat.id>`
 - profile lookup: `python3 {baseDir}/negotiate_safe/run_safe.py profile`
-- profile update or first-run identity setup: write the message to `/tmp/safe_identity.txt`, then run `python3 {baseDir}/negotiate_safe/run_safe.py setup --message-file /tmp/safe_identity.txt`
-- new negotiation request or correction: write the message to `/tmp/safe_request.txt`, then run `python3 {baseDir}/negotiate_safe/run_safe.py prepare --message-file /tmp/safe_request.txt --output-dir /tmp/safe_negotiate`
+- profile update or first-run identity setup: write the message to `/tmp/claw-negotiate/<chat.id>/identity.txt`, then run `python3 {baseDir}/negotiate_safe/run_safe.py setup --message-file /tmp/claw-negotiate/<chat.id>/identity.txt`
+- new negotiation request or correction: write the message to `/tmp/claw-negotiate/<chat.id>/request.txt`, then run `python3 {baseDir}/negotiate_safe/run_safe.py prepare --message-file /tmp/claw-negotiate/<chat.id>/request.txt --output-dir /tmp/claw-negotiate/<chat.id>`
 
 For `negotiate`, use a long timeout. The runtime posts Telegram cards, signing links, status updates, and the executed PDF itself, so let the runtime handle follow-up Telegram updates after the command starts.
 
 Operational notes:
+- Use a separate private work directory for each chat, such as `/tmp/claw-negotiate/<chat.id>`, with permissions limited to the local OpenClaw user.
 - User bounds are stored in the per-negotiation APOA authorization and enforced by the runtime before offers are displayed.
-- Signing links are private DM-only.
+- Signing links are private DM-only. The agent can request signing, but the SAFE is not executed unless each human signer personally approves in sshsign.
 - If the user changes bounds, cancel and start a new negotiation.
 - Run `python3 {baseDir}/negotiate_safe/run_safe.py doctor` to check host setup.
 """

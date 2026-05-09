@@ -36,6 +36,8 @@ Telegram pairing is normal OpenClaw setup, not claw-negotiate setup. If your Ope
 
 ClawHub may warn that this skill uses dynamic execution or external access. That is expected for this workflow: claw-negotiate shells out to `python3`, `openclaw`, and `ssh`; calls sshsign for audit/signing; and uses the Telegram bot token already configured in OpenClaw to send cards, signing links, and the executed SAFE. It does not install a daemon, mutate your OpenClaw model, or pair Telegram for you.
 
+For public or production testing, use dedicated Telegram bots and dedicated sshsign keys for this workflow. Signing is fail-closed: the agents can negotiate and request signature, but the SAFE is not executed unless each human signer opens their private sshsign link and approves. Runtime instructions should use a private per-chat working directory rather than a shared temp folder, so one negotiation cannot reuse another chat's local state.
+
 ## Quick Install
 
 Once the skill is published on ClawHub, install it with OpenClaw's native skill installer:
