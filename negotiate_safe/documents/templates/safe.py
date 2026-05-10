@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import base64
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -12,15 +10,6 @@ from fpdf import FPDF
 from .base import DocumentTemplate
 
 FONT_DIR = Path(__file__).parent.parent / "fonts"
-FONT_TEXT_DIR = Path(__file__).parent.parent / "fonts_text"
-MATERIALIZED_FONT_DIR = Path(tempfile.gettempdir()) / "claw_negotiate_inter_fonts"
-FONT_FILES = (
-    "Inter-Regular.ttf",
-    "Inter-Bold.ttf",
-    "Inter-Italic.ttf",
-    "Inter-Light.ttf",
-    "Inter-Medium.ttf",
-)
 
 # Color palette
 TEAL = (0, 150, 143)       # Primary accent
@@ -33,20 +22,7 @@ TABLE_BG = (248, 248, 250)  # Subtle alternating row background
 
 
 def _font_dir() -> Path:
-    if (FONT_DIR / "Inter-Regular.ttf").exists():
-        return FONT_DIR
-    if not (FONT_TEXT_DIR / "Inter-Regular.ttf.txt").exists():
-        return FONT_DIR
-
-    MATERIALIZED_FONT_DIR.mkdir(parents=True, exist_ok=True)
-    for name in FONT_FILES:
-        target = MATERIALIZED_FONT_DIR / name
-        if target.exists():
-            continue
-        source = FONT_TEXT_DIR / f"{name}.txt"
-        if source.exists():
-            target.write_bytes(base64.b64decode(source.read_text(encoding="ascii")))
-    return MATERIALIZED_FONT_DIR
+    return FONT_DIR
 
 
 def _setup_fonts(pdf: FPDF) -> None:

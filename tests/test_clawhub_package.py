@@ -23,7 +23,7 @@ def test_build_clawhub_package_is_lean(tmp_path):
     assert (out / "requirements.txt").exists()
     assert (out / "negotiate_safe" / "run_safe.py").exists()
     assert not (out / "negotiate_safe" / "SKILL.md").exists()
-    assert (out / "negotiate_safe" / "documents" / "fonts_text" / "Inter-Regular.ttf.txt").exists()
+    assert not (out / "negotiate_safe" / "documents" / "fonts_text").exists()
     skill_text = (out / "SKILL.md").read_text()
     assert "NO_REPLY" not in skill_text
     assert "THIS IS ALWAYS" not in skill_text

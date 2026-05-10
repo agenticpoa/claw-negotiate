@@ -39,8 +39,8 @@ def test_manifest_includes_pdf_template_assets():
     listed = set(data["files"])
     assert "documents/templates/safe.py" in listed
     assert "documents/templates/base.py" in listed
-    assert "documents/fonts_text/Inter-Regular.ttf.txt" in listed
-    assert "documents/fonts_text/Inter-Bold.ttf.txt" in listed
+    assert "documents/fonts_text/Inter-Regular.ttf.txt" not in listed
+    assert "documents/fonts_text/Inter-Bold.ttf.txt" not in listed
 
 
 def test_manifest_requirements_match_skill_frontmatter():
