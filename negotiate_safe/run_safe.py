@@ -4580,6 +4580,11 @@ def main() -> int:
         help="The full /bind message body; the code is extracted from it.",
     )
     bind.add_argument(
+        "--message-file",
+        default="",
+        help="Path to file containing the /bind message body.",
+    )
+    bind.add_argument(
         "--session-code",
         default="",
         help="Explicit INV-XXXXX (overrides --message parsing).",
@@ -4661,13 +4666,16 @@ def main() -> int:
     elif args.command == "cancel":
         return run_cancel(args.output_dir, chat_id_flag=args.chat_id or None)
     elif args.command == "bind":
-        if _telegram_startgroup_payload(args.message):
+        message = args.message
+        if not message and args.message_file:
+            message = Path(args.message_file).read_text().strip()
+        if _telegram_startgroup_payload(message):
             return 0
         code = (args.session_code or "").strip().upper()
         if not code:
-            code = _extract_bind_code(args.message) or ""
+            code = _extract_bind_code(message) or ""
         if not code:
-            sys.stderr.write("bind: no INV-XXXXX code found in --session-code or --message.\n")
+            sys.stderr.write("bind: no INV-XXXXX code found in --session-code, --message, or --message-file.\n")
             return 2
         # OC's Telegram envelope encodes ids as `telegram:<numeric>`;
         # tolerate that prefix plus any leading/trailing whitespace.

@@ -41,7 +41,7 @@ Use this skill for SAFE negotiation requests, exact `GO` confirmations after a r
 
 Run the matching command with `{baseDir}`:
 
-- `/bind ...`: `python3 {baseDir}/negotiate_safe/run_safe.py bind --message "<message text>" --chat-id <chat.id> --from-id <from.id>`
+- `/bind ...`: write the full message to `/tmp/claw-negotiate/<chat.id>/bind.txt`, then run `python3 {baseDir}/negotiate_safe/run_safe.py bind --message-file /tmp/claw-negotiate/<chat.id>/bind.txt --chat-id <chat.id> --from-id <from.id>`
 - `/cancel`, `cancel`, `stop`, or `abort`: `python3 {baseDir}/negotiate_safe/run_safe.py cancel --output-dir /tmp/claw-negotiate/<chat.id> --chat-id <chat.id>`
 - exact `GO`: `python3 {baseDir}/negotiate_safe/run_safe.py negotiate --output-dir /tmp/claw-negotiate/<chat.id> --chat-id <chat.id>`
 - profile lookup: `python3 {baseDir}/negotiate_safe/run_safe.py profile`

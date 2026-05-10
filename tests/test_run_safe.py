@@ -4206,6 +4206,20 @@ class TestRunStatusAndSmoke:
         assert kwargs["from_user_id"] == 6413315062
         assert kwargs["dm_chat_id_flag"] == "6413315062"
 
+    def test_cli_dispatches_bind_from_message_file(self, tmp_path, monkeypatch):
+        msg = tmp_path / "bind.txt"
+        msg.write_text("/bind INV-FILE1")
+        monkeypatch.setattr(sys, "argv", [
+            "run_safe.py", "bind",
+            "--message-file", str(msg),
+            "--chat-id", "-1001234",
+            "--from-id", "111",
+        ])
+        with patch.object(rs, "run_bind", return_value=0) as mock_bind:
+            rc = rs.main()
+        assert rc == 0
+        assert mock_bind.call_args.kwargs["session_code"] == "INV-FILE1"
+
     def test_cli_rejects_bind_with_no_code(self, tmp_path, monkeypatch, capsys):
         monkeypatch.setattr(sys, "argv", [
             "run_safe.py", "bind",
