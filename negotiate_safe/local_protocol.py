@@ -57,6 +57,25 @@ def create_local_token(*, payload: dict[str, Any], secret: str) -> str:
     return f"{head}.{body}.{_b64url(sig)}"
 
 
+def _constraints_from_payload(payload: dict[str, Any]) -> dict:
+    definition = payload.get("definition")
+    if isinstance(definition, dict):
+        services = definition.get("services")
+        if isinstance(services, list):
+            for service in services:
+                if not isinstance(service, dict):
+                    continue
+                constraints = service.get("constraints") or {}
+                if isinstance(constraints, dict):
+                    return constraints
+                raise ValueError("invalid apoa token constraints")
+
+    constraints = payload.get("constraints") or {}
+    if not isinstance(constraints, dict):
+        raise ValueError("invalid apoa token constraints")
+    return constraints
+
+
 def load_apoa_token(token_path: str | Path, pubkey_path: str | Path = "") -> tuple[str, dict]:
     token = Path(token_path).read_text(encoding="utf-8").strip()
     parts = token.split(".")
@@ -81,10 +100,7 @@ def load_apoa_token(token_path: str | Path, pubkey_path: str | Path = "") -> tup
     exp = payload.get("exp")
     if exp is not None and time.time() >= float(exp):
         raise ValueError("invalid apoa token: expired")
-    constraints = payload.get("constraints") or {}
-    if not isinstance(constraints, dict):
-        raise ValueError("invalid apoa token constraints")
-    return token, constraints
+    return token, _constraints_from_payload(payload)
 
 
 @dataclass

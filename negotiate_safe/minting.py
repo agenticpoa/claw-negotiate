@@ -1,6 +1,8 @@
 """Deterministic planning helpers for APOA token minting."""
 from __future__ import annotations
 
+import datetime as dt
+import time
 import os
 from dataclasses import dataclass
 import json
@@ -274,14 +276,32 @@ def write_local_mint_files(
     principal_id = environ.get("USER_DID") or "did:apoa:default"
 
     def _payload(role: str, constraints_payload: dict) -> dict:
+        agent_id = f"did:apoa:{role}-agent"
+        expires_iso = dt.datetime.fromtimestamp(expires_at_epoch, tz=dt.UTC).isoformat().replace("+00:00", "Z")
         return {
             "iss": principal_id,
-            "sub": f"did:apoa:{role}-agent",
-            "aud": service,
-            "role": role,
-            "scope": ["offer:submit", "offer:accept", "document:sign"],
-            "constraints": constraints_payload,
+            "sub": agent_id,
+            "aud": [service],
+            "iat": int(time.time()),
             "exp": expires_at_epoch,
+            "jti": f"apoa-local-{secrets.token_urlsafe(16)}",
+            "definition": {
+                "principal": {"id": principal_id},
+                "agent": {"id": agent_id, "name": f"{role.title()} SAFE Agent"},
+                "services": [{
+                    "service": service,
+                    "scopes": ["offer:submit", "offer:accept", "document:sign"],
+                    "constraints": constraints_payload,
+                    "accessMode": "api",
+                }],
+                "expires": expires_iso,
+                "metadata": {
+                    "apoaVersion": "0.2",
+                    "role": role,
+                    "negotiationId": negotiation_id,
+                    "localProfile": "claw-negotiate",
+                },
+            },
         }
 
     (tokens_dir / "founder.jwt").write_text(

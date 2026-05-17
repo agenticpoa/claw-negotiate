@@ -1,3 +1,7 @@
+import json
+from types import SimpleNamespace
+
+from local_protocol import _unb64url, create_local_token, load_apoa_token
 from negotiate_safe.minting import (
     build_service_name,
     normalize_user_role,
@@ -5,6 +9,7 @@ from negotiate_safe.minting import (
     resolve_investment_amount_bounds,
     resolve_mint_identity,
     role_plan,
+    write_local_mint_files,
 )
 
 
@@ -118,3 +123,52 @@ def test_resolve_investment_amount_bounds_uses_check_range():
             investment_amount_max=750_000.0,
         )
     ) == (250_000.0, 750_000.0)
+
+
+def test_write_local_mint_files_uses_nested_apoa_definition(tmp_path):
+    def runner(*_args, **_kwargs):
+        return SimpleNamespace(returncode=0, stdout=json.dumps({"key_id": "signing-key"}), stderr="")
+
+    write_local_mint_files(
+        negotiation_id="neg_test",
+        constraints=_constraints(investment_amount=500_000),
+        neg_dir=tmp_path,
+        expires_at_epoch=1_800_000_000,
+        expires_str="2027-01-15",
+        service="safe:acme:neg_test",
+        env={"USER_DID": "did:apoa:founder"},
+        runner=runner,
+    )
+
+    token_path = tmp_path / "tokens" / "founder.jwt"
+    _token, constraints = load_apoa_token(token_path, tmp_path / "keys" / "founder_public.pem")
+    payload = json.loads(_unb64url(token_path.read_text().split(".")[1]).decode("utf-8"))
+
+    assert payload["aud"] == ["safe:acme:neg_test"]
+    assert "constraints" not in payload
+    assert payload["definition"]["principal"]["id"] == "did:apoa:founder"
+    assert payload["definition"]["services"][0]["scopes"] == [
+        "offer:submit",
+        "offer:accept",
+        "document:sign",
+    ]
+    assert payload["definition"]["services"][0]["constraints"] == constraints
+    assert constraints["valuation_cap_min"] == 10_000_000
+
+
+def test_load_apoa_token_accepts_legacy_flat_constraints(tmp_path):
+    secret = "test-secret"
+    token_path = tmp_path / "legacy.jwt"
+    key_path = tmp_path / "legacy.pem"
+    key_path.write_text(secret, encoding="utf-8")
+    token_path.write_text(
+        create_local_token(
+            payload={"constraints": {"valuation_cap": {"min": 1, "max": 2}}},
+            secret=secret,
+        ),
+        encoding="utf-8",
+    )
+
+    _token, constraints = load_apoa_token(token_path, key_path)
+
+    assert constraints == {"valuation_cap": {"min": 1, "max": 2}}
